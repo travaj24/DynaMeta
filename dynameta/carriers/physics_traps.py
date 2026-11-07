@@ -72,7 +72,8 @@ FORMULATION (all SI; energies are measured from the intrinsic level E_i, + towar
    USE: quasi-static for DC, I-V, lifetimes, compensation and the LF C-V; kinetic for any transient, ssac or
    (from v0.15 K3) noise analysis of CHARGED levels -- a quasi-static charged trap in an 'ac' / 'noise' /
    'transient_dc' solve raises an AdvisoryWarning (quasi_static_charged_traps). Kinetic levels need a seed
-   (seed_kinetic_traps, after the carriers are seeded; the builders do it) and refuse fermi_dirac statistics;
+   (seed_kinetic_traps, after the carriers are seeded; the builders do it); under statistics=
+   "fermi_dirac" they take the exact FD emission densities (srh_capture_exprs fd=True; v0.15 integration);
    kinetic interface bins cost (bins) x (region nodes) unknowns, budgeted (KINETIC_UNKNOWN_BUDGET).
 
 DEVSIM REALIZATION. The sheet terms are applied on the SEMICONDUCTOR side of the interface as node
@@ -107,6 +108,12 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
     substitution through srh_reference_densities, so a level's E_t is measured from the NARROWED
     effective intrinsic level; with an asymmetric band-edge split (conduction_fraction != 1/2) that is a
     modelling choice (see docs/audit/2026-11-03-devsim-phase-integration.md).
+  * statistics="fermi_dirac" (v0.15 completion): every rate, occupancy and pair rate here takes the EXACT
+    FD emission densities gamma_n n1, gamma_p p1 (srh_reference_densities fd=True; derivation there), so a
+    level's equilibrium occupancy is the Fermi function of the FD quasi-Fermi level for any capture ratio,
+    charged levels pin the FD charge-neutral root (bipolar_options._neutral_root_fd), and the interface terms'
+    closed-form derivatives carry the d ln gamma/dc terms (install_interface_traps). The legacy statistics
+    are unchanged (fd=False: the strings character-for-character).
   * Interface traps need a bipolar (n AND p) semiconductor side -- the SRH occupancy uses both.
     A semiconductor/semiconductor interface raises (heterojunctions are D1a's).
   * 3-D: on the devsim_3d tensor (Kuhn) mesh (D2c, v0.14.0 default) the 3-D sheet-charge shift equals
@@ -144,8 +151,8 @@ _CHARGE_MODES = ("split", "acceptor", "donor", "none")
 # narrowing, for the net rate, the occupancy and the noise pair rate G + R).
 # ------------------------------------------------------------------------------------------------
 def srh_reference_densities(n1: str = "n1", p1: str = "p1", *, bgn: bool = False,
-                            reference: str = "intrinsic", scale: "str | None" = None
-                            ) -> Tuple[str, str, str]:
+                            reference: str = "intrinsic", scale: "str | None" = None,
+                            fd: bool = False) -> Tuple[str, str, str]:
     """(n1', p1', n_i'^2) -- THE single place the bandgap-narrowing substitution of D1b (audit R27)
     enters SRH: with BGN on, n_i^2 -> n_ie^2 and n1 -> n1 n_ie/n_i, p1 -> p1 n_ie/n_i (so
     n1' p1' = n_ie^2 and a level keeps its energy relative to the NARROWED effective intrinsic level:
@@ -171,10 +178,38 @@ def srh_reference_densities(n1: str = "n1", p1: str = "p1", *, bgn: bool = False
     COMPOSITION ORDER (v0.14): the reference conversion first, then the DG scale -- so every reference
     keeps n1' p1' = n_i'^2 s^2 = n p|_eq. (The DG scale is the symmetric (Lambda_n + Lambda_p)/2 split
     for every reference; a band-referenced level that should follow ONE quantum band edge only --
-    n1 x exp(Lambda_n/V_t) for "conduction" -- is not modelled; see the D1c doc section 9.)"""
+    n1 x exp(Lambda_n/V_t) for "conduction" -- is not modelled; see the D1c doc section 9.)
+
+    `fd` (v0.15, statistics="fermi_dirac"; requires bgn=True, the region's n_ie node path): the EXACT
+    Fermi-Dirac emission densities n1' = gamma_n n1_B, p1' = gamma_p p1_B, with n1_B, p1_B the Boltzmann-frame
+    values of the reference above (n_ie0 = n_i exp(dEg/2kT) in place of n_ie) and gamma = exp(-Delta(c/N))
+    the solution-dependent degeneracy factors of bipolar_options.install_fd_detailed_balance (node models
+    FDNiN = n_ie0 gamma_n, FDNiP = n_ie0 gamma_p, FDGammaN, FDGammaP; n_ie^2 = FDNiN FDNiP). DERIVATION
+    (energy-independent capture coefficient c_n, each band in quasi-equilibrium at its own FD quasi-Fermi
+    level E_Fn): detailed balance per band energy gives the emission e(E) = c exp((E_t - E)/kT), and the
+    net capture integrated over the band is c_n [n (1 - f_t) - f_t n exp((E_t - E_Fn)/kT)] -- the Pauli
+    factor (1 - f(E)) of the emission is what makes it n exp((E_t - E_Fn)/kT) = gamma_n n1_B, LOCAL in n
+    (Sentaurus Device's FD SRH, "gamma_n n1"). Hence
+        U = (n p - n_ie^2)/(taup (n + gamma_n n1_B) + taun (p + gamma_p p1_B)),
+        f_t = (taup n + taun gamma_p p1_B)/(same)  ->  1/(1 + exp((E_t - E_F)/kT)) at equilibrium EXACTLY,
+    for ANY taun/taup. The shared sqrt(gamma_n gamma_p) n1 of the bare n_ie substitution (the pre-completion
+    FD mode) has the same numerator but its occupancy is a Fermi function only where gamma_n = gamma_p: a
+    CHARGED level on a degenerate layer would then carry a capture-ratio-dependent equilibrium charge
+    (docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md). fd=False (default) returns the strings
+    above CHARACTER-FOR-CHARACTER."""
     if reference not in _REFERENCES:
         raise ValueError("energy reference must be one of {}; got {!r}".format(_REFERENCES, reference))
-    if not bgn:
+    if fd and not bgn:
+        raise ValueError("srh_reference_densities: fd=True (statistics='fermi_dirac') needs bgn=True: the FD "
+                         "detailed balance lives on the region's n_ie node models")
+    if fd:
+        if reference == "conduction":
+            out = ("{}*FDGammaN".format(n1), "(n_ie^2/({}*FDGammaN))".format(n1), "n_ie^2")
+        elif reference == "valence":
+            out = ("(n_ie^2/({}*FDGammaP))".format(p1), "{}*FDGammaP".format(p1), "n_ie^2")
+        else:
+            out = ("{}*FDNiN/n_i".format(n1), "{}*FDNiP/n_i".format(p1), "n_ie^2")
+    elif not bgn:
         out = (n1, p1, "n_i^2")
     elif reference == "conduction":
         out = (n1, "(n_ie^2/{})".format(n1), "n_ie^2")
@@ -194,7 +229,7 @@ def _srh_denominator(n1: str, p1: str, taun: str, taup: str) -> str:
 
 def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup", *,
                   bgn: bool = False, pair: bool = False, reference: str = "intrinsic",
-                  scale: "str | None" = None) -> str:
+                  scale: "str | None" = None, fd: bool = False) -> str:
     """The Shockley-Read-Hall net rate U = (n p - n_i^2)/(taup (n + n1) + taun (p + p1)) as a DEVSIM
     expression in the solution variables Electrons/Holes. The arguments are parameter names (or
     parenthesized sub-expressions). The DEFAULTS reproduce the legacy physics_bipolar_dd USRH string
@@ -207,20 +242,24 @@ def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str 
     fast-trap detailed-balance split R = n p/D, G = n_i^2/D that the noise module's GR source
     2 (G + R) needs (noise_analysis; one kernel for both).
     reference / scale: the per-level energy reference and the density-gradient intrinsic-level factor
-    of srh_reference_densities (defaults: unchanged)."""
-    n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale)
+    of srh_reference_densities (defaults: unchanged); fd: its exact Fermi-Dirac emission densities
+    (statistics="fermi_dirac": gamma_n n1, gamma_p p1)."""
+    n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale, fd=fd)
     return "(Electrons*Holes {} {})/{}".format("+" if pair else "-", ni2,
                                                _srh_denominator(n1e, p1e, taun, taup))
 
 
 def srh_occupancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun",
-                       taup: str = "taup", *, bgn: bool = False, reference: str = "intrinsic") -> str:
+                       taup: str = "taup", *, bgn: bool = False, reference: str = "intrinsic",
+                       fd: bool = False) -> str:
     """Steady-state electron occupancy f_t = (taup n + taun p1)/(taup (n + n1) + taun (p + p1)) of an
     SRH level (Shockley & Read 1952) -- the SAME denominator as srh_rate_expr. Equals the Fermi
     function of E_t at equilibrium PROVIDED n1 p1 equals the equilibrium n p -- which is why it takes
     the same `bgn` substitution as the rate (with BGN on n p = n_ie^2 at equilibrium; an occupancy
-    left on n_i would depend on taun/taup at equilibrium, i.e. not be a Fermi function)."""
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    left on n_i would depend on taun/taup at equilibrium, i.e. not be a Fermi function). Under
+    statistics="fermi_dirac" pass fd=True: only the exact gamma_n n1, gamma_p p1 form keeps it a Fermi
+    function of the FD quasi-Fermi level on a degenerate layer (srh_reference_densities)."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, fd=fd)
     return "({tp}*Electrons + {tn}*{p1})/{d}".format(tp=taup, tn=taun, p1=p1e,
                                                      d=_srh_denominator(n1e, p1e, taun, taup))
 
@@ -228,7 +267,7 @@ def srh_occupancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun",
 def srh_capture_exprs(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup",
                       f: str = "f", one_minus_f: str = "g", *, bgn: bool = False,
                       reference: str = "intrinsic", scale: "str | None" = None,
-                      pair: bool = False) -> Tuple[str, str]:
+                      pair: bool = False, fd: bool = False) -> Tuple[str, str]:
     """(R_n, R_p): the electron and hole CAPTURE-minus-EMISSION rates [m^-3 s^-1] of a level whose
     electron occupancy is a VARIABLE (`f`, and `one_minus_f` = 1 - f spelled separately so a nearly
     full level never cancels) -- the kinetic (finite capture and emission) twin of srh_rate_expr
@@ -249,8 +288,15 @@ def srh_capture_exprs(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: 
     pair=True returns the EVENT rates (P_n, P_p) instead: both directions of each exchange counted,
     P_n = [n (1 - f) + n1' f]/tau_n0, P_p = [p f + p1' (1 - f)]/tau_p0 -- the Poisson rate of the
     electron- and hole-exchange processes, the noise source of the kinetic trap (each a two-point event
-    between its carrier row and the trap row, noise_analysis.TwoPointSource)."""
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale)
+    between its carrier row and the trap row, noise_analysis.TwoPointSource).
+
+    fd=True (statistics="fermi_dirac", v0.15 FD-mode integration): n1' = gamma_n n1_B, p1' = gamma_p p1_B, the
+    exact FD emission densities of srh_reference_densities -- e_n = c_n gamma_n n1_B is the band-integrated
+    emission into the Pauli-blocked conduction band at the LOCAL electron distribution. Then R_n = 0 <=>
+    f/(1-f) = n/n1' = exp((E_F - E_t)/kT) and R_p = 0 <=> f/(1-f) = p1'/p = the same, exactly, at the FD
+    equilibrium; and the linear response is c_n n (1 - f) (d eta_n - d u) (the gamma_n derivative supplies
+    the g-factor), so the event rates (pair=True) stay Nyquist-consistent."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale, fd=fd)
     s = "+" if pair else "-"
     return ("(Electrons*{g} {s} {n1}*{f})/{tn}".format(g=one_minus_f, s=s, n1=n1e, f=f, tn=taun),
             "(Holes*{f} {s} {p1}*{g})/{tp}".format(f=f, s=s, p1=p1e, g=one_minus_f, tp=taup))
@@ -258,7 +304,7 @@ def srh_capture_exprs(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: 
 
 def srh_capture_derivs(n1: str, p1: str, taun: str, taup: str, f: str, one_minus_f: str, var: str,
                        dfdx: str, *, bgn: bool = False, reference: str = "intrinsic",
-                       scale: "str | None" = None) -> Tuple[dict, dict]:
+                       scale: "str | None" = None, fd: bool = False) -> Tuple[dict, dict]:
     """Closed-form derivatives of srh_capture_exprs for physics_bipolar_dd.add_recombination_term(
     derivs=...): ({Electrons, Holes, var} of R_n, the same of R_p), where `var` is the occupancy variable
     x and `dfdx` the expression of df/dx (the kinetic levels use the odds x = w = f/(1-f): df/dw =
@@ -266,8 +312,16 @@ def srh_capture_derivs(n1: str, p1: str, taun: str, taup: str, f: str, one_minus
     install_bulk_traps refuses the FD-statistics regions where it does). R_n depends on (n, x), R_p on
     (p, x):
         dR_n/dn = (1 - f)/tau_n0          dR_n/dx = -(n + n1') (df/dx)/tau_n0
-        dR_p/dp = f/tau_p0                dR_p/dx = +(p + p1') (df/dx)/tau_p0."""
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale)
+        dR_p/dp = f/tau_p0                dR_p/dx = +(p + p1') (df/dx)/tau_p0.
+    fd=True: n1' ~ gamma_n(n), p1' ~ gamma_p(p) (srh_reference_densities), so with ln = FDdLnGammaN,
+    lp = FDdLnGammaP:  dR_n/dn = ((1 - f) - f n1' ln)/tau_n0,  dR_p/dp = (f - (1 - f) p1' lp)/tau_p0."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale, fd=fd)
+    if fd:
+        return ({"Electrons": "({g} - {f}*{n1}*FDdLnGammaN)/{tn}".format(g=one_minus_f, f=f, n1=n1e, tn=taun),
+                 "Holes": "0", var: "-(Electrons + {})*{}/{}".format(n1e, dfdx, taun)},
+                {"Electrons": "0",
+                 "Holes": "({f} - {g}*{p1}*FDdLnGammaP)/{tp}".format(f=f, g=one_minus_f, p1=p1e, tp=taup),
+                 var: "(Holes + {})*{}/{}".format(p1e, dfdx, taup)})
     return ({"Electrons": "{}/{}".format(one_minus_f, taun), "Holes": "0",
              var: "-(Electrons + {})*{}/{}".format(n1e, dfdx, taun)},
             {"Electrons": "0", "Holes": "{}/{}".format(f, taup),
@@ -275,20 +329,22 @@ def srh_capture_derivs(n1: str, p1: str, taun: str, taup: str, f: str, one_minus
 
 
 def srh_vacancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup", *,
-                     bgn: bool = False, reference: str = "intrinsic") -> str:
+                     bgn: bool = False, reference: str = "intrinsic", fd: bool = False) -> str:
     """1 - f_SS = (tau_p0 n1' + tau_n0 p)/(tau_p0 (n + n1') + tau_n0 (p + p1')) -- the steady-state vacancy of
-    srh_occupancy_expr written without the 1 - f subtraction (a nearly full level keeps its digits)."""
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    srh_occupancy_expr written without the 1 - f subtraction (a nearly full level keeps its digits). fd: as
+    srh_reference_densities."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, fd=fd)
     return "({tp}*{n1} + {tn}*Holes)/{d}".format(tp=taup, tn=taun, n1=n1e, d=_srh_denominator(n1e, p1e, taun, taup))
 
 
 def srh_occupancy_odds_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup",
-                            *, bgn: bool = False, reference: str = "intrinsic") -> str:
+                            *, bgn: bool = False, reference: str = "intrinsic", fd: bool = False) -> str:
     """w_SS = f_SS/(1 - f_SS) of the steady-state occupancy srh_occupancy_expr, written as
     (tau_p0 n + tau_n0 p1')/(tau_p0 n1' + tau_n0 p) (f_SS and 1 - f_SS share the SRH denominator) -- no
     1 - f cancellation, finite and > 0 at n = p = 0. The exact seed of a kinetic level's occupancy
-    variable (seed_kinetic_traps); at equilibrium it is exp((E_F - E_t)/kT)."""
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    variable (seed_kinetic_traps); at equilibrium it is exp((E_F - E_t)/kT) -- with fd=True (srh_reference_
+    densities) exactly so also at the FD equilibrium of a degenerate layer."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, fd=fd)
     return "(({tp}*Electrons + {tn}*{p1})/({tp}*{n1} + {tn}*Holes))".format(
         tp=taup, tn=taun, p1=p1e, n1=n1e)
 
@@ -625,7 +681,7 @@ class InterfaceTraps:
 # DEVSIM installers
 # ------------------------------------------------------------------------------------------------
 def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, n_i_m3: float,
-                       V_t: float = V_T, bgn: bool = False) -> None:
+                       V_t: float = V_T, bgn: bool = False, fd: bool = False) -> None:
     """Install discrete bulk SRH levels on a bipolar region set up by
     physics_bipolar_dd.setup_bipolar_region (which calls this with traps=...).
 
@@ -635,7 +691,10 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
     its pair rate G + R (so the noise GR source sees it -- noise_analysis). The charged levels' trapped
     charge goes in as the single charge term QTerm_bulk_traps. Rate, occupancy and pair rate all come
     from the ONE SRH kernel (srh_rate_expr / srh_occupancy_expr) with the region's BGN substitution
-    (bgn=True: n_i^2 -> n_ie^2, n1/p1 scaled by n_ie/n_i).
+    (bgn=True: n_i^2 -> n_ie^2, n1/p1 scaled by n_ie/n_i) and, under statistics="fermi_dirac" (fd=True),
+    the exact FD emission densities gamma_n n1, gamma_p p1 (srh_reference_densities; the charge term's
+    Jacobian then follows the solution-dependent gamma through DEVSIM's FDNiN:Electrons-style models) --
+    for the quasi-static AND the kinetic levels (v0.15 FD-mode completion, integration).
 
     A KINETIC level (TrapLevel.dynamic=True; v0.15 plan 4.3.2) gets instead (k = its index, name
     trap<k>): the node solution TrapW_trap<k> -- the occupancy ODDS w = f/(1-f) = exp(u), u = (E_Ft -
@@ -672,8 +731,6 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
     rows; a checker that lists equation variables must include TrapW_* (and the interface ItW*)."""
     from dynameta.carriers import physics_bipolar_dd as _BP   # lazy: BP imports this module
 
-    if any(isinstance(t, TrapLevel) and t.dynamic for t in traps):
-        _check_kinetic_region(device, region, "install_bulk_traps")
     charges = []
     kin_q, kin_dq = [], {}
     for k, t in enumerate(traps):
@@ -693,9 +750,10 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
                       ("Nt", float(t.density_m3))):
             ds.set_parameter(device=device, region=region, name=p + nm, value=v)
         args = (p + "n1", p + "p1", p + "taun", p + "taup")
-        occ = srh_occupancy_expr(*args, bgn=bgn, reference=ref)
+        fkw = {"fd": True} if fd else {}                        # (the legacy call, unchanged, otherwise)
+        occ = srh_occupancy_expr(*args, bgn=bgn, reference=ref, **fkw)
         if t.dynamic:
-            var, f, g = _install_kinetic_level(device, region, k, p, args, occ, bgn=bgn, reference=ref)
+            var, f, g = _install_kinetic_level(device, region, k, p, args, occ, bgn=bgn, reference=ref, fd=fd)
             if t.kind != "neutral":
                 sgn, occm = ("-", f) if t.kind == "acceptor" else ("", g)
                 kin_q.append("{}{}Nt*{}".format(sgn, p, occm))
@@ -704,8 +762,8 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
             continue
         ds.node_model(device=device, region=region, name="TrapOccupancy{}".format(k), equation=occ)
         _BP.add_recombination_term(device, region, "trap{}".format(k),
-                                   srh_rate_expr(*args, bgn=bgn, reference=ref),
-                                   pair=srh_rate_expr(*args, bgn=bgn, pair=True, reference=ref))
+                                   srh_rate_expr(*args, bgn=bgn, reference=ref, **fkw),
+                                   pair=srh_rate_expr(*args, bgn=bgn, pair=True, reference=ref, **fkw))
         if t.kind == "acceptor":
             charges.append("-{}Nt*{}".format(p, occ))
         elif t.kind == "donor":
@@ -741,17 +799,25 @@ class TrapOccupancyRangeError(ValueError):
     precision anyway."""
 
 
-def _check_kinetic_region(device: str, region: str, who: str) -> None:
-    """Kinetic occupancy needs the legacy statistics: the closed-form derivatives hold n_ie fixed, which
-    FD detailed balance (statistics='fermi_dirac') violates."""
-    if "FDGammaN" in ds.get_node_model_list(device=device, region=region):
-        raise NotImplementedError(
-            "{}: region {!r} runs statistics='fermi_dirac' (solution-dependent n_ie); kinetic traps "
-            "(dynamic=True) are implemented for the legacy statistics only".format(who, region))
+def _region_fd(device: str, region: str) -> bool:
+    """statistics='fermi_dirac' on `region` (bipolar_options.install_fd_detailed_balance's models present):
+    every SRH kernel then takes fd=True (the exact FD emission densities). The kinetic levels and bins
+    support it since the v0.15 FD-mode integration (their n1', p1' models carry the gamma derivatives)."""
+    return "FDGammaN" in ds.get_node_model_list(device=device, region=region)
+
+
+def _initial_odds(device: str, region: str, seed: str, fd: bool):
+    """The value a new occupancy variable holds until seed_kinetic_traps: its seed model w_SS at the current
+    carriers -- or, under statistics='fermi_dirac', 1.0 (f = 1/2): the FD seed reads ln(c/N), which is not
+    defined on carriers that are not set yet (0 at install; a FATAL FP exception, MEASURED). Either way the
+    seed call replaces it."""
+    if fd:
+        return [1.0] * len(ds.get_node_model_values(device=device, region=region, name="x"))
+    return ds.get_node_model_values(device=device, region=region, name=seed)
 
 
 def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: str, *, bgn: bool,
-                           reference: str):
+                           reference: str, fd: bool = False):
     """The variable, models, single-carrier terms and equation of one kinetic bulk level (see
     install_bulk_traps). Returns (variable, f model, 1 - f model)."""
     from dynameta.carriers import physics_bipolar_dd as _BP
@@ -761,13 +827,13 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
     seed = "TrapWSS_" + name
     ds.node_model(device=device, region=region, name="TrapOccupancySS{}".format(k), equation=occ)
     ds.node_model(device=device, region=region, name=seed,
-                  equation=srh_occupancy_odds_expr(*args, bgn=bgn, reference=reference))
+                  equation=srh_occupancy_odds_expr(*args, bgn=bgn, reference=reference, fd=fd))
     ds.node_solution(device=device, region=region, name=var)             # FIRST: the terms need it
     ds.set_node_values(device=device, region=region, name=var,          # finite, > 0 until seeded
-                       values=ds.get_node_model_values(device=device, region=region, name=seed))
-    _occupancy_models(device, region, var, f, g, *args, bgn=bgn, reference=reference)
-    rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference)
-    pn, pp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, pair=True)
+                       values=_initial_odds(device, region, seed, fd))
+    _occupancy_models(device, region, var, f, g, *args, bgn=bgn, reference=reference, fd=fd)
+    rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, fd=fd)
+    pn, pp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, pair=True, fd=fd)
     dn = dp = None          # DEVSIM's diff through the occupancy models (they carry n, p, w derivatives)
     # the event rates P_n, P_p (both directions of each exchange) are the trap g-r noise sources (K3): an
     # electron event changes the electron row by -1 and the trap row by +1, a hole event the hole row by +1
@@ -780,7 +846,7 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
     return var, f, g
 
 
-def _occupancy_models(device, region, var, f, g, n1, p1, taun, taup, *, bgn, reference):
+def _occupancy_models(device, region, var, f, g, n1, p1, taun, taup, *, bgn, reference, fd=False):
     """The occupancy models every kinetic term reads by name, BLENDED by the DC-form switch D
     (KINETIC_DC_PARAMETER): f = D f_SS(n, p) + (1 - D) w/(1+w), 1 - f = D (1 - f_SS) + (1 - D)/(1+w). D = 0 --
     every analysis -- is the kinetic occupancy (0 x f_SS = 0 exactly, so the values are w's); D = 1 -- inside
@@ -788,20 +854,27 @@ def _occupancy_models(device, region, var, f, g, n1, p1, taun, taup, *, bgn, ref
     model. Derivatives in CLOSED FORM, without a 1 - f subtraction (DEVSIM's diff of w/(1+w) is 1/(1+w) -
     w/(1+w)^2, which cancels for a full level: MEASURED 2e4 eps on the Poisson column): df/dw = (1 - D)/(1+w)^2,
     df_SS/dn = tau_p0 (1 - f_SS)/Den, df_SS/dp = -tau_n0 f_SS/Den (Den the SRH denominator), and 1 - f the
-    negatives."""
+    negatives. fd=True (statistics='fermi_dirac'): n1' ~ gamma_n(n), p1' ~ gamma_p(p) also move Den, so
+    df_SS/dn = tau_p0 ((1 - f_SS) - f_SS n1' ln)/Den and df_SS/dp = tau_n0 ((1 - f_SS) p1' lp - f_SS)/Den
+    (ln, lp = FDdLnGammaN, FDdLnGammaP)."""
     if KINETIC_DC_PARAMETER not in ds.get_parameter_list(device=device, region=region):
         ds.set_parameter(device=device, region=region, name=KINETIC_DC_PARAMETER, value=0.0)
     d = KINETIC_DC_PARAMETER
-    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, fd=fd)
     den = _srh_denominator(n1e, p1e, taun, taup)
-    fss = srh_occupancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference)
-    gss = srh_vacancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference)
+    fss = srh_occupancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference, fd=fd)
+    gss = srh_vacancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference, fd=fd)
     gw = "(1/(1 + {}))".format(var)
+    if fd:
+        de = "{d}*{tp}*({g} - {f}*{n1}*FDdLnGammaN)/{den}".format(d=d, tp=taup, g=gss, f=fss, n1=n1e, den=den)
+        dh = "{d}*{tn}*({g}*{p1}*FDdLnGammaP - {f})/{den}".format(d=d, tn=taun, g=gss, f=fss, p1=p1e, den=den)
+    else:
+        de = "{d}*{tp}*{g}/{den}".format(d=d, tp=taup, g=gss, den=den)
+        dh = "-{d}*{tn}*{f}/{den}".format(d=d, tn=taun, f=fss, den=den)
     for name, expr, sgn in ((f, "{d}*{s} + (1 - {d})*({w}/(1 + {w}))".format(d=d, s=fss, w=var), ""),
                             (g, "{d}*{s} + (1 - {d})*{gw}".format(d=d, s=gss, gw=gw), "-")):
         ds.node_model(device=device, region=region, name=name, equation=expr)
-        for v, e in (("Electrons", "{d}*{tp}*{g}/{den}".format(d=d, tp=taup, g=gss, den=den)),
-                     ("Holes", "-{d}*{tn}*{f}/{den}".format(d=d, tn=taun, f=fss, den=den)),
+        for v, e in (("Electrons", de), ("Holes", dh),
                      (var, "(1 - {d})*{gw}^2".format(d=d, gw=gw))):
             ds.node_model(device=device, region=region, name="{}:{}".format(name, v),
                           equation="{}({})".format(sgn, e))
@@ -1094,7 +1167,6 @@ def install_interface_traps(device: str, interface: str, traps, *,
         raise TypeError("install_interface_traps: traps must be an InterfaceTraps or a sequence of them")
     semi, other = _semiconductor_side(device, interface)
     if any(sp.dynamic for sp in specs):                        # refuse BEFORE any DEVSIM write
-        _check_kinetic_region(device, semi, "install_interface_traps")
         vt0 = float(ds.get_parameter(device=device, region=semi, name="V_t"))
         nbin = sum(len(sp.sheet_levels(kT_eV=vt0)) for sp in specs if sp.dynamic)
         nnode = len(ds.get_node_model_values(device=device, region=semi, name="NodeVolume"))
@@ -1120,13 +1192,11 @@ def install_interface_traps(device: str, interface: str, traps, *,
     n_i = float(ds.get_parameter(device=device, region=semi, name="n_i"))
     V_t = float(ds.get_parameter(device=device, region=semi, name="V_t"))   # == V_T unless T_K is set
     bgn = "n_ie" in ds.get_node_model_list(device=device, region=semi)      # BGN on this region (D1b)
-    if "FDGammaN" in ds.get_node_model_list(device=device, region=semi):
-        # v0.15 statistics="fermi_dirac": n_ie depends on the carriers, and the analytic derivatives
-        # below hold n_ie fixed -- not implemented rather than a silently wrong Jacobian
-        raise NotImplementedError(
-            "install_interface_traps: region {!r} runs statistics='fermi_dirac' (FD detailed balance, "
-            "solution-dependent n_ie); interface traps are implemented for the legacy statistics only "
-            "(TransportModel.carrier_statistics=None)".format(semi))
+    # v0.15 statistics="fermi_dirac": the exact FD emission densities (srh_reference_densities fd=True),
+    # whose gamma_n, gamma_p -- and n_ie^2 = n_ie0^2 gamma_n gamma_p -- follow the surface densities; the
+    # analytic derivatives below then carry the lambda = d ln gamma/dc terms.
+    fd = _region_fd(device, semi)
+    fkw = {"fd": True} if fd else {}
     n_c = float(ds.get_parameter(device=device, region=semi, name="N_dos"))   # band-referenced levels
     n_v = float(ds.get_parameter(device=device, region=semi, name="N_dos_p"))
     # Per sheet level k (one spec: shared capture ratio cr = c_n/c_p, c = sigma v_th): the SRH kernel
@@ -1138,6 +1208,13 @@ def install_interface_traps(device: str, interface: str, traps, *,
     #   G_k + R_k = N_k c_n (n p + n_i'^2)/D_k       (the noise pair rate; srh_rate_expr(pair=True))
     # The derivatives are written out ANALYTICALLY: DEVSIM's simplify(diff()) of a ~45-level sum took
     # ~25 s per install (MEASURED, 1-D MOS, 2 x 22 bins) -- the closed forms build in well under 1 s.
+    # FD statistics (fd): n1'_k = a_k gamma_n, p1'_k = b_k gamma_p and n_i'^2 = n_ie^2 ~ gamma_n gamma_p for
+    # EVERY energy reference, so with ln = FDdLnGammaN = d ln gamma_n/dn, lp = FDdLnGammaP = d ln gamma_p/dp:
+    #   df/dn = cr (cr n1'_k + p - (cr n + p1'_k) n1'_k ln)/D_k^2
+    #   df/dp = ((cr n + p1'_k)(1 + p1'_k lp) - p1'_k lp D_k)/(-D_k^2)
+    #   dU/dn = N_k c_n ((p - n_i'^2 ln) D_k - cr (1 + n1'_k ln)(n p - n_i'^2))/D_k^2
+    #   dU/dp = N_k c_n ((n - n_i'^2 lp) D_k - (1 + p1'_k lp)(n p - n_i'^2))/D_k^2
+    # (ln = lp = 0 is the fixed-n_ie form above).
     q_val, q_dn, q_dp = [], [], []                             # sheet charge [m^-2], units of +q
     r_val, r_dn, r_dp, r_pair = [], [], [], []                 # surface SRH rate [m^-2 s^-1]
     all_levels = []
@@ -1159,27 +1236,39 @@ def install_interface_traps(device: str, interface: str, traps, *,
             if s.dynamic:
                 kinetic.append((n1, p1, repr(float(nk)), kind, cr, cnp, ref))
                 continue
-            n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, reference=ref)
+            n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, reference=ref, **fkw)
             d = _srh_denominator(n1e, p1e, "1", cr)
             num = "({cr}*Electrons + 1*{p1})".format(cr=cr, p1=p1e)
-            occ = srh_occupancy_expr(n1, p1, "1", cr, bgn=bgn, reference=ref)   # == num/d
+            occ = srh_occupancy_expr(n1, p1, "1", cr, bgn=bgn, reference=ref, **fkw)   # == num/d
             nk_s = repr(float(nk))
             if kind in ("acceptor", "donor"):
                 # acceptor: -N f ; donor: N (1 - f) -- both carry -N df in the derivatives
                 q_val.append(("-{n}*{f}" if kind == "acceptor" else "{n}*(1 - {f})")
                              .format(n=nk_s, f=occ))
-                q_dn.append("-{n}*{cr}*({cr}*{n1} + Holes)/({d}^2)".format(n=nk_s, cr=cr, n1=n1e, d=d))
-                q_dp.append("{n}*{num}/({d}^2)".format(n=nk_s, num=num, d=d))
+                if fd:
+                    q_dn.append("-{n}*{cr}*({cr}*{n1} + Holes - {num}*{n1}*FDdLnGammaN)/({d}^2)".format(
+                        n=nk_s, cr=cr, n1=n1e, num=num, d=d))
+                    q_dp.append("{n}*({num}*(1 + {p1}*FDdLnGammaP) - {p1}*FDdLnGammaP*{d})/({d}^2)".format(
+                        n=nk_s, num=num, p1=p1e, d=d))
+                else:
+                    q_dn.append("-{n}*{cr}*({cr}*{n1} + Holes)/({d}^2)".format(n=nk_s, cr=cr, n1=n1e, d=d))
+                    q_dp.append("{n}*{num}/({d}^2)".format(n=nk_s, num=num, d=d))
             if s.recombination:
                 k = "{}*{}".format(nk_s, cnp)
                 r_val.append("{k}*{u}".format(k=k, u=srh_rate_expr(n1, p1, "1", cr, bgn=bgn,
-                                                                     reference=ref)))
+                                                                     reference=ref, **fkw)))
                 r_pair.append("{k}*{u}".format(k=k, u=srh_rate_expr(n1, p1, "1", cr, bgn=bgn,
-                                                                      pair=True, reference=ref)))
-                r_dn.append("{k}*(Holes*{d} - {cr}*(Electrons*Holes - {ni2}))/({d}^2)"
-                            .format(k=k, d=d, cr=cr, ni2=ni2))
-                r_dp.append("{k}*(Electrons*{d} - (Electrons*Holes - {ni2}))/({d}^2)"
-                            .format(k=k, d=d, ni2=ni2))
+                                                                      pair=True, reference=ref, **fkw)))
+                if fd:
+                    r_dn.append("{k}*((Holes - {ni2}*FDdLnGammaN)*{d} - {cr}*(1 + {n1}*FDdLnGammaN)*"
+                                "(Electrons*Holes - {ni2}))/({d}^2)".format(k=k, d=d, cr=cr, ni2=ni2, n1=n1e))
+                    r_dp.append("{k}*((Electrons - {ni2}*FDdLnGammaP)*{d} - (1 + {p1}*FDdLnGammaP)*"
+                                "(Electrons*Holes - {ni2}))/({d}^2)".format(k=k, d=d, ni2=ni2, p1=p1e))
+                else:
+                    r_dn.append("{k}*(Holes*{d} - {cr}*(Electrons*Holes - {ni2}))/({d}^2)"
+                                .format(k=k, d=d, cr=cr, ni2=ni2))
+                    r_dp.append("{k}*(Electrons*{d} - (Electrons*Holes - {ni2}))/({d}^2)"
+                                .format(k=k, d=d, ni2=ni2))
     if q_fixed != 0.0:
         q_val.append(repr(q_fixed / Q_E))
 
@@ -1202,11 +1291,11 @@ def install_interface_traps(device: str, interface: str, traps, *,
                                            "Holes": "{}*{}".format(a_name, _sum(r_dp))})
     out = {"region": semi, "insulator": other, "index": j, "levels": all_levels, "area": area}
     if kinetic:
-        out["kinetic"] = _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val)
+        out["kinetic"] = _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val, fd=fd)
     return out
 
 
-def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val):
+def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val, fd=False):
     """The masked region-wide variables, rows, single-carrier terms and charge term of the kinetic
     interface bins of install j (see install_interface_traps). Returns the variables in bin order."""
     from dynameta.carriers import physics_bipolar_dd as _BP
@@ -1221,14 +1310,14 @@ def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val):
         f, g = "ItOccupancy{}_{}".format(j, b), "ItVacancy{}_{}".format(j, b)
         seed = "ItWSS{}_{}".format(j, b)
         ds.node_model(device=device, region=semi, name=seed, equation="(1 - {m})*{w} + {m}".format(
-            m=mask, w=srh_occupancy_odds_expr(n1, p1, "1", cr, bgn=bgn, reference=ref)))
+            m=mask, w=srh_occupancy_odds_expr(n1, p1, "1", cr, bgn=bgn, reference=ref, fd=fd)))
         ds.node_solution(device=device, region=semi, name=var)       # FIRST: the terms need it
-        ds.set_node_values(device=device, region=semi, name=var,
-                           values=ds.get_node_model_values(device=device, region=semi, name=seed))
-        _occupancy_models(device, semi, var, f, g, n1, p1, "1", cr, bgn=bgn, reference=ref)
+        ds.set_node_values(device=device, region=semi, name=var, values=_initial_odds(device, semi, seed, fd))
+        _occupancy_models(device, semi, var, f, g, n1, p1, "1", cr, bgn=bgn, reference=ref, fd=fd)
         k = "{}*{}*{}".format(a_name, nk, cnp)                       # ItArea N_b c_n (tau -> 1/S)
-        rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref)
-        pn, pp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, pair=True)
+        rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, fd=fd)
+        pn, pp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, pair=True,
+                                   fd=fd)
         for carrier, r, pr, c, mech in (("electron", rn, pn, +1.0, "trap_n"), ("hole", rp, pp, -1.0, "trap_p")):
             _BP.add_recombination_term(device, semi, name, "{}*{}".format(k, r), carrier=carrier, wrt=(var,),
                                        pair="{}*{}".format(k, pr), partner=(eq, c), mechanism=mech)

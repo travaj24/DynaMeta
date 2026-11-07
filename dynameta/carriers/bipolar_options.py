@@ -119,8 +119,17 @@ here re-defines a composite by name, so options compose with trap levels, interf
                      exactly where the transport is in equilibrium, and the contacts pin the FD
                      charge-neutral root n0 p0 = n_ie0^2 gamma_n(n0) gamma_p(p0) -- Yan & Cuevas 2013
                      Eq. (1) with the code's Delta. REQUIRED by an FD-paired BGN set (the house Si
-                     bundle). Not combined (refused): BTBT, CHARGED bulk trap levels and interface
-                     traps (their Jacobian / equilibrium charge assume a fixed n_ie). Its Delta is the
+                     bundle). v0.15 completion (docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md):
+                     the TRANSPORT takes the degeneracy as a quasi-field (g = 1, Delta1 - Delta0 in the
+                     SG argument; physics_heterojunction.fd_quasi_field_expr), so the discrete zero-
+                     current state IS this equilibrium -- zero-bias currents vanish to round-off and the
+                     diffusion noise is exactly Nyquist (the legacy edge-averaged g leaves an O(h^2)
+                     battery). Every SRH channel (built-in, TrapLevel, interface bin) uses the EXACT FD
+                     emission densities gamma_n n1, gamma_p p1 (physics_traps.srh_reference_densities
+                     fd=True); CHARGED levels enter the contacts' FD root at their exact FD occupancy;
+                     local BTBT takes the FD Hurkx factor (tunneling.hurkx_d_expr n_i_p=); the nonlocal
+                     BTBT and thermionic interfaces need nothing (they read the FD activities). All with
+                     exact Jacobians. Its Delta is the
                      rational g fit's: within 1 % of the exact F_1/2 offset only for eta >~ 8
                      (physics_bipolar_dd "ACCURACY OF Delta"); at Si:P 1e19 / 1e20 cm^-3 (eta = -0.93 /
                      2.43) n0 p0 is 0.42 % / 3.5 % low against Eq. (1) with exact F_1/2 (MEASURED).
@@ -915,19 +924,31 @@ def fd_activity_inverse(t):
     return np.exp(y)
 
 
-def _neutral_root_fd(N_D, N_A, n_ie0, n1D, p1A, g_D, g_A, ionization: bool, N_c: float, N_v: float):
+def _neutral_root_fd(N_D, N_A, n_ie0, n1D, p1A, g_D, g_A, ionization: bool, N_c: float, N_v: float,
+                     traps=(), V_t=None):
     """Charge-neutral equilibrium of the FD detailed balance (statistics="fermi_dirac"): n0 solving
-         f(n) = n - p(n) - N_D+(n) + N_A-(p(n)) = 0,
+         f(n) = n - p(n) - N_D+(n) + N_A-(p(n)) - Q_t(n)/q = 0,
          L(p/N_v) = ln(n_ie0^2/(N_c N_v)) - L(n/N_c),   L(u) = ln u + Delta(u),
     i.e. eta_n + eta_p = -E_g,eff/kT in the transport's own activity: n0 p0 = n_ie0^2 exp(-Delta(n0/N_c)
     - Delta(p0/N_v)) -- Yan & Cuevas 2013 Eq. (1) with the code's Delta (n_ie0 = n_i exp(dEg/2kT)).
-    p(n) <= n_ie0^2/n is decreasing, so f is strictly increasing and the root unique. Bracket (bisection
-    in ln n): f >= 0 at S = N_A + N_D + n_ie0 (p <= n_ie0^2/S <= n_ie0); f <= 0 at n_ie0^2/S
-    exp(-Delta(S/N_v) - 1), where p > S. Returns (n0, p0)."""
+    `traps` (CHARGED bulk levels, as _neutral_root): the EXACT FD equilibrium occupancy of the level,
+    f_t = 1/(1 + exp((E_t - E_F)/kT)) = n/(n + gamma_n(n) n1_B), gamma_n = exp(-Delta(n/N_c)) and n1_B the
+    Boltzmann-frame n1 of the level (physics_traps.equilibrium_n1 with n_ie0) -- the steady-state
+    occupancy physics_traps.srh_occupancy_expr(fd=True) takes at n p = n_ie^2, for any capture ratio.
+    p(n) <= n_ie0^2/n is decreasing and n/gamma_n(n) increasing, so every term of f (the trap terms too)
+    is strictly increasing and the root unique. Bracket (bisection in ln n): f >= 0 at S = N_A + N_D +
+    sum N_t + n_ie0 (p <= n_ie0^2/S <= n_ie0); f <= 0 at n_ie0^2/S exp(-Delta(S/N_v) - 1), where p > S.
+    Returns (n0, p0)."""
     from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
     N_D, N_A, n_ie0, n1D, p1A = (np.asarray(a, dtype=np.float64) for a in (N_D, N_A, n_ie0, n1D, p1A))
     t = np.log(n_ie0 * n_ie0 / (N_c * N_v))
     S = N_A + N_D + n_ie0
+    if traps:
+        S = S + sum(float(tr[1]) for tr in traps)
+        from dynameta.carriers.physics_traps import equilibrium_n1
+        tl = [(float(tr[1]), equilibrium_n1(tr, n_ie0, V_t, N_c, N_v), tr[2]) for tr in traps]
+    else:
+        tl = []
     hi = np.log(S)
     lo = 2.0 * np.log(n_ie0) - hi - np.asarray(fd_potential_shift(S / N_v), dtype=np.float64) - 1.0
 
@@ -939,8 +960,14 @@ def _neutral_root_fd(N_D, N_A, n_ie0, n1D, p1A, g_D, g_A, ionization: bool, N_c:
         n = np.exp(ln_n)
         p = p_of(ln_n)
         if ionization:
-            return n - p - N_D / (1.0 + g_D * n / n1D) + N_A / (1.0 + g_A * p / p1A)
-        return n - p - N_D + N_A
+            out = n - p - N_D / (1.0 + g_D * n / n1D) + N_A / (1.0 + g_A * p / p1A)
+        else:
+            out = n - p - N_D + N_A
+        if tl:
+            g1 = np.exp(-np.asarray(fd_potential_shift(n / N_c), dtype=np.float64))   # gamma_n(n)
+            for N, n1, kind in tl:                           # + (-Q_t/q), increasing in n
+                out = out + (N * n / (n + g1 * n1) if kind == "acceptor" else -N * g1 * n1 / (n + g1 * n1))
+        return out
 
     for _ in range(_ROOT_ITERS):
         mid = 0.5 * (lo + hi)
@@ -962,8 +989,8 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
 
     `statistics` (v0.15; resolve_statistics with fd_enhancement): None keeps the v0.14 arithmetic
     BIT-identically (Boltzmann-product root n0 p0 = n_ie^2); "fermi_dirac" solves the FD detailed-balance
-    root n0 p0 = n_ie0^2 exp(-Delta(n0/N_c) - Delta(p0/N_v)) (_neutral_root_fd; CHARGED trap levels are
-    refused there). The ONE BGN pairing check (check_bgn_pairing) and the outside-basis refusal
+    root n0 p0 = n_ie0^2 exp(-Delta(n0/N_c) - Delta(p0/N_v)) (_neutral_root_fd, with the CHARGED trap
+    levels at their exact FD occupancy n/(n + gamma_n n1)). The ONE BGN pairing check (check_bgn_pairing) and the outside-basis refusal
     (BGNFitPendingError) run here, so the region setup and the 3-D gate frame cannot disagree; with
     BipolarOptions.allow_unpaired_bgn the pairing message is returned as 'pairing_advisory' (None when
     the set matches or is unpaired) for install_option_fields to warn once.
@@ -994,11 +1021,6 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     pairing_msg = check_bgn_pairing(options.bgn, n_i_m3=n_i, N_c_m3=float(N_c_m3), N_v_m3=float(N_v_m3),
                                     statistics=label, T_K=options.T_K,
                                     allow=bool(options.allow_unpaired_bgn))
-    if fdc and traps:
-        raise NotImplementedError(
-            "statistics='fermi_dirac' with CHARGED bulk trap levels is not implemented: their "
-            "equilibrium occupancy n/(n + n1) assumes the Boltzmann product n p = n_ie^2. Use the legacy "
-            "statistics (statistics=None) or neutral levels.")
     # --- BGN: dEg, band-edge split, n_ie ---
     if options.bgn is not None:
         _refuse_outside_basis(options.bgn, N_D, N_A)
@@ -1030,7 +1052,8 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     inv = np.asarray(inv).reshape(-1)
     if fdc:
         n0u, p0u = _neutral_root_fd(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
-                                    ion is not None, N_c=float(N_c_m3), N_v=float(N_v_m3))
+                                    ion is not None, N_c=float(N_c_m3), N_v=float(N_v_m3),
+                                    traps=tuple(traps or ()), V_t=Vt)
     else:
         n0u, p0u = _neutral_root(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
                                  ion is not None, traps=tuple(traps or ()), V_t=Vt,
@@ -1221,20 +1244,18 @@ def install_fd_detailed_balance(device: str, region: str, base: str) -> str:
     SG transport (d psi_n = g V_t d ln n => ln n + Delta - psi_n/V_t = const, likewise for holes).
     DEVSIM differentiates a model reference through '<model>:<var>', so the derivatives are given in
     closed form without cancellation: d ln gamma/dc = -(g - 1)/c = -(GA + GC s)/(N (1 + GB s + GD s^2)),
-    s = (c/N)^(1/3) (the rational g fit, carriers.einstein). Returns "n_ie"."""
-    from dynameta.carriers.einstein import GA, GB, GC, GD
-    from dynameta.carriers.physics_heterojunction import setup_log_activity
+    s = (c/N)^(1/3) (the rational g fit, carriers.einstein; physics_heterojunction.fd_delta_derivative,
+    shared with the FD-mode transport's quasi-field). Returns "n_ie"."""
+    from dynameta.carriers.physics_heterojunction import fd_delta_derivative, setup_log_activity
     gam = []
     for var, dos, tag in (("Electrons", "N_dos", "N"), ("Holes", "N_dos_p", "P")):
         L = setup_log_activity(device, region, var, dos, fd=True)
-        s = "pow({}/{}, {!r})".format(var, dos, 1.0 / 3.0)
         g_name = "FDGamma" + tag
         dl_name = "FDdLnGamma" + tag
         ds.node_model(device=device, region=region, name=g_name,
                       equation="({v}/{d})*exp(-{L})".format(v=var, d=dos, L=L))
-        ds.node_model(device=device, region=region, name=dl_name,
-                      equation="-({a!r} + {c!r}*{s})/({d}*(1.0 + {b!r}*{s} + {dd!r}*{s}*{s}))".format(
-                          a=GA, c=GC, b=GB, dd=GD, s=s, d=dos))
+        ds.node_model(device=device, region=region, name=dl_name,   # d ln gamma/dc = -d Delta/dc (one copy)
+                      equation="-" + fd_delta_derivative(device, region, var, dos))
         ds.node_model(device=device, region=region, name="{}:{}".format(g_name, var),
                       equation="{}*{}".format(g_name, dl_name))
         gam.append((dl_name, var))
@@ -1243,6 +1264,15 @@ def install_fd_detailed_balance(device: str, region: str, base: str) -> str:
     for dl_name, var in gam:
         ds.node_model(device=device, region=region, name="n_ie:{}".format(var),
                       equation="0.5*n_ie*{}".format(dl_name))
+    # v0.15 FD-mode completion: the per-band activities base*gamma_n, base*gamma_p (FDNiN * FDNiP = n_ie^2).
+    # They are THE densities every occupancy-bearing kernel takes (physics_traps.srh_reference_densities
+    # fd=True: n1 -> gamma_n n1, p1 -> gamma_p p1; tunneling.hurkx_d_expr: the Fermi functions at E_ie):
+    # n/(n + FDNiN) IS 1/(1 + exp((E_ie - E_Fn)/kT)) with E_Fn the transport's own FD quasi-Fermi level.
+    for tag, (dl_name, var) in zip("NP", gam):
+        nm = "FDNi" + tag
+        ds.node_model(device=device, region=region, name=nm, equation="{}*FDGamma{}".format(base, tag))
+        ds.node_model(device=device, region=region, name="{}:{}".format(nm, var),
+                      equation="{}*{}".format(nm, dl_name))
     return "n_ie"
 
 
@@ -1284,10 +1314,15 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
         _set_field(device, region, "BgnDv", f["D_v_V"])
         for nm in ("BgnDc", "BgnDv"):
             ds.edge_from_node_model(device=device, region=region, node_model=nm)
+        qn = qp = ""
+        if fdc:                                  # the FD quasi-field (physics_heterojunction.fd_quasi_field_expr)
+            from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
+            qn = " + " + fd_quasi_field_expr(device, region, "Electrons", "N_dos")
+            qp = " - " + fd_quasi_field_expr(device, region, "Holes", "N_dos_p")
         _edge_with_derivs(device, region, "vdiff_g",
-                          "(vdiff + (BgnDc@n0 - BgnDc@n1)/V_t) / g_enh", ("Potential", "Electrons"))
+                          "(vdiff + (BgnDc@n0 - BgnDc@n1)/V_t) / g_enh" + qn, ("Potential", "Electrons"))
         _edge_with_derivs(device, region, "vdiff_gp",
-                          "(vdiff - (BgnDv@n0 - BgnDv@n1)/V_t) / g_enh_p", ("Potential", "Holes"))
+                          "(vdiff - (BgnDv@n0 - BgnDv@n1)/V_t) / g_enh_p" + qp, ("Potential", "Holes"))
     if fdc:                                      # FD detailed balance: n_ie from the solution
         install_fd_detailed_balance(device, region, "NieBgn" if o.bgn is not None else "n_i")
 

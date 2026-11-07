@@ -540,6 +540,10 @@ jobs:
     #   Windows dev box with its one @slow test (~90 s, closure == full model in extended precision) left to
     #   `nightly`, i.e. ~110 s serial here (8 tests; the ssac case in a child process). Follow-up: + the
     #   imref-split oracle (~42 s) and the classical 2-D == 1-D case (~13 s); the 2-D DG case is @slow.
+    # + tests/test_fd_mode_complete.py (v0.15 statistics='fermi_dirac' completed: BTBT local/nonlocal, charged and
+    #   interface traps, thermionic FDT, the FD quasi-field transport; every device case in a child process,
+    #   tests/_fd_mode_child.py): 40 tests (incl. the kinetic-trap K-FD and builder gates), 4.5 min with -n 2
+    #   on the Windows dev box (2026-11-06; ~8 min serial, inferred; no single test above 42 s).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -577,7 +581,7 @@ jobs:
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
             tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
             tests/test_devsim_noise_method.py tests/test_quasi_equilibrium.py tests/test_devsim_btbt_resolution.py \
-            tests/test_trap_noise.py
+            tests/test_trap_noise.py tests/test_fd_mode_complete.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

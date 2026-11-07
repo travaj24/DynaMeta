@@ -145,7 +145,8 @@ __all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_R
            "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients", "AffinityTemperatureError",
            "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags",
-           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair"]
+           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair", "fd_quasi_field_expr",
+           "fd_delta_derivative"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
 # quasi-Fermi-level drift-diffusion limit.
@@ -387,6 +388,60 @@ def setup_log_activity(device: str, region: str, carrier: str, dos_param: str, *
         dexpr = "1.0/{}".format(carrier)
     ds.node_model(device=device, region=region, name="{}:{}".format(name, carrier), equation=dexpr)
     return name
+
+
+def fd_delta_derivative(device: str, region: str, carrier: str, dos_param: str) -> str:
+    """Install (idempotently) the FD log activity (setup_log_activity, fd=True) and the node model
+    HJ_<carrier>_Delta:<carrier> = d Delta/dc = (g - 1)/c = (GA + GC s)/(N (1 + GB s + GD s^2)), s = (c/N)^(1/3)
+    -- the cancellation-free rational form (no g - 1 subtraction). THE one copy of this expression: the FD
+    detailed balance's d ln gamma/dc (bipolar_options.install_fd_detailed_balance) is its negative, and
+    fd_quasi_field_expr carries it to the edges. Returns its name."""
+    setup_log_activity(device, region, carrier, dos_param, fd=True)
+    name = "HJ_{c}_Delta:{c}".format(c=carrier)
+    if name not in ds.get_node_model_list(device=device, region=region):
+        s = "HJ_{}_s".format(carrier)
+        ds.node_model(device=device, region=region, name=name,
+                      equation="({a!r} + {c!r}*{s})/({d}*(1.0 + {b!r}*{s} + {dd!r}*{s}*{s}))".format(
+                          a=GA, c=GC, b=GB, dd=GD, s=s, d=dos_param))
+    return name
+
+
+def fd_quasi_field_expr(device: str, region: str, carrier: str, dos_param: str) -> str:
+    """THE thermodynamically consistent Fermi-Dirac term of the SG flux (statistics="fermi_dirac", v0.15
+    completion): the edge difference of the degeneracy potential, (Delta(u1) - Delta(u0)) [V_t units],
+    added to the Bernoulli argument with g = 1 in the prefactor -- the degeneracy enters as a quasi-field,
+    as in the SEDAN scheme (Yu & Dutton) and the "ln gamma" potential correction of commercial TCAD (both
+    cited from memory, not re-read):
+        electrons  v_n = vdiff + (Delta_n1 - Delta_n0),   J_n ~ n1 B(-v_n) - n0 B(v_n)
+        holes      v_p = vdiff - (Delta_p1 - Delta_p0),   J_p ~ p1 B(v_p) - p0 B(-v_p).
+    WHY. The flux vanishes iff ln(c1/c0) + Delta1 - Delta0 = L1 - L0 = -/+ vdiff: the discrete zero-current
+    state IS the activity equilibrium L = ln u + Delta(u) that every detailed-balance term uses (FD SRH /
+    traps / BTBT, the thermionic interface, the contacts). The legacy edge-averaged g (vdiff/g_avg, prefactor
+    g_avg) vanishes iff g_avg ln(c1/c0) = vdiff -- the trapezoid rule for Int g d ln c, off by
+    (d ln c)^3 g''/12 per edge: an O(h^2) zero-bias battery next to every degenerate gradient (MEASURED: a
+    1e9 A/m^2 "zero-bias" current, 0.4 mV, across an n+ 1e26 / n 3e25 m^-3 step at h = 1 nm;
+    docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md).
+    NOISE. Linearised at equilibrium, delta J ~ c0 B(v_n) (delta L1 - delta L0): the edge conductance is
+    q mu n_eff, n_eff = (n0 B(v) + n1 B(-v))/2 with v = vdiff_g -- the noise_analysis edge density -- so the
+    diffusion source is EXACTLY Nyquist (S = 4 kT Re Y) on degenerate edges as well.
+    NEWTON. The divided-difference form g_e = (L1 - L0)/ln(c1/c0) (Bessemoulin-Chatard, Numer. Math. 121
+    (2012); from memory) has the same equilibrium but makes the influx depend on the log of the DOWNSTREAM
+    density (g_e = 1 + Delta1/ln(c1/c0) across a degenerate-to-minority edge): from the usual charge-neutral
+    seed of an abrupt n+ 1e26 m^-3 junction its Newton drove a minority node to 1e-28 and stalled under the
+    positive-variable update (MEASURED). This form is smooth in both densities and converges from that seed.
+    Installs (idempotently) the log activity, d Delta/dc (fd_delta_derivative) and their edge copies with the
+    derivative names DEVSIM's diff() looks up for a node-model reference (<m>@n0:<carrier>@n0 -- without them
+    diff() returns 0 silently, MEASURED). Returns the edge expression."""
+    delta = "HJ_{}_Delta".format(carrier)
+    ddelta = "{}:{}".format(delta, carrier)
+    if "{}@n0".format(ddelta) not in ds.get_edge_model_list(device=device, region=region):
+        fd_delta_derivative(device, region, carrier, dos_param)
+        for m in (delta, ddelta):
+            ds.edge_from_node_model(device=device, region=region, node_model=m)
+        for nd in ("@n0", "@n1"):
+            ds.edge_model(device=device, region=region, name="{d}{n}:{c}{n}".format(d=delta, n=nd, c=carrier),
+                          equation="{}{}".format(ddelta, nd))
+    return "({d}@n1 - {d}@n0)".format(d=delta)
 
 
 def temperature_of_V_t(v_t: float) -> float:

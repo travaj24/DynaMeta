@@ -36,7 +36,11 @@ is called, and it only READS the device (its DC operating point and models are l
      Nyquist form, which is what makes the equilibrium output obey S = 4 kT Re(Y) (section 4).
      Degenerate regions (FD g-factor on): the NOISE diffusivity stays mu kT/q (Price 1965; Bonani
      & Ghione sec. 3.4: the Nyquist-consistent velocity-fluctuation source), NOT the generalized
-     g mu kT/q of the transport model -- so the FDT gate is exact only for g == 1 (Boltzmann).
+     g mu kT/q of the transport model. With the legacy edge-averaged g the FDT is then exact only for
+     g == 1 (Boltzmann) -- an O(h^2) residual next to degenerate gradients (MEASURED 6.8e-3 on an n+ 1e26 /
+     3e25 m^-3 thermionic stack at h = 1 nm). With the FD quasi-field transport (statistics="fermi_dirac",
+     unipolar statistics="fermi_dirac"; physics_heterojunction.fd_quasi_field_expr) the edge conductance IS
+     q mu n_eff with the n_eff below, and the FDT is exact on degenerate edges too (MEASURED ~1e-11).
    * Generation-recombination (GR) noise, one Poissonian net process per mechanism:
         K_gr = 2 (G + R)    [(m^-3 s^-1)^2 m^3 / Hz],
      entering the electron and hole continuity equations FULLY CORRELATED (one event removes or
@@ -527,7 +531,8 @@ def _gr_pair_per_node(device: str, region: str, external_generation_shot: bool, 
         return None
     from dynameta.carriers.physics_traps import srh_rate_expr
     pm = _pair_term_models(device, region, external_generation_shot)
-    ex = " + ".join(["({})".format(srh_rate_expr(bgn="n_ie" in nodes, pair=True))] + pm["node"])
+    fkw = {"fd": True} if "FDGammaN" in nodes else {}       # statistics="fermi_dirac": USRH's own kernel
+    ex = " + ".join(["({})".format(srh_rate_expr(bgn="n_ie" in nodes, pair=True, **fkw))] + pm["node"])
     nm = "_NoiseGRPairRate"
     ds.node_model(device=device, region=region, name=nm, equation=ex)
     P = _nv(device, region, nm) * _nv(device, region, "NodeVolume")

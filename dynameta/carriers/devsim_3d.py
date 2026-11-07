@@ -364,8 +364,10 @@ class Stacked3DSpec:
             if self.carrier_statistics not in ("boltzmann", "fermi_dirac"):
                 raise ValueError("Stacked3DSpec.carrier_statistics must be None, 'boltzmann' or "
                                  "'fermi_dirac', got {!r}".format(self.carrier_statistics))
-            if self.physics != "bipolar_dd":
-                raise ValueError("Stacked3DSpec.carrier_statistics applies only to physics='bipolar_dd'")
+            if not (self.physics == "bipolar_dd"
+                    or (self.physics == "drift_diffusion" and self.carrier_statistics == "fermi_dirac")):
+                raise ValueError("Stacked3DSpec.carrier_statistics applies only to physics='bipolar_dd' (and "
+                                 "'fermi_dirac' to 'drift_diffusion': the consistent FD transport)")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -602,6 +604,8 @@ class Stacked3DSpec:
                 srh_traps=tuple(getattr(tr, "srh_traps", ())),
                 # v0.15: scale_B_with_gap sets get B at the body T from the band-temperature model
                 btbt=_btbt_for_material(getattr(tr, "btbt", None), tr))
+        elif tr.physics == "drift_diffusion" and getattr(tr, "carrier_statistics", None) is not None:
+            bip = dict(carrier_statistics=tr.carrier_statistics)    # v0.15: the consistent FD transport
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -615,6 +619,13 @@ class Stacked3DSpec:
                     chi_semi_eV=(float(band.chi_eV) if (extra_semis and band.chi_eV is not None) else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), **bip)
+
+
+def _dd_stats(spec) -> dict:
+    """The unipolar DD regions' statistics keyword: {} for the default (byte-identical calls), else the
+    spec's carrier_statistics ("fermi_dirac": the consistent FD transport, for the primary and every extra
+    semiconductor of the stack)."""
+    return {} if spec.carrier_statistics is None else {"statistics": spec.carrier_statistics}
 
 
 # ---- D2c: tensor-product Kuhn mesh (the default 3-D mesh; see Devsim3DEquilibrium._build_mesh_tensor) ----
@@ -853,7 +864,7 @@ class Devsim3DEquilibrium:
             # Gummel) + Poisson on the 3D semi region (dimension-agnostic models).
             DD.setup_semiconductor_region_dd(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                               eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg,
-                                              mobility_m2Vs=s.mobility_m2Vs)
+                                              mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
         else:
             PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                            eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
@@ -870,7 +881,7 @@ class Devsim3DEquilibrium:
                     DD.setup_semiconductor_region_dd(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
                                                      eps_static=eps,
                                                      dos_mass_kg=s.semiconductor_dos_mass_kg(name),
-                                                     mobility_m2Vs=s.mobility_m2Vs)
+                                                     mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
                 else:
                     PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
                                                    eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))

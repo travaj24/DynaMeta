@@ -904,8 +904,12 @@ def setup_bipolar_region(device: str, region: str, *,
                          (n_ie carries exp(-Delta/2) per carrier; contacts pin the FD root) -- use it on
                          degenerate layers and with an FD-paired BGN set (the house Si bundle).
                          "boltzmann" (needs fd_enhancement=False): Boltzmann everywhere -- use it with an
-                         APPARENT (Boltzmann-extracted) BGN set. "fermi_dirac" refuses btbt and CHARGED
-                         trap levels (not implemented with the solution-dependent n_ie).
+                         APPARENT (Boltzmann-extracted) BGN set. v0.15 completion: "fermi_dirac" also
+                         carries btbt (the Hurkx D with the FD Fermi functions at E_ie), CHARGED trap levels
+                         (exact FD emission densities gamma_n n1, gamma_p p1 -- also for the built-in SRH
+                         channel -- and their exact FD equilibrium occupancy in the contacts' neutral root),
+                         interface traps and the nonlocal BTBT term, all with exact Jacobians
+                         (docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md).
       options          : opt-in BipolarOptions (audit R26/R27: Auger, radiative, bandgap narrowing,
                          incomplete ionization, T_K, uniform generation; see carriers/bipolar_options).
                          None (default) -- or a bundle with every field None -- leaves every model
@@ -960,12 +964,6 @@ def setup_bipolar_region(device: str, region: str, *,
     _fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"   # validates the pair
     _opt = options if (options is not None and options.active) else None
     if _fdc:
-        if btbt is not None or _PT.equilibrium_trap_levels(traps):
-            raise NotImplementedError(
-                "setup_bipolar_region: statistics='fermi_dirac' with {} is not implemented (its rate / "
-                "equilibrium charge assume a fixed n_ie, while FD detailed balance makes n_ie a function "
-                "of the carriers). Use statistics=None (the legacy statistics) for this region.".format(
-                    "band-to-band tunneling" if btbt is not None else "CHARGED trap levels"))
         if _opt is None:                       # FD detailed balance alone still needs the option path
             from dynameta.carriers.bipolar_options import BipolarOptions
             _opt = options if options is not None else BipolarOptions()
@@ -1007,7 +1005,18 @@ def setup_bipolar_region(device: str, region: str, *,
 
     # --- FD diffusion enhancement g(c) (accurate rational fit; see module docstring) ---
     # edge value = average of g(c/N_dos) over the edge's two nodes.
-    if fd_enhancement:
+    _fdq_n = _fdq_p = ""
+    if _fdc:
+        # statistics="fermi_dirac": the degeneracy as a QUASI-FIELD (g = 1 in the prefactor, Delta1 - Delta0 in
+        # the Bernoulli argument; physics_heterojunction.fd_quasi_field_expr) -- its discrete zero-current
+        # state IS the FD equilibrium every detailed-balance term uses, and its edge conductance is the noise
+        # model's (exact FDT)
+        from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
+        _fdq_n = " + " + fd_quasi_field_expr(device, region, "Electrons", "N_dos")
+        _fdq_p = " - " + fd_quasi_field_expr(device, region, "Holes", "N_dos_p")
+        ds.edge_model(device=device, region=region, name="g_enh", equation="1.0")
+        ds.edge_model(device=device, region=region, name="g_enh_p", equation="1.0")
+    elif fd_enhancement:
         g_n = "(0.5*({} + {}))".format(_g_expr("Electrons", "@n0"), _g_expr("Electrons", "@n1"))
         g_p = "(0.5*({} + {}))".format(_g_expr("Holes", "@n0", dos="N_dos_p"),
                                        _g_expr("Holes", "@n1", dos="N_dos_p"))
@@ -1024,14 +1033,14 @@ def setup_bipolar_region(device: str, region: str, *,
     # Sign-selected two-Bernoulli bracket since 2026-11-04: the kahan3 spelling B(-v) = B(v) + v
     # cancelled for v << 0 (1.9e-7 at v = -21, 100 % at -40; sg_flux header, docs/audit/2026-11-04-
     # sg-flux-two-bernoulli.md).
-    _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh",
+    _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh" + _fdq_n,
                       ("Potential", "Electrons"))
     _SG.install_sg_current(device, region, carrier="electrons", density="Electrons",
                            vdiff="vdiff_g", bern="Bern_g", bern_m="Bern_g_m",
                            current="ElectronCurrent",
                            prefactor="ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh",
                            wrt=("Potential", "Electrons"), current_wrt=("Electrons", "Potential"))
-    _edge_with_derivs(device, region, "vdiff_gp", "vdiff / g_enh_p",
+    _edge_with_derivs(device, region, "vdiff_gp", "vdiff / g_enh_p" + _fdq_p,
                       ("Potential", "Holes"))
     _SG.install_sg_current(device, region, carrier="holes", density="Holes",
                            vdiff="vdiff_gp", bern="Bern_gp", bern_m="Bern_gp_m",
@@ -1051,12 +1060,15 @@ def setup_bipolar_region(device: str, region: str, *,
     # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py); with
     # BGN the SAME kernel applies the n_ie substitution. Extra discrete levels (traps=...) are
     # independent channels, each its own additive term (physics_traps.install_bulk_traps).
-    _node_with_derivs(device, region, "USRH", _PT.srh_rate_expr(bgn=_bgn), ("Electrons", "Holes"))
+    # statistics="fermi_dirac": the exact FD emission densities gamma_n n1, gamma_p p1 (fd=True; the ONE kernel
+    # for this channel, every TrapLevel, every interface bin and the noise pair rate)
+    _fkw = {"fd": True} if _fdc else {}
+    _node_with_derivs(device, region, "USRH", _PT.srh_rate_expr(bgn=_bgn, **_fkw), ("Electrons", "Holes"))
     gn, gp = _generation_exprs(())
     _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
     _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
     if traps:
-        _PT.install_bulk_traps(device, region, list(traps), n_i_m3=n_i_m3, V_t=_vt, bgn=_bgn)
+        _PT.install_bulk_traps(device, region, list(traps), n_i_m3=n_i_m3, V_t=_vt, bgn=_bgn, **_fkw)
 
     # --- audit R26/R27 terms (Auger, radiative, external G) through the same additive mechanism, the
     #     ionized-dopant Poisson charge, and the charge-neutral equilibrium fields the contacts and
