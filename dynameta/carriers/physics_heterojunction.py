@@ -145,7 +145,8 @@ __all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_R
            "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients", "AffinityTemperatureError",
            "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags",
-           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair"]
+           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair", "fd_quasi_field_expr",
+           "fd_delta_derivative"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
 # quasi-Fermi-level drift-diffusion limit.
