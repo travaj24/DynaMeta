@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 from dynameta.carriers import physics_traps as PT
+from dynameta.core.numerics import trapz   # floor-safe (np.trapezoid needs numpy>=2.0)
 
 KB, QE = 1.380649e-23, 1.602176634e-19                   # re-typed (CODATA 2018 exact)
 V_T = KB * 300.0 / QE
@@ -966,7 +967,7 @@ def _hole_path_resistance(dev):
     nodes; the 0.05 nm interface mesh resolves the V_t/E_s-thick surface layer): the series resistance of
     the path that feeds the interface trap with holes (neutral body + depletion layer)."""
     x, p = _vals(dev, "x", "si"), _vals(dev, "Holes", "si")
-    return float(np.trapezoid(1.0 / (QE * MOS_MUP * p), x))
+    return float(trapz(1.0 / (QE * MOS_MUP * p), x))
 
 
 def _conductance_budget(w, psi_s, ps, cs, tau, minority, r_h):
@@ -1721,7 +1722,7 @@ def test_conductance_method_3d_stacked_spec_equals_1d():
         pot_col = _vals(dev, "Potential", "semi")[col][o]
         psi_s, ps, ns = pot_col[-1] - pot_col[0], p_col[-1], _vals(dev, "Electrons", "semi")[col][o][-1]
         cs, tau, _f0, mino = _ng_single_level(ps, ns)
-        r_h = float(np.trapezoid(1.0 / (QE * MOS_MUP * p_col), zs[o]))
+        r_h = float(trapz(1.0 / (QE * MOS_MUP * p_col), zs[o]))
         freqs = np.array([0.1, 1.0, 10.0]) / tau / (2 * math.pi)
         with V.quiet():
             f3, C3, G3 = AC.ssac_admittance(freqs)

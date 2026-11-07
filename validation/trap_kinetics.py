@@ -42,7 +42,8 @@ def _load(name):
 def main() -> int:
     H = Harness("tk", "KINETIC TRAPS: occupancy dynamics, conductance method, trap g-r noise")
     try:
-        import devsim  # noqa: F401
+        from dynameta.carriers.devsim_env import import_devsim
+        import_devsim()
     except Exception:
         H.require(False, "devsim not installed")
     warnings.simplefilter("ignore")                       # the decision-39 advisories are expected here
