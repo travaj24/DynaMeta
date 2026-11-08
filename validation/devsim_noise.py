@@ -99,6 +99,39 @@ def _solve(ae, re=1e-5, mi=80):
                  maximum_iterations=mi)
 
 
+#: the CIRCUIT's relative criterion of a DC solve at ZERO terminal current (solve_zero_current)
+ZERO_CURRENT_RE_CIRCUIT = 1e-3
+
+
+def solve_zero_current(ae, re=1e-5, mi=100, re_circuit=ZERO_CURRENT_RE_CIRCUIT):
+    """DC solve of a circuit-driven device at an EQUILIBRIUM bias (zero terminal current), with the device
+    equations held to `re` and only the circuit's relative test relaxed to `re_circuit`.
+
+    WHY. DEVSIM's relative test is |dx| / (|x| + 1e-10). The circuit unknown here is the source current,
+    ~1e-14 A/m^2 of round-off at zero bias, so the test becomes |dI| < re * 1e-10 -- and |dI| at
+    convergence is the round-off of the contact's flux sum, a few ulp of the one-way interface stream
+    (the isotype junction: J_s = (kT/q) G_0 = 1.6 A/m^2, MEASURED |dI| = 1-7e-15 A/m^2, i.e. a circuit
+    relative error that random-walks over 1.3e-5 .. 7e-5 for as long as Newton runs while the device
+    equations sit at 1e-15). At re = 1e-5 the exit is decided by the last bits: Windows dipped to 9.3e-6
+    at iteration 8; WSL / the CI runner cycled (period 4, 4.3e-5 .. 6.8e-5) to 'Convergence failure!'
+    (PR #36, 2026-11-08). DEVSIM has one relative_error for device and circuit, so the solve runs at
+    `re_circuit` (14x the worst measured floor) and the DEVICE's relative error at the accepted
+    iteration is then required to be below `re` -- the device criterion is the one the caller asked for;
+    only the ill-posed circuit test changes. (Away from zero current the circuit test is well posed:
+    use _solve.)"""
+    with quiet():
+        info = ds.solve(type="dc", solver_type="direct", absolute_error=ae, relative_error=re_circuit,
+                        maximum_iterations=mi, info=True)
+    its = info.get("iterations") or ()
+    if not info.get("converged", False):
+        raise ds.error("Convergence failure! (solve_zero_current: {} iterations)".format(len(its)))
+    dev_rel = max(d["relative_error"] for d in its[-1]["devices"])
+    if not dev_rel < re:
+        raise ds.error("Convergence failure! (solve_zero_current: the circuit met {:g} but the device "
+                       "relative error {:.3g} is not below {:g})".format(re_circuit, dev_rel, re))
+    return info
+
+
 # =====================================================================================================
 # device builders
 # =====================================================================================================
@@ -259,15 +292,20 @@ def set_bias(v, ae, src="V1", step=0.025):
     return v
 
 
-def dc_conductance(v0, ae, dv=1e-3, src="V1"):
-    """G = dI/dV at v0 by a central difference of solved DC currents; leaves the device at v0."""
+def dc_conductance(v0, ae, dv=1e-3, src="V1", zero_current=False):
+    """G = dI/dV at v0 by a central difference of solved DC currents; leaves the device at v0.
+    zero_current=True: v0 is an equilibrium point (zero terminal current), so the return solve at v0 is
+    solve_zero_current (the circuit's relative test is ill-posed there; the +-dv solves are not)."""
     out = []
     for v in (v0 - dv, v0 + dv):
         ds.circuit_alter(name=src, value=v)
         _solve(ae)
         out.append(source_current(src))
     ds.circuit_alter(name=src, value=v0)
-    _solve(ae)
+    if zero_current:
+        solve_zero_current(ae)
+    else:
+        _solve(ae)
     return (out[1] - out[0]) / (2.0 * dv)
 
 
@@ -521,10 +559,11 @@ def hetero_isotype_1d(*, astar_scale=1e-6, dev="iso1d"):
         ds.node_model(device=dev, region=r, name="_seed_psi", equation="{} + ({!r})".format(
             BP.equilibrium_seed_psi_expr(None), float(fr[r][1])))
         _seed(dev, ("Potential", "Electrons", "Holes"), region=r)
-    # at zero bias the terminal current is ~1e-10 A/m^2 of round-off, so the CIRCUIT's relative update
-    # never drops below ~1e-5 (MEASURED: it stalls at 1e-6 - 2e-5 while the device reaches 4e-15); the
-    # circuit criterion is therefore loosened here only -- Newton is past quadratic convergence by then
-    _solve(ISO_AE, 1e-3, 100)
+    # at zero bias the terminal current is round-off, so the CIRCUIT's relative update never drops reliably
+    # below ~1e-5 (MEASURED: it stalls at 1e-6 - 7e-5 while the device reaches 4e-15): solve_zero_current
+    # relaxes the circuit test only and holds the device to 1e-5 (the same DEVSIM call as the former
+    # _solve(ISO_AE, 1e-3, 100), plus that device check)
+    solve_zero_current(ISO_AE)
     return dev
 
 
