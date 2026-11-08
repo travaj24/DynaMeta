@@ -307,18 +307,46 @@ def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_
     assert all(np.array_equal(got[0][k], got[1][k]) for k in got[0])
 
 
-def test_legacy_gmsh_mesher_keeps_the_defect_and_warns(tmp_path):
-    spec = V._spec(physics="drift_diffusion", mesher="gmsh")
+def test_gmsh_mesher_uncorrected_keeps_the_defect_and_warns(tmp_path):
+    """exact_geometry=False reproduces the pre-v0.14 gmsh numbers (DEVSIM's unsigned geometry: sum
+    NodeVolume 1.196 x, MEASURED) and says so. User decision 2026-11-06: the gmsh mesher STAYS (no
+    "removed in v0.15"), corrected by default -- next test."""
+    spec = V._spec(physics="drift_diffusion", mesher="gmsh", exact_geometry=False)
     sol = D3.Devsim3DEquilibrium(spec, device_name="t3g", mesh_name="t3gm", msh_path=str(tmp_path / "g.msh"))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         sol.build_device()
     try:
         msgs = [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]
-        assert msgs
-        # user decision 2026-11-04: the warning states the legacy mesher's fate (fails on 6595bde)
-        assert any("pre-v0.14" in m and "REMOVED in v0.15" in m for m in msgs), msgs
+        assert len(msgs) == 1 and "pre-v0.14" in msgs[0] and "exact_geometry=False" in msgs[0], msgs
+        assert not any("v0.15" in m for m in msgs)
+        assert sol.geometry_reports == {}
         assert V._v("t3g", "semi", "NodeVolume").sum() / (V.L * V.L * V.TSI) > 1.1
+    finally:
+        sol.teardown()
+
+
+def test_gmsh_mesher_is_geometry_corrected_by_default(tmp_path):
+    """Default exact_geometry=True on the gmsh mesh: every region's sum NodeVolume, 2 sum
+    ElementNodeVolume and SurfaceArea (gate oxide) equal the GEOMETRIC volume / cell area (L^2 t, L^2 --
+    the oracle) to 1e-12, where DEVSIM's own geometry gives 1.196 / 1.293 x (MEASURED, previous test). The
+    mesh's few negative assembled couples (~1.3 % of edges, MEASURED in validation/devsim_geometry.py) are
+    kept and reported in ONE UnreliableResultWarning ('warn'); no mesher warning any more."""
+    spec = V._spec(physics="drift_diffusion", mesher="gmsh")
+    sol = D3.Devsim3DEquilibrium(spec, device_name="t3c", mesh_name="t3cm", msh_path=str(tmp_path / "c.msh"))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        sol.build_device()
+    try:
+        msgs = [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]
+        assert len(msgs) == 1 and "exact geometry on device 't3c'" in msgs[0], msgs
+        assert all(rp.written for rp in sol.geometry_reports.values())
+        for (r, _m, _ro, zl, zh, _e) in spec.layer_stack_nm():
+            Vr = V.L * V.L * (zh - zl) * 1e-9
+            assert abs(V._v("t3c", r, "NodeVolume").sum() / Vr - 1.0) < 1e-12
+            env = np.asarray(D3.ds.get_element_model_values(device="t3c", region=r, name="ElementNodeVolume"))
+            assert abs(2.0 * env.sum() / Vr - 1.0) < 1e-12
+        assert abs(V._v("t3c", "semi", "SurfaceArea").sum() / (V.L * V.L) - 1.0) < 1e-12
     finally:
         sol.teardown()
 
@@ -425,7 +453,7 @@ def test_3d_impact_ionization_equals_1d_on_a_laterally_uniform_reverse_diode():
 
 def test_3d_impact_ionization_refuses_an_inexact_mesh(tmp_path):
     from dynameta.carriers.impact_ionization import SILICON_VANOVERSTRAETEN, substrate_current
-    spec = V._spec(physics="drift_diffusion", mesher="gmsh")
+    spec = V._spec(physics="drift_diffusion", mesher="gmsh", exact_geometry=False)   # the uncorrected mesh
     sol = D3.Devsim3DEquilibrium(spec, device_name="t3r", mesh_name="t3rm", msh_path=str(tmp_path / "r.msh"))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -435,3 +463,44 @@ def test_3d_impact_ionization_refuses_an_inexact_mesh(tmp_path):
             substrate_current("t3r", "semi", SILICON_VANOVERSTRAETEN)
     finally:
         sol.teardown()
+
+
+def test_builders_only_read_the_library_meshes(monkeypatch, tmp_path):
+    """BYTE-IDENTITY of the automatic geometry correction (v0.14.0, user decision 2026-11-06): both builders
+    call devsim_geometry.correct_device_geometry right after create_device, but on their own meshes (3-D
+    Kuhn tensor in every topology, 2-D rectilinear) every region is already exact, so the WRITE path is
+    never entered: devsim_geometry._measure (its first step, the one that creates temporary models) is
+    replaced by a tripwire here and the builds still pass, every report saying written=False. The
+    read-only path itself makes no non-get devsim call (tests/test_devsim_geometry.py). Adversarial: the
+    same tripwire fires on the gmsh mesher."""
+    from dynameta.carriers import devsim_geometry as G
+
+    def tripwire(*a, **k):
+        raise AssertionError("devsim_geometry write path entered")
+    monkeypatch.setattr(G, "_measure", tripwire)
+    for k, kw in enumerate([{}, dict(gate_patch_frac=0.5, extra_dielectrics=[("HfO2", 4e-9, 18.0)]),
+                            dict(gate_patch_frac=0.6, inclusions=[D3.Inclusion3D(
+                                name="sx", material="SiO2", eps=3.9, in_layer="semi", x_frac=0.3,
+                                y_frac=0.5)])]):
+        sol = D3.Devsim3DEquilibrium(V._spec(physics="drift_diffusion", **kw), device_name="t3ro%d" % k,
+                                     mesh_name="t3ro%dm" % k)
+        sol._create_mesh_device()
+        try:
+            assert sol.geometry_reports and not any(r.written for r in sol.geometry_reports.values())
+        finally:
+            sol.teardown()
+    from validation.devsim_heterojunction import ALGAAS, GAAS, stack_design, transport
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    b = LayeredDevsimBuilder(stack_design([("l0", "M0", 200e-9, transport(GAAS, n_bg=1e23, physics="drift_diffusion")),
+                                           ("l1", "M1", 200e-9, transport(ALGAAS, n_bg=1e23, physics="drift_diffusion"))]),
+                             mesh_name="t2rom", device_name="t2ro")
+    b.build_device()
+    try:
+        assert b.geometry_reports and not any(r.written for r in b.geometry_reports.values())
+    finally:
+        b.teardown()
+    sol = D3.Devsim3DEquilibrium(V._spec(physics="drift_diffusion", mesher="gmsh"), device_name="t3rog",
+                                 mesh_name="t3rogm", msh_path=str(tmp_path / "ro.msh"))
+    with pytest.raises(AssertionError, match="write path entered"):
+        sol._create_mesh_device()
+    sol.teardown()

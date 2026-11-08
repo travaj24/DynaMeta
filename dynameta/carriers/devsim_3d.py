@@ -32,7 +32,10 @@ PATH (Kuhn) tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXA
 exact, not right angles alone (correction 2026-11-04, doc section 10: the trirectangular corner tet is
 right-angled and DEVSIM gives it 2x its volume); tests/test_devsim_3d_mesh.py pins that every emitted tet
 is a path tet. The gmsh paths below survive as
-mesher="gmsh" (legacy, UnreliableResultWarning; kept only to reproduce pre-v0.14 numbers, removed in v0.15).
+mesher="gmsh" and STAY (user decision 2026-11-06): the builder corrects DEVSIM's geometry on it right after
+create_device (Stacked3DSpec.exact_geometry, default True; devsim_geometry), which makes its volumes exact
+(MEASURED sum NodeVolume 1.196 / 1.293 x -> 1 + 2e-16). exact_geometry=False reproduces the pre-v0.14 gmsh
+numbers and warns (UnreliableResultWarning).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -97,6 +100,7 @@ from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import extended_precision as XP
+from dynameta.carriers import devsim_geometry as GEO
 from dynameta.carriers import physics_traps as PT
 from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers.dc_solve import solve_dc
@@ -166,13 +170,13 @@ class Stacked3DSpec:
     # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
     # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (PATH) tetrahedra:
     # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
-    # every circumcentric piece >= 0 -- a property of path tets, not of right-angled tets in general). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
-    # reproduce old numbers and REMOVED in v0.15 (user decision 2026-11-04; its warning stays an
-    # UnreliableResultWarning, not a DynaMetaDeprecationWarning: the numbers it returns are wrong, which
-    # is what that category means, while the deprecation class is for renamed spellings that still give
-    # the same answer -- docs/audit/2026-11-04-v0.14-user-decisions.md). DEVSIM 2.11 sums the MAGNITUDES
-    # of each tet's circumcentric dual pieces, so on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
-    # the D1c gate-G2 cap) and integrated charge is ~20 % wrong (docs/audit/2026-11-03-devsim-3d-mesh.md).
+    # every circumcentric piece >= 0 -- a property of path tets, not of right-angled tets in general).
+    # "gmsh" = the unstructured gmsh mesh. DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual
+    # pieces, so on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x
+    # oxide on the D1c gate-G2 cap; integrated charge ~20 % wrong, docs/audit/2026-11-03-devsim-3d-mesh.md)
+    # -- which exact_geometry (below, default True) now corrects, so the gmsh mesher STAYS (user decision
+    # 2026-11-06, superseding the 2026-11-04 "removed in v0.15"; docs/audit/2026-11-06-devsim-geometry-
+    # workaround.md). The tensor mesh remains the default: exact without any correction, fewer nodes.
     mesher:          str = "tensor"
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
     field_region_name: str = "semi"      # emitted CarrierField region key (match the optics
@@ -224,6 +228,13 @@ class Stacked3DSpec:
     # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
     # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
     extended_precision: bool = False
+    # v0.14.0 (user decision 2026-11-06): correct DEVSIM's box-method geometry right after create_device
+    # (devsim_geometry.correct_device_geometry). True (default) = negative policy 'warn' (exact volumes;
+    # the few negative assembled couples of a gmsh mesh are kept and warned -- MEASURED best: capacitor
+    # exact, MOS-cap Gauss residual 1.3e-5); 'raise' refuses such a mesh; 'clip' clips them to 0
+    # (M-matrix kept, measured cost); False = DEVSIM's uncorrected geometry (pre-v0.14 gmsh numbers). The
+    # tensor (Kuhn) mesh is exact already and is only READ (byte-identical whatever the value).
+    exact_geometry: object = True
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -313,6 +324,7 @@ class Stacked3DSpec:
             raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
         if self.mesher not in ("tensor", "gmsh"):
             raise ValueError("Stacked3DSpec.mesher must be 'tensor' or 'gmsh'; got {!r}".format(self.mesher))
+        GEO.resolve_policy(self.exact_geometry)              # True / False / 'warn' / 'raise' / 'clip'
         if not (0.0 < self.mesh_min_nm <= self.mesh_max_nm):
             raise ValueError("Stacked3DSpec needs 0 < mesh_min_nm <= mesh_max_nm; got {} / {}".format(
                 self.mesh_min_nm, self.mesh_max_nm))
@@ -400,7 +412,8 @@ class Stacked3DSpec:
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
                      interface_traps=None, extended_precision: bool = False,
-                     mesher: str = "tensor", on_chi_temperature: str = "refuse") -> "Stacked3DSpec":
+                     mesher: str = "tensor", on_chi_temperature: str = "refuse",
+                     exact_geometry=True) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -577,7 +590,7 @@ class Stacked3DSpec:
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
                     chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
                     interface_traps=interface_traps,
-                    extended_precision=bool(extended_precision), **bip)
+                    extended_precision=bool(extended_precision), exact_geometry=exact_geometry, **bip)
 
 
 # ---- D2c: tensor-product Kuhn mesh (the default 3-D mesh; see Devsim3DEquilibrium._build_mesh_tensor) ----
@@ -799,6 +812,8 @@ class Devsim3DEquilibrium:
             if tmpdir is not None:
                 shutil.rmtree(tmpdir, ignore_errors=True)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+        # v0.14.0: exact box-method geometry (Stacked3DSpec.exact_geometry). The tensor mesh is only read.
+        self.geometry_reports = GEO.correct_device_geometry(self.device, self.spec.exact_geometry, stacklevel=4)
 
     def build_device(self) -> None:
         self._create_mesh_device()
@@ -1124,12 +1139,14 @@ class Devsim3DEquilibrium:
     def _build_mesh(self) -> None:
         if self.spec.mesher == "tensor":                        # D2c default: exact box-method geometry
             return self._build_mesh_tensor()
-        warnings.warn(
-            "Stacked3DSpec(mesher='gmsh'): the unstructured gmsh mesh has non-well-centred tetrahedra, on "
-            "which DEVSIM 2.11's 3-D node volumes over-count (MEASURED sum NodeVolume 1.20-1.52 x the region "
-            "volume) and integrated charge is ~20 % wrong. mesher='gmsh' is kept ONLY to reproduce pre-v0.14 "
-            "numbers and will be REMOVED in v0.15; use mesher='tensor', the default "
-            "(docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
+        if GEO.resolve_policy(self.spec.exact_geometry) is None:
+            warnings.warn(
+                "Stacked3DSpec(mesher='gmsh', exact_geometry=False): the unstructured gmsh mesh has "
+                "non-well-centred tetrahedra, on which DEVSIM 2.11's UNCORRECTED 3-D node volumes over-count "
+                "(MEASURED sum NodeVolume 1.20-1.52 x the region volume) and integrated charge is ~20 % wrong "
+                "-- the pre-v0.14 numbers. Leave exact_geometry=True (the default) to correct the geometry, "
+                "or use mesher='tensor' (docs/audit/2026-11-06-devsim-geometry-workaround.md).",
+                UnreliableResultWarning, stacklevel=3)
         if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
             return self._build_mesh_incl()
         import gmsh
