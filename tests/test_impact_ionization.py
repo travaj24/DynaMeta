@@ -321,9 +321,9 @@ def test_u2_laterally_uniform_2d_diode_equals_1d():
           edges from their 1e-14 state difference; weighted by alpha, I_sub differs by 1.7e-8 (MEASURED,
           both quadratures equally). That floor is solver noise this test cannot derive a priori, so the
           1e-6 bound (60x the measured floor) makes this a consistency check, not a gate."""
+    ds = _ds()                     # skips without devsim; devsim_3d raises ImportError at import time
     from dynameta.carriers import devsim_3d as D3
     from dynameta.carriers.impact_ionization import substrate_current
-    ds = _ds()
     x = D3._graded_axis([0.0, 100.0, 200.0], [100.0], 1.0, 8.0, dist_min=30.0, dist_max=80.0) * 1e-9
     width = 20e-9
     res = {}
