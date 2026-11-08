@@ -42,7 +42,7 @@ All of this rests on three pieces of shared infrastructure, built once.
 |---|---|
 | **v0.14.0** | The in-flight branches, plus fixes to v0.14's own unreleased code: CI wiring, preset corrections, the 3-D temperature defect, trap-bin width, BTBT temperature warning, ionization units guard. Recommended here as well: the 2-D impact-ionization correction, which changes released results. |
 | **v0.14.1** | Whatever the user chooses not to hold the tag for. Notably the InGaAs gap row in the SOA module. |
-| **v0.15** | The features in section 4, plus removal of the gmsh mesher (your decision 1 of 2026-11-04). |
+| **v0.15** | The features in section 4. (The gmsh-mesher removal of decision 1, 2026-11-04, is cancelled: user decision 2026-11-06 keeps it, geometry-corrected.) |
 | **Later** | 2-D nonlocal BTBT, McWhorter border traps, the Altermatt-2006 ionization model, hole and poly-gate tunnelling, more III-V materials, a DC charge constraint for isolated wells. |
 
 **Decide first** (section 7, group A):
@@ -787,7 +787,7 @@ Each item is resolved in the section shown:
 | Band temperature model | v0.15 | 3-4 |
 | Tolerance and well-posedness | v0.15 | 5-6.5 |
 | Hard wall and strong inversion | v0.15 | 7.5-11 |
-| gmsh mesher removal (no plan estimated it) | v0.15 | about 1 |
+| ~~gmsh mesher removal~~ cancelled 2026-11-06 (kept, geometry-corrected) | -- | 0 |
 | **v0.15 total** | | **about 67-90** |
 | Nonlocal 2-D (8-12), McWhorter (4-6), Altermatt 2006 (1.5-2); ohmic-contact noise drive, hole/poly tunnelling, DC charge constraint (not estimated) | later | 14-20 + unestimated |
 

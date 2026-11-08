@@ -486,7 +486,7 @@ jobs:
     # + tests/test_devsim_sg_flux.py (the SG-kernel gates, merged after the timing above): 19 s serial on
     #   the Windows dev box (9 tests; mpmath oracle), i.e. ~2 % of this job.
     # + tests/test_devsim_geometry.py (the opt-in exact-geometry workaround, devsim_geometry): 8 s serial
-    #   on the Windows dev box (14 tests, in-memory meshes; scipy Qhull oracles).
+    #   on the Windows dev box (16 tests, in-memory meshes; scipy Qhull oracles).
     # + tests/test_devsim_element_geometry.py (the shared exact-element-volume check and its II / BTBT /
     #   Hooge refusals, 2026-11-06): 4.4 s serial on the Windows dev box (9 tests; gmsh in memory).
     #   tests/test_impact_ionization.py (in `solvers`) gained the 2-D quadrature gates: 2.3 s (12 tests).
