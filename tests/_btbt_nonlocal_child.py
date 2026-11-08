@@ -801,9 +801,15 @@ def sc_corner(opts):
         dev = build_2d("cn" + kind[0] + out["geom"][0], xl, xl, dop, n_i=ZNI, tau=1e-3, contacts=contacts,
                        fd=bool(opts.get("fd", False)), statistics=opts.get("statistics"),
                        local=SILICON_HURKX if kind == "local" else None)
+        its = []
+        if kind == "nonlocal" and opts.get("fd"):
+            # FD: the equilibrium from the seed WITHOUT the term first (the bare FD device needs ~290 Newton
+            # steps from the seed at h = 0.5 nm, and with the term installed it does not converge in 400;
+            # MEASURED 2026-11-08), then the term (1 more step). Boltzmann: as recorded (term first, 45 steps).
+            its.append(solve(it=400))
         term = (NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
                 if kind == "nonlocal" else None)
-        its = [solve()]
+        its.append(solve(it=400))
         xy = _xy(dev)
         tri = np.asarray(ds.get_element_node_list(device=dev, region="b"), np.int64)
         gops = B2.gradient_ops_2d(B2.build_mesh2d(xy, tri))
@@ -844,8 +850,9 @@ SCENARIOS = {"defaults": sc_defaults, "fdt": sc_fdt, "zener": sc_zener, "flip": 
              "lat2d": sc_lat2d, "slant": sc_slant, "corner": sc_corner}
 
 
-def run_child(scenario, **opts):
-    """Run `scenario` in a fresh interpreter on this sys.path; returns its JSON result."""
+def run_child(scenario, *, timeout=900, **opts):
+    """Run `scenario` in a fresh interpreter on this sys.path; returns its JSON result (timeout [s]: the
+    child's wall-clock limit)."""
     import subprocess
     import tempfile
     fd, out = tempfile.mkstemp(suffix=".json")
@@ -853,7 +860,7 @@ def run_child(scenario, **opts):
     try:
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
         r = subprocess.run([sys.executable, os.path.abspath(__file__), scenario, out, json.dumps(opts)],
-                           env=env, capture_output=True, text=True, timeout=900)
+                           env=env, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
             raise RuntimeError("child {} failed:\n{}".format(scenario, r.stderr[-4000:]))
         with open(out, encoding="utf-8") as f:
