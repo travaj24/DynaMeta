@@ -686,6 +686,37 @@ def _sigmoid(z):
     return 0.5 * (1.0 + np.tanh(0.5 * np.asarray(z, float)))
 
 
+OCC_SCALED_ABOVE = 1000.0
+"""|za| + |zb| above which _occupancy_difference takes its scaled form (the product form's two cosh would
+overflow above ~1420; FD log activities L = ln u + Delta(u), Delta ~ u^(2/3), reach that on wild Newton
+iterates -- MEASURED on the 2-D corner device's first FD solve, 2026-11-08)."""
+
+
+def _occupancy_difference(za, zb):
+    """f_n - f_p = sigma(za) - sigma(zb), cancellation-free and overflow-free. With d = (za - zb)/2 and
+    s = (za + zb)/2 it is sinh(d) / (2 cosh(za/2) cosh(zb/2)) = sinh(d) / (cosh s + cosh d): the product form
+    (bitwise the v0.15 1-D form) while |za| + |zb| <= OCC_SCALED_ABOVE, else numerator and denominator scaled by
+    exp(-m), m = max(|s|, |d|): sinh|d| e^-m = -exp(|d| - m) expm1(-2|d|)/2 (accurate for every |d|, no
+    exponent > 0). At equilibrium (d = 0) both forms give exactly 0."""
+    za = np.asarray(za, float)
+    zb = np.asarray(zb, float)
+    za, zb = np.broadcast_arrays(za, zb)
+    out = np.empty(za.shape)
+    big = (np.abs(za) + np.abs(zb)) > OCC_SCALED_ABOVE
+    ok = ~big
+    a, b = za[ok], zb[ok]
+    out[ok] = np.sinh(0.5 * (a - b)) / (2.0 * np.cosh(0.5 * a) * np.cosh(0.5 * b))
+    if big.any():
+        a, b = za[big], zb[big]
+        d, sm = 0.5 * (a - b), 0.5 * (a + b)
+        ad, asm = np.abs(d), np.abs(sm)
+        m = np.maximum(ad, asm)
+        num = -0.5 * np.sign(d) * np.exp(ad - m) * np.expm1(-2.0 * ad)
+        den = 0.5 * (np.exp(asm - m) + np.exp(-asm - m) + np.exp(ad - m) + np.exp(-ad - m))
+        out[big] = num / den
+    return out
+
+
 def _taper(length, max_length_m):
     """w(l) and dw/dl: 1 up to TAPER_START max_length, C^1 smoothstep to 0 at max_length."""
     w0 = TAPER_START * max_length_m
@@ -887,7 +918,7 @@ def _rates_core(ps: PathSet, psi, gvec, gops, Ln, Lp, phys: NonlocalPhysical, de
     Ln_pt = w1 * Ln[n1] + mu * Ln[n2]
     za = Ln_pt[a] * (1.0 - t) + Ln_pt[b] * t + delta            # f_n(l) = sigma(za)
     zb = -Lp[i]                                                  # f_p(0) = sigma(zb)
-    dfo = np.sinh(0.5 * (za - zb)) / (2.0 * np.cosh(0.5 * za) * np.cosh(0.5 * zb))
+    dfo = _occupancy_difference(za, zb)
     sa, sb = _sigmoid(za), _sigmoid(zb)
     sa_, sb_ = _sigmoid(-za), _sigmoid(-zb)
     e_nodes = np.stack([n1[a], n2[a], n1[b], n2[b]], axis=1)

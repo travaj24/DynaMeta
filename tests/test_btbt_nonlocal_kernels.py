@@ -774,3 +774,42 @@ def test_n4c_integrated_current_converges(oracle, process):
     print(process, "J_oracle", J_or, "rel err", err, "orders", orders, "local(D=-1)/nonlocal", J_loc / J_or)
     assert orders[0] >= 1.7 and orders[1] >= 1.7
     assert abs(err[2]) <= 2.0 * C_inf * (hs[2] * 1e9) ** 2
+
+
+# =====================================================================================================
+# N0d f_n - f_p for FD-sized log activities (2026-11-08)
+# =====================================================================================================
+
+def test_n0d_occupancy_difference_is_overflow_free_and_accurate():
+    """f_n - f_p = sigma(za) - sigma(zb) for |za|, |zb| up to 3000 (FD log activities ln u + Delta(u) reach
+    > 1400 on wild Newton iterates: MEASURED on the 2-D corner device's first FD solve, where the product form
+    sinh(d)/(2 cosh cosh) overflowed). Oracle: the same identity in mpmath at 50 digits on the SAME float inputs.
+    Budget: 2 eps (1 + |za| + |zb|) relative (the function's own conditioning in its arguments: d ln f / dz <= 1,
+    so an input rounding of eps |z| moves it by eps |z|, plus a few ulps). MEASURED <= 0.43 eps (1 + |za| + |zb|).
+    Exactly 0 at za == zb; below the double range the result underflows. Prove-out: the product form raises
+    an overflow RuntimeWarning on the large inputs; on the small ones the two forms are bitwise equal."""
+    mp = pytest.importorskip("mpmath")
+    mp.mp.dps = 50
+    rng = np.random.default_rng(1)
+    za = np.concatenate([rng.uniform(-3000, 3000, 1500), rng.uniform(-40, 40, 500), [0.0, 999.0, 1001.0, -1500.0]])
+    zb = np.concatenate([rng.uniform(-3000, 3000, 1500), rng.uniform(-40, 40, 500), [0.0, 1.0, -0.5, -1500.0]])
+    zb[:200] = za[:200] + rng.uniform(-1e-6, 1e-6, 200)          # near equilibrium at large activities
+    f = NL._occupancy_difference(za, zb)
+    worst = 0.0
+    for a, b, v in zip(za, zb, f):
+        A, B = mp.mpf(float(a)), mp.mpf(float(b))
+        ref = mp.sinh((A - B) / 2) / (2 * mp.cosh(A / 2) * mp.cosh(B / 2))
+        if ref == 0:
+            assert v == 0.0
+        elif abs(ref) < 1e-300:
+            assert abs(v) < 1e-290
+        else:
+            worst = max(worst, float(abs(mp.mpf(float(v)) - ref) / abs(ref)) / (1 + abs(a) + abs(b)))
+    print("N0d worst relative error / (1 + |za| + |zb|):", worst / EPS, "eps")
+    assert worst <= 2 * EPS
+    small = (np.abs(za) + np.abs(zb)) <= NL.OCC_SCALED_ABOVE
+    prod = np.sinh(0.5 * (za[small] - zb[small])) / (2.0 * np.cosh(0.5 * za[small]) * np.cosh(0.5 * zb[small]))
+    assert np.array_equal(prod, f[small])
+    with pytest.raises(RuntimeWarning, match="overflow"):
+        with np.errstate(over="warn"):
+            np.sinh(0.5 * (za - zb)) / (2.0 * np.cosh(0.5 * za) * np.cosh(0.5 * zb))

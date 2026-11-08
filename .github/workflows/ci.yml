@@ -585,7 +585,10 @@ jobs:
     #   laterally uniform Zener 9 s, slanted FDT diode equilibrium 36 s, reverse-bias ssac 51 s, reverse-bias
     #   Jacobian 35 s) -- ~1.1-1.7 min more on the runner (0.5-0.8x, INFERRED), so the estimate above
     #   becomes ~22-35 min with the install: the split proposed above is now due if the next run is over
-    #   ~30 min. It needs numba (user decision 23), hence `numba` in this job's install; no other module of
+    #   ~30 min. + the FD-default gates (2026-11-08: 17 tests now; the laterally uniform Zener under FD 11 s,
+    #   the degenerate slanted diode 63 s at 0 V and 100 s at -0.2 V): 303 s serial MEASURED on a loaded
+    #   box, i.e. ~2.5-4 min on the runner -- ~25-38 min with the install against the 40-min cap. SPLIT
+    #   BEFORE THE NEXT DEVSIM MODULE IS ADDED (or move the two F2 children to the nightly). It needs numba (user decision 23), hence `numba` in this job's install; no other module of
     #   this list imports numba.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
@@ -728,7 +731,9 @@ jobs:
         # The rotated-junction convergence gates (4 x ~30 s), their refutation, the DEVSIM rotation-term
         # refutation (~50 s) and the corner-geometry measurement (890 s MEASURED on the loaded dev box:
         # two 12769-node devices x two models, 18 Newton solves each): ~18 min in all, so this job's
-        # estimate above becomes ~35-45 min, still 2x under its cap. They importorskip numba, which
+        # estimate above becomes ~35-45 min, still 2x under its cap. 2026-11-08: + the corner under the FD
+        # default (~13 min: 685 s child + the 1-D reference) and the two F2 refutations (177 s): ~34 min in
+        # all, this job ~50-60 min against its 90-min cap. They importorskip numba, which
         # step (a)'s install leaves out on purpose (adding it there would switch other modules' @slow cases
         # to their numba kernels). Installed here, after (a), for these two files only.
         run: |
