@@ -128,13 +128,14 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 
 from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = ["apply_exact_geometry", "measure_dual_geometry", "exact_geometry_applied",
+           "geometry_already_exact", "correct_device_geometry", "resolve_policy",
            "ExactGeometryReport", "NegativeDualGeometryError", "triangle_dual_pieces",
            "tetrahedron_dual_pieces", "MARKER_PARAMETER"]
 
@@ -142,6 +143,13 @@ MARKER_PARAMETER = "dynameta_exact_geometry"     # region parameter set by apply
 NEGATIVE_POLICIES = ("raise", "warn", "clip")
 _NEG_RTOL = 1e-9                                 # genuine negative vs round-off (module doc)
 _LAYOUT_RTOL = 1e-9                              # DEVSIM unsigned values vs our |pieces| re-derivation
+# ALREADY-EXACT bound (geometry_already_exact): DEVSIM's |piece| equals the signed piece unless the piece is
+# negative; a piece that is mathematically ZERO (Kuhn face / body diagonals, right-triangle hypotenuses)
+# comes out of the circumcentre arithmetic as +-(a few eps) h_T^(d-1), h_T the element's longest edge
+# (MEASURED <= 1.15 eps h^k on the Kuhn / rectilinear gates). 64 eps leaves a 50x margin over that and is
+# still 7 decades below the smallest genuine negative measured anywhere (-1.5e-4 L^2, a two-region
+# Delaunay test mesh).
+_EXACT_EPS = 64.0 * np.finfo(np.float64).eps
 _TET_EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 _GEOM_PARAMS = {"node_volume_model": "NodeVolume", "edge_couple_model": "EdgeCouple",
                 "element_edge_couple_model": "ElementEdgeCouple",
@@ -182,7 +190,8 @@ class ExactGeometryReport:
     surface_true_area: float = 0.0       # 3-D: interface + contact triangle area (each triangle once)
     devsim_surface_ratio: float = 1.0    # 3-D: DEVSIM's (SurfaceArea + ContactSurfaceArea) / true
     n_negative_areas: int = 0            # 3-D: signed SurfaceArea / ContactSurfaceArea shares < -tol
-    applied: bool = False
+    applied: bool = False                # the region's geometry is exact after the call
+    written: bool = False                # apply_exact_geometry wrote DEVSIM models (False: already exact)
     policy: Optional[str] = None
     clipped_couple_fraction: float = 0.0  # clip: sum |clipped couples| / sum |couples|
     clipped_volume_fraction: float = 0.0  # clip: sum |clipped node volumes| / true_volume
@@ -410,6 +419,56 @@ def _surfaces(device: str, region: str, xyz: np.ndarray):
     return out
 
 
+def _check_default_models(device: str, region: str) -> None:
+    ds = _ds()
+    for p, default in _GEOM_PARAMS.items():
+        v = ds.get_parameter(device=device, region=region, name=p)
+        if v != default:
+            raise ValueError(
+                "apply_exact_geometry: region {!r} assembles with {}={!r} (cylindrical or user geometry "
+                "models), which this correction does not cover; it corrects DEVSIM's Cartesian built-ins "
+                "only.".format(region, p, v))
+
+
+def geometry_already_exact(device: str, region: str) -> bool:
+    """READ-ONLY test (only devsim get_* calls; nothing is created, set or deleted): True iff DEVSIM's
+    built-in geometry of `region` already IS the exact signed one to round-off, so apply_exact_geometry has
+    nothing to write. That is the case iff no circumcentric piece is negative beyond the round-off of a zero
+    piece (_EXACT_EPS h_T^(d-1), h_T the element's longest edge) -- the DynaMeta library meshes (2-D
+    rectilinear right triangles, 3-D Kuhn tets) -- and, in 3-D, the same holds for every interface /
+    contact triangle share. DEVSIM's current ElementEdgeCouple must also re-derive from the coordinates
+    (per element, as a multiset, to _LAYOUT_RTOL): a region whose values were already overwritten, or that
+    does not match, returns False and goes through the full (checked) path. 1-D: True."""
+    ds = _ds()
+    dim = int(ds.get_dimension(device=device))
+    if dim == 1:
+        return True
+    _check_default_models(device, region)
+    xyz = np.column_stack([_arr(ds.get_node_model_values(device=device, region=region, name=c))
+                           for c in ("x", "y", "z")])
+    els = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=np.int64)
+    if dim == 2:
+        s, L, _c = triangle_dual_pieces(xyz[els][:, :, :2])
+        sg, us = s, np.abs(s)
+    else:
+        sg, us, L = tetrahedron_dual_pieces(xyz[els])
+    hT = L.max(axis=1, keepdims=True) ** (dim - 1)
+    cur = _arr(ds.get_element_model_values(device=device, region=region, name="ElementEdgeCouple"))
+    if cur.size != us.size:                                     # pragma: no cover - DEVSIM invariant
+        return False
+    cur = np.sort(cur.reshape(us.shape), axis=1)
+    if not np.all(np.abs(cur - np.sort(us, axis=1)) <= _LAYOUT_RTOL * hT):
+        return False
+    if not np.all(us - sg <= _EXACT_EPS * hT):
+        return False
+    if dim == 3:
+        h2 = float(L.max()) ** 2
+        for sg_a, us_a, _area in _surfaces(device, region, xyz).values():
+            if not np.all(us_a - sg_a <= _EXACT_EPS * h2):
+                return False
+    return True
+
+
 def _measure(device: str, region: str):
     ds = _ds()
     R = _Region(device, region)
@@ -418,13 +477,7 @@ def _measure(device: str, region: str):
         L = _arr(ds.get_edge_model_values(device=device, region=region, name="EdgeLength"))
         rep.true_volume = float(L.sum())
         return R, rep, None
-    for p, default in _GEOM_PARAMS.items():
-        v = ds.get_parameter(device=device, region=region, name=p)
-        if v != default:
-            raise ValueError(
-                "apply_exact_geometry: region {!r} assembles with {}={!r} (cylindrical or user geometry "
-                "models), which this correction does not cover; it corrects DEVSIM's Cartesian built-ins "
-                "only.".format(region, p, v))
+    _check_default_models(device, region)
     sg, us, L, vol = _signed_slots(R)
     d = R.dim
     vfac = 1.0 / (2.0 * d)                                       # ElementNodeVolume = c L / 4 | / 6
@@ -495,16 +548,22 @@ def apply_exact_geometry(device: str, region: str, *, negative: str = "raise") -
       into the report and warned -- the fallback if a drift-diffusion Newton fails under 'warn'). See the
       module doc for the trade-offs and the measured gmsh-stack numbers.
 
-    Returns the ExactGeometryReport (applied=True). Raises ValueError for a region that already uses
+    ALREADY-EXACT REGIONS ARE NOT TOUCHED: when geometry_already_exact() holds (the library meshes) the call
+    makes only devsim get_* reads and returns with written=False, so a device built on them is
+    byte-identical with and without the correction (gate: tests/test_devsim_geometry.py).
+
+    Returns the ExactGeometryReport (applied=True; written says whether DEVSIM was modified). Raises ValueError for a region that already uses
     cylindrical / user geometry models, RuntimeError if DEVSIM's values do not re-derive from the
     coordinates (layout check) or do not propagate after the write (read-back check)."""
     if negative not in NEGATIVE_POLICIES:
         raise ValueError("apply_exact_geometry: negative must be one of {}, got {!r}"
                          .format(NEGATIVE_POLICIES, negative))
     ds = _ds()
+    if not exact_geometry_applied(device, region) and geometry_already_exact(device, region):
+        return _exact_report(device, region, negative)            # nothing to write: byte-identical
     R, rep, g = _measure(device, region)
     rep.policy = negative
-    if R.dim == 1:                                               # 1-D: DEVSIM is exact (EdgeCouple = 1)
+    if R.dim == 1:                                               # pragma: no cover - caught above
         rep.applied = True
         return rep
     # layout check: DEVSIM's current ElementEdgeCouple must re-derive from the coordinates
@@ -572,7 +631,7 @@ def apply_exact_geometry(device: str, region: str, *, negative: str = "raise") -
         raise RuntimeError("devsim_geometry: DEVSIM did not rebuild EdgeCouple / NodeVolume from the "
                            "written ElementEdgeCouple on region {!r} (DEVSIM behaviour changed?)".format(region))
     ds.set_parameter(device=device, region=region, name=MARKER_PARAMETER, value=negative)
-    rep.applied = True
+    rep.applied = rep.written = True
     if rep.has_negatives:
         warnings.warn(
             "apply_exact_geometry(negative={!r}) on region {!r}: {}.{}".format(
@@ -583,3 +642,81 @@ def apply_exact_geometry(device: str, region: str, *, negative: str = "raise") -
                 if clip else " Written as computed: exact volumes, NO M-matrix guarantee for "
                              "drift-diffusion."), UnreliableResultWarning, stacklevel=2)
     return rep
+
+
+def _exact_report(device: str, region: str, policy: str) -> ExactGeometryReport:
+    """The report of an already-exact region, from reads only (no temporary models)."""
+    ds = _ds()
+    dim = int(ds.get_dimension(device=device))
+    rep = ExactGeometryReport(device=device, region=region, dimension=dim, applied=True, policy=policy)
+    if dim == 1:
+        rep.true_volume = float(_arr(ds.get_edge_model_values(device=device, region=region,
+                                                              name="EdgeLength")).sum())
+        return rep
+    xyz = np.column_stack([_arr(ds.get_node_model_values(device=device, region=region, name=c))
+                           for c in ("x", "y", "z")])[:, :dim]
+    els = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=np.int64)
+    rep.n_elements = int(els.shape[0])
+    rep.true_volume = float(np.abs(np.linalg.det(xyz[els[:, 1:]] - xyz[els[:, :1]])).sum()
+                            / (2.0 if dim == 2 else 6.0))
+    rep.devsim_volume_ratio = rep.exact_volume_ratio = float(
+        _arr(ds.get_node_model_values(device=device, region=region, name="NodeVolume")).sum() / rep.true_volume)
+    return rep
+
+
+def resolve_policy(exact_geometry: Union[bool, str, None]) -> Optional[str]:
+    """The builders' `exact_geometry` option -> the apply_exact_geometry `negative` policy, or None (off).
+
+      True (DEFAULT) / 'warn' -> 'warn'   exact geometry; negative assembled couples (gmsh / Delaunay
+                                          meshes) are written as computed and warned (recommended);
+      'raise'                 -> 'raise'  refuse a mesh with negative assembled couples / volumes;
+      'clip'                  -> 'clip'   clip them to 0 (keeps the M-matrix property, measured cost);
+      False / None            -> None     DEVSIM's uncorrected geometry (over-counts on non-well-centred
+                                          elements; reproduces pre-v0.14 numbers).
+    Library meshes are exact already and are never written, whatever the value."""
+    if exact_geometry is True:
+        return "warn"
+    if exact_geometry is False or exact_geometry is None:
+        return None
+    if isinstance(exact_geometry, str) and exact_geometry in NEGATIVE_POLICIES:
+        return exact_geometry
+    raise ValueError("exact_geometry must be True, False, or one of {}; got {!r}".format(
+        NEGATIVE_POLICIES, exact_geometry))
+
+
+def correct_device_geometry(device: str, exact_geometry: Union[bool, str, None] = True,
+                            *, stacklevel: int = 2) -> Dict[str, ExactGeometryReport]:
+    """apply_exact_geometry on EVERY region of `device` -- what LayeredDevsimBuilder and
+    devsim_3d.Devsim3DEquilibrium call right after ds.create_device (option `exact_geometry`, see
+    resolve_policy). Regions that are already exact are only read (byte-identical). With 'raise' every
+    region is measured first, so a refusal leaves the whole device unchanged. The per-region
+    negative-couple warnings of 'warn' / 'clip' are merged into ONE UnreliableResultWarning per device.
+    Returns {region: ExactGeometryReport} ({} when the option is off)."""
+    policy = resolve_policy(exact_geometry)
+    if policy is None:
+        return {}
+    ds = _ds()
+    regions = list(ds.get_region_list(device=device))
+    if policy == "raise":
+        for r in regions:
+            if not geometry_already_exact(device, r):
+                rep = measure_dual_geometry(device, r)
+                if rep.has_negatives:
+                    raise NegativeDualGeometryError(
+                        "exact_geometry='raise': region {!r} of device {!r} has negative assembled geometry "
+                        "({}); nothing was written. Use exact_geometry=True ('warn', recommended) or "
+                        "'clip'.".format(r, device, rep.summary()), rep)
+    out, notes = {}, []
+    for r in regions:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            out[r] = apply_exact_geometry(device, r, negative=policy)
+        for x in w:
+            if issubclass(x.category, UnreliableResultWarning):
+                notes.append(str(x.message))
+            else:                                               # pragma: no cover - none raised today
+                warnings.warn_explicit(x.message, x.category, x.filename, x.lineno)
+    if notes:
+        warnings.warn("exact geometry on device {!r} (devsim_geometry; DEVSIM's own geometry over-counts here): "
+                      "{}".format(device, " | ".join(notes)), UnreliableResultWarning, stacklevel=stacklevel + 1)
+    return out
