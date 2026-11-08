@@ -87,19 +87,21 @@ def test_o1_the_built_in_field_and_both_polarities(balance):
     assert balance["p_inv"]["V_ox"] > 0.5
 
 
-def test_o1_fermi_dirac_equilibrium_converges_at_second_order():
-    """O1 with the Fermi-Dirac g-factor (~18 s): the DISCRETE FD-SG equilibrium (edge-averaged g) is off
-    the closed-form activity ln u + Delta(u) by the trapezoid error of Int g d ln n across the degenerate
-    accumulation layer (x_s = 3.3), so the zero-bias |J| / J_one-way is a mesh-convergence quantity: on the
-    exactly uniform 0.1 nm x s surface zone it must fall at order >= 1.7 (the bulk scheme is O(h^2)).
-    MEASURED 1.6e-3, 4.0e-4, 1.0e-4, 2.5e-5 at s = 1, 1/2, 1/4, 1/8 (orders 1.99, 2.00, 2.00); with
-    DEVSIM's own graded mesh one odd-sized edge AT the interface (2-9 h) held it at ~4e-4 for every h.
-    Refute: the same with Boltzmann statistics is at round-off (O1 above)."""
+def test_o1_fermi_dirac_equilibrium_is_exact_under_the_default_statistics():
+    """O1 with the Fermi-Dirac g-factor (~18 s). REVISED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac':
+    the FD quasi-field transport, whose discrete zero-current state IS the closed-form activity equilibrium
+    ln u + Delta(u) the tunnelling term reads): the zero-bias |J| / J_one-way across the degenerate
+    accumulation layer (x_s = 3.3) is ROUND-OFF at every mesh -- MEASURED 2.0e-15, 1.8e-15, 2.2e-15, 5.1e-15
+    at s = 1, 1/2, 1/4, 1/8. Under the legacy statistics (statistics='legacy', the pre-v0.15.0 default) it was
+    the edge-averaged g's trapezoid error of Int g d ln n, a mesh-convergence quantity at order 2: MEASURED
+    1.6e-3, 4.0e-4, 1.0e-4, 2.5e-5 (orders 1.99, 2.00, 2.00) -- re-asserted here as the shown-failing half.
+    Budget for the default: 64 eps (a few ulps of the two opposite one-way streams)."""
     r = _child("balance_fd", scales=[1.0, 0.5, 0.25, 0.125])
     e = np.array([abs(p["J"]) / p["J_fwd"] for p in r])
-    orders = np.log2(e[:-1] / e[1:])
-    assert np.all(orders >= 1.7), (e, orders)
-    assert e[0] > 1e-4                                       # it is a real effect at a 0.1 nm mesh
+    assert np.all(e <= 64.0 * 2.220446049250313e-16), e
+    r0 = _child("balance_fd", scales=[1.0, 0.5], statistics="legacy")
+    e0 = np.array([abs(p["J"]) / p["J_fwd"] for p in r0])
+    assert e0[0] > 1e-4 and np.log2(e0[0] / e0[1]) >= 1.7, e0
 
 
 # =====================================================================================================

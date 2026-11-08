@@ -44,6 +44,13 @@ _DG_CALLLOG_CALLS = 133
 # Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
 _BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 _BIPOLAR_CALLLOG_CALLS = 237
+# v0.15.0 (2026-11-07, the default statistics 'fermi_dirac'): the two digests above are now those of the
+# EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
+# tests: default == explicit 'fermi_dirac').
+_DG_CALLLOG_DIGEST_V0150, _DG_CALLLOG_CALLS_V0150 = (
+    "89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded", 157)
+_BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
+    "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d", 302)
 
 
 # ---- (e) defaults off: byte-identical ---------------------------------------------------------
@@ -54,9 +61,12 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
     2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST)."""
     import _dg_calllog as CL
+    legacy = CL.record_call_log(statistics="legacy")
+    assert len(legacy) == _DG_CALLLOG_CALLS
+    assert CL.digest(legacy) == _DG_CALLLOG_DIGEST
     log = CL.record_call_log()
-    assert len(log) == _DG_CALLLOG_CALLS
-    assert CL.digest(log) == _DG_CALLLOG_DIGEST
+    assert (len(log), CL.digest(log)) == (_DG_CALLLOG_CALLS_V0150, _DG_CALLLOG_DIGEST_V0150)
+    assert log == CL.record_call_log(statistics="fermi_dirac")
 
 
 def test_bipolar_dd_without_dg_is_byte_identical():
@@ -64,9 +74,11 @@ def test_bipolar_dd_without_dg_is_byte_identical():
     the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
     `scale` keyword defaults to None)."""
     import _bipolar_calllog as CL
+    legacy = CL.record_call_log(statistics="legacy")
+    assert len(legacy) == _BIPOLAR_CALLLOG_CALLS
+    assert CL.digest(legacy) == _BIPOLAR_CALLLOG_DIGEST
     log = CL.record_call_log()
-    assert len(log) == _BIPOLAR_CALLLOG_CALLS
-    assert CL.digest(log) == _BIPOLAR_CALLLOG_DIGEST
+    assert (len(log), CL.digest(log)) == (_BIPOLAR_CALLLOG_CALLS_V0150, _BIPOLAR_CALLLOG_DIGEST_V0150)
 
 
 def test_srh_kernel_scale_default_is_the_legacy_string():

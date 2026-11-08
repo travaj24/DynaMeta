@@ -648,6 +648,13 @@ def test_mott_warning_once_per_region_above_the_mott_density(N, expect):
 # fixtures SOLVED, every field and terminal current vs 6595bde (= v0.13.0's flux) to the change's
 # measured round-off -- is tests/test_devsim_sg_flux.py::test_defaults_off_fixtures_equal_6595bde_*.
 _CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
+# v0.15.0 (2026-11-07): the DEFAULT statistics became 'fermi_dirac'. The digest above is now that of
+# record_call_log(statistics="legacy") (the pre-v0.15.0 default, kept explicit: UNCHANGED, gated); the new
+# default's log is RE-RECORDED below. Cross-check (measured, this tree): the default log equals the explicit
+# statistics='fermi_dirac' log, and differs from the legacy one only in the FD fixture (cl_fd): the Boltzmann
+# fixture's rows are identical.
+_CALLLOG_DIGEST_V0150 = "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d"
+_CALLLOG_CALLS_V0150 = 302
 
 
 def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_digest():
@@ -663,9 +670,12 @@ def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_diges
         import _bipolar_calllog as CL
     finally:
         sys.path.pop(0)
+    legacy = CL.record_call_log(statistics="legacy")
+    assert len(legacy) == 237
+    assert CL.digest(legacy) == _CALLLOG_DIGEST
     log = CL.record_call_log()
-    assert len(log) == 237
-    assert CL.digest(log) == _CALLLOG_DIGEST
+    assert (len(log), CL.digest(log)) == (_CALLLOG_CALLS_V0150, _CALLLOG_DIGEST_V0150)
+    assert log == CL.record_call_log(statistics="fermi_dirac")
 
 
 @pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")

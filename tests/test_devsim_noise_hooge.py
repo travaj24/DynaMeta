@@ -130,8 +130,10 @@ def _resistor(kind, tmp_path):
     N = float(np.sum(n * vol))
     ff = np.array([1.0, 1.0e3])
     sn = V.noise(ff, hooge_alpha=ALPHA, maps=True)
+    w = np.asarray(ds.get_edge_model_values(device="hg", region="bulk", name="vdiff_g"))
     checks = {"area": float(vol.sum() / (L * width) - 1.0), "n_spread": float(n.max() / n.min() - 1.0),
-              "ohm": float(I / (V.QE * MU * N_BG * V_BIAS * width / L) - 1.0)}
+              "ohm": float(I / (V.QE * MU * N_BG * V_BIAS * width / L) - 1.0),
+              "w2_12": float(np.max(w * w)) / 12.0}
     return sn.by_mechanism["hooge_n"] * ff * N / (ALPHA * I * I), checks, sn
 
 
@@ -145,8 +147,14 @@ def _clean():
 
 def test_hooge_uniform_resistor_is_orientation_independent(tmp_path):
     """S_I = alpha_H I^2 / (f N) for the SAME uniform resistor along the mesh axes and at 45 deg to
-    every edge (module doc above). Bound 1e-8: measured 3.6e-10 in both orientations (the DD drift
-    term at 1 mV); the edge-independent assembly gives 0.5 at 45 deg."""
+    every edge (module doc above). The discrete miss is the SG-segment density term of noise_analysis's
+    n_eff = n (1 + w^2/12 + O(w^4)), w = the current-carrying edges' own SG argument vdiff_g: S f N/(alpha I^2)
+    = 1 - w^2/12. REVISED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac'): the unipolar FD quasi-field
+    has g = 1 in the prefactor, so w is the raw vdiff (9.68e-4 per 5 nm edge at 1 mV), not vdiff/g (g ~ 15 at
+    this degeneracy): the miss moved from 3.6e-10 (legacy, MEASURED) to 7.793095e-8 (MEASURED), against
+    w^2/12 = 7.793104e-8 -- the gate is now the ATTRIBUTION: |r - (1 - w^2/12)| <= (w^2)^2 + 1e-13 (the next
+    order, ~9e-13; MEASURED 8.9e-14), in both orientations; the edge-independent assembly gives 0.5 at
+    45 deg."""
     r_al, chk_al, _ = _resistor("aligned", tmp_path)
     V.fresh()
     V.set_bias._v = {}
@@ -154,8 +162,10 @@ def test_hooge_uniform_resistor_is_orientation_independent(tmp_path):
     for chk in (chk_al, chk_dg):            # the analytic reference holds on the DISCRETE fixture
         assert abs(chk["area"]) < 1e-12 and abs(chk["n_spread"]) < 1e-12, chk
         assert abs(chk["ohm"]) < 1e-9, chk  # measured 2e-16: a uniform field, no contact distortion
-    assert np.max(np.abs(r_al - 1.0)) < 1e-8, r_al
-    assert np.max(np.abs(r_dg - 1.0)) < 1e-8, r_dg          # 6595bde: 0.4999999998
+    w2 = chk_al["w2_12"]
+    tol = (12.0 * w2) ** 2 + 1e-13
+    assert np.max(np.abs(r_al - (1.0 - w2))) < tol, (r_al, w2)
+    assert np.max(np.abs(r_dg - (1.0 - w2))) < tol, (r_dg, w2)          # 6595bde: 0.4999999998
     assert np.max(np.abs(r_dg - r_al)) < 1e-11, (r_dg, r_al)  # measured 2.3e-13
     # the per-node map (element shares split equally among its nodes) sums to the total
     tot = sn.maps["bulk"]["hooge_n"].sum(axis=1)

@@ -898,7 +898,7 @@ def build_hetero_unipolar(dev, opts):
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
         own = {}
-        kw = {} if opts.get("edge", "average") == "average" else {"statistics": "fermi_dirac"}
+        kw = {"statistics": "legacy"} if opts.get("edge") == "average" else {}   # default: the quasi-field
         for r, N, m in (("r0", N0, 0.35), ("r1", N1, 0.28)):
             DD.setup_semiconductor_region_dd(dev, r, n_bg_m3=N, eps_static=9.0, dos_mass_kg=m * M_E,
                                              mobility_m2Vs=3e-3, **kw)
@@ -1039,7 +1039,7 @@ def sc_builders(opts):
     from dynameta.sweep import BiasPoint
     ds = _ds()
     out = {}
-    for tag, st in (("legacy", None), ("fd", "fermi_dirac")):
+    for tag, st in (("legacy", "legacy"), ("fd", None)):
         tr = TransportModel(n_bg_m3=3e25, eps_static=9.0, dos_mass_kg_of_n_m3=lambda n: 0.3 * M_E,
                             physics="drift_diffusion", mobility_m2Vs_of_n_m3=lambda n: 3e-3,
                             carrier_statistics=st)

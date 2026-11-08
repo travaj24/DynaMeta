@@ -28,7 +28,9 @@ _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "cont
              "delete_equation", "delete_contact_equation")
 
 
-def record_call_log(*, hard_wall_shim: bool = False):
+def record_call_log(*, hard_wall_shim: bool = False, statistics=None):
+    """The unipolar in-Newton DG definition's call log. `statistics` (v0.15.0): None passes no keyword (this
+    tree's DEFAULT: the FD quasi-field transport); 'legacy' reproduces the pre-v0.15.0 averaged-g region."""
     import devsim as ds
     from dynameta.constants import M_E
     from dynameta.carriers import eq_registry as _R
@@ -67,7 +69,8 @@ def record_call_log(*, hard_wall_shim: bool = False):
         ds.create_device(mesh=mesh, device=dev)
         mstar = 0.35 * M_E
         setup_semiconductor_region_dd(dev, "bar", n_bg_m3=4.0e26, eps_static=9.5,
-                                      dos_mass_kg=mstar, mobility_m2Vs=0.004)
+                                      dos_mass_kg=mstar, mobility_m2Vs=0.004,
+                                      **({} if statistics is None else {"statistics": statistics}))
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
         DG.setup_contact_dg(dev, "back", 4.0e26)

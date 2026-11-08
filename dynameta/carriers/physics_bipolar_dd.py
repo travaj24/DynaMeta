@@ -193,8 +193,9 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
     with fd_enhancement=True (bipolar_options.resolve_statistics); 'legacy' keeps the v0.14 value."""
     eq_traps = _PT.equilibrium_trap_levels(traps)
     from dynameta.carriers.bipolar_options import resolve_statistics
-    fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"   # v0.15.0: the default
-    if (options is not None and options.active) or eq_traps or statistics is not None or fdc:
+    label = resolve_statistics(statistics, fd_enhancement)       # v0.15.0: None -> 'fermi_dirac' (FD root)
+    explicit = statistics is not None and label != "fermi_dirac_legacy"   # 'legacy' = the v0.14 closed form
+    if (options is not None and options.active) or eq_traps or explicit or label == "fermi_dirac":
         from dynameta.carriers.bipolar_options import BipolarOptions, equilibrium_fields
         nd = float(n_dos_m3)
         f = equilibrium_fields(np.array([float(net_doping_m3)]), n_i_m3=float(n_i_m3), N_c_m3=nd,
@@ -282,6 +283,23 @@ def _fd_contact_shift(device: str, contact: str):
     # what degrades in that case, not this offset. That SOLUTION-level half is now covered by
     # `warn_if_solution_exceeds_fd_ceiling` (audit C10-d), which `dc_solve.solve_dc` runs on every
     # converged DC/Gummel solve; this setup-time test remains the one that fires BEFORE any solve.
+    _warn_fd_doping_ceiling(u)
+    # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
+    # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
+    # otherwise allocate an (nnodes, 96) quadrature array.
+    uq, inv = np.unique(u, return_inverse=True)
+    shift = np.asarray(fd_potential_shift(uq), dtype=np.float64).reshape(-1)[inv]
+    ds.node_solution(device=device, region=region, name=name)
+    ds.set_node_values(device=device, region=region, name=name,
+                       values=[float(v) for v in shift])
+    return name
+
+
+def _warn_fd_doping_ceiling(u, stacklevel: int = 4) -> None:
+    """The setup-time FD-ceiling advisory (audit C-10 / DD-2) on the contact region's charge-neutral majority
+    ratio u = n0/N_dos (or p0/N_dos_p): one UnreliableResultWarning past _FD_U_MAX. Shared by the legacy
+    contact shift (_fd_contact_shift) and, since v0.15.0, the FD-detailed-balance contact path (the default
+    statistics), which pins EquilibriumPotential instead and would otherwise have dropped it."""
     if float(np.max(u)) > _FD_U_MAX:
         warnings.warn(
             "setup_contact_ohmic_bipolar: the contact's majority density reaches n/N_dos = {:.3g} "
@@ -295,16 +313,33 @@ def _fd_contact_shift(device: str, contact: str):
             "is caught after each converged solve instead (audit C10-d, "
             "warn_if_solution_exceeds_fd_ceiling). Supply a larger N_dos, or drop fd_enhancement "
             "and accept the Boltzmann model knowingly.".format(float(np.max(u))),
-            UnreliableResultWarning, stacklevel=3)
-    # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
-    # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
-    # otherwise allocate an (nnodes, 96) quadrature array.
-    uq, inv = np.unique(u, return_inverse=True)
-    shift = np.asarray(fd_potential_shift(uq), dtype=np.float64).reshape(-1)[inv]
-    ds.node_solution(device=device, region=region, name=name)
-    ds.set_node_values(device=device, region=region, name=name,
-                       values=[float(v) for v in shift])
-    return name
+            UnreliableResultWarning, stacklevel=stacklevel)
+
+
+def _fd_root_ceiling_check(device: str, contact: str) -> None:
+    """The setup-time FD-ceiling advisory for a contact pinning the option-equilibrium fields (statistics=
+    'fermi_dirac', the v0.15.0 default): u from the region's pinned charge-neutral densities
+    (NeutralElectrons / N_dos on n-type nodes, NeutralHoles / N_dos_p on p-type ones), once per region
+    (the region parameter fd_ceiling_checked marks it; set only when the check runs on an FD region)."""
+    region = _contact_region(device, contact)
+    if region is None:
+        return
+    try:
+        if not float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) > 0.0:
+            return
+    except Exception:
+        return
+    if "fd_ceiling_checked" in ds.get_parameter_list(device=device, region=region):
+        return
+    nd = np.asarray(ds.get_node_model_values(device=device, region=region, name="NetDoping"), np.float64)
+    n0 = np.asarray(ds.get_node_model_values(device=device, region=region, name="NeutralElectrons"), np.float64)
+    p0 = np.asarray(ds.get_node_model_values(device=device, region=region, name="NeutralHoles"), np.float64)
+    nc = float(ds.get_parameter(device=device, region=region, name="N_dos"))
+    nv = float(ds.get_parameter(device=device, region=region, name="N_dos_p"))
+    u = np.where(nd > 0.0, n0 / nc, p0 / nv)
+    if float(np.max(u)) > _FD_U_MAX:
+        ds.set_parameter(device=device, region=region, name="fd_ceiling_checked", value=1.0)
+        _warn_fd_doping_ceiling(u, stacklevel=5)
 
 
 # --- audit C10-d: the SOLUTION-level counterpart of the ceiling test above ----------------------
@@ -1210,6 +1245,7 @@ def contact_potential_residual(device: str, contact: str, drive_symbol: str,
     legacy one character-for-character."""
     drv = drive_symbol + psi_offset_term(psi_offset_V)
     if _options_contact_exprs(device, contact):
+        _fd_root_ceiling_check(device, contact)                # v0.15.0: the default FD path keeps the advisory
         return "Potential - {} - EquilibriumPotential".format(drv)
     shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
     return "Potential - {} + {}".format(drv, _pot_offset(shift, CELEC, CHOLE))
