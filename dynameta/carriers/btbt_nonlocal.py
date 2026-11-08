@@ -189,7 +189,8 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["NonlocalBTBT", "NonlocalPhysical", "setup_btbt_nonlocal", "btbt_nonlocal_generation",
            "physical_from_fitted", "fitted_from_physical", "kane_segment",
            "keldysh_segment", "kane_moments", "keldysh_moments", "path_rates_1d", "PROCESSES", "MECHANISM",
-           "Paths", "trace_paths_1d", "nodal_gradient_1d", "tunnelling_gaps", "has_live_nonlocal"]
+           "Paths", "trace_paths_1d", "nodal_gradient_1d", "tunnelling_gaps", "has_live_nonlocal",
+           "PathSet", "path_rates_2d"]
 
 PROCESSES = ("direct", "phonon")
 MECHANISM = "btbt_nl"                       # noise_analysis.TWO_POINT_MECHANISMS key (decision 9)
@@ -229,6 +230,7 @@ class NonlocalBTBT:
     mass_ratio_V_over_C: float = 1.0
     max_length_m: float = 20e-9
     material: Optional[object] = None
+    direction: Optional[tuple] = None
 
     def __post_init__(self):
         if not isinstance(self.params, BTBTParams):
@@ -249,6 +251,12 @@ class NonlocalBTBT:
             v = float(getattr(self, nm))
             if not (math.isfinite(v) and v > 0.0):
                 raise ValueError("NonlocalBTBT: {} must be finite and > 0, got {!r}".format(nm, v))
+        if self.direction is not None:
+            dd = tuple(float(v) for v in self.direction)
+            if len(dd) != 2 or not all(math.isfinite(v) for v in dd) or math.hypot(*dd) == 0.0:
+                raise ValueError("NonlocalBTBT: direction must be None (dynamic) or a non-zero 2-vector, got "
+                                 "{!r}".format(self.direction))
+            object.__setattr__(self, "direction", tuple(v / math.hypot(*dd) for v in dd))
         if self.material is not None:
             eg = tunnelling_gaps(self, self.params.quoted_T_K)[0]   # resolvable at the quoted temperature
             if not (math.isfinite(eg) and eg > 0.0):
@@ -725,6 +733,8 @@ class PathSet:
     pt_s: Optional[np.ndarray] = None
     pt_dsdth: Optional[np.ndarray] = None
     pt_dmudth: Optional[np.ndarray] = None
+    dynamic: bool = False
+
 
     @property
     def a(self) -> np.ndarray:
@@ -758,6 +768,28 @@ def _pathset_from_1d(p: "Paths") -> PathSet:
     return PathSet(p.start, p.direction.astype(float)[:, None], end_b - 1, end_b, pt_path, pt_n, pt_n.copy(),
                    np.zeros(pt_n.size), first, p.seg_path, hi - 1, p.seg_L, p.seg_first, p.seg_end,
                    p.seg_phase, dict(p.stats))
+
+
+def path_rates_2d(mesh, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_length_m: float,
+                  start_ok, end_ok, *, direction=None, gops=None, derivatives: bool = True) -> dict:
+    """The nonlocal rate of every path of a 2-D band profile on a triangle mesh (btbt_nonlocal_2d.Mesh2D):
+    the 2-D walker (btbt_nonlocal_2d.trace_paths_2d) + the dimension-free _rates_core. direction None:
+    dynamic (each path along its start node's nodal gradient of psi); a 2-vector: frozen. gops: the nodal-
+    gradient operators (btbt_nonlocal_2d.gradient_ops_2d(mesh); pass them to avoid rebuilding). Keys as
+    _rates_core plus "pathset". With a DYNAMIC direction jac_R / jac_t omit the rotation of the paths
+    (module doc, section 4)."""
+    from dynameta.carriers import btbt_nonlocal_2d as B2
+    psi = np.asarray(psi, float)
+    if gops is None:
+        gops = B2.gradient_ops_2d(mesh)
+    gvec = np.stack([gops[0] @ psi, gops[1] @ psi], axis=1)
+    Eg_V = phys.Eg_J / Q_E
+    vstar = phys.v_star if phys.process == "phonon" else None
+    ps = B2.trace_paths_2d(mesh, psi, gvec, Eg_V, max_length_m, start_ok, end_ok, v_star=vstar,
+                           direction=direction)
+    out = _rates_core(ps, psi, gvec, gops, Ln, Lp, phys, delta, max_length_m, derivatives)
+    out["pathset"] = ps
+    return out
 
 
 def _gradient_ops_1d(x):
@@ -891,7 +923,37 @@ def _rates_core(ps: PathSet, psi, gvec, gops, Ln, Lp, phys: NonlocalPhysical, de
     s_n = R_pre * sa * sa_
     ln_rows = np.repeat(np.arange(P), 4)
     dR_dLn = sp.csr_matrix(((s_n[:, None] * e_w).ravel(), (ln_rows, e_nodes.ravel())), shape=(P, N))
-    out.update(jac_R=jac_R.tocsr(), jac_t=jac_t.tocsr(), dR_dLn=dR_dLn, dR_dLp=R_pre * sb * sb_)
+    out.update(dR_dLn=dR_dLn, dR_dLp=R_pre * sb * sb_)
+    if ps.dynamic and dim == 2:
+        # --- the DYNAMIC direction (section 4): theta_p = atan2(g_i) moves every point along its edge (mu,
+        # s: the walker's d/dtheta), the slopes r through g_pt and d, the segment lengths, the end point's
+        # occupancy and deposition weights. dtheta/dpsi = (d_perp . dg_i)/|g_i|. A point that IS a node
+        # (vertex passage) has d/dtheta = 0: the one-sided derivatives differ there (measure zero). ---
+        mup, sth = ps.pt_dmudth, ps.pt_dsdth
+        dperp = np.stack([-d_pt[:, 1], d_pt[:, 0]], axis=1)
+        dvth = (psi[n2] - psi[n1]) / Eg_V * mup
+        dvth[ps.pt_first] = 0.0
+        dgth = (gvec[n2] - gvec[n1]) * mup[:, None]
+        drth = -(r_pt * r_pt / Eg_V) * (np.sum(dgth * d_pt, axis=1) + np.sum(g_pt * dperp, axis=1))
+        dLth = sth[hi] - sth[lo]
+        dacc_L = {k: v.imag / h for k, v in
+                  _segment_accumulators(phys, va + z, vb + z, ra + z, rb + z, ps.seg_L + 1j * h, ps.seg_end,
+                                        ps.seg_phase).items()}
+        dLnth = (Ln[n2] - Ln[n1]) * mup
+        dRth = (np.bincount(ps.pt_path, weights=dv_pt * dvth + dr_pt * drth, minlength=P)
+                + np.bincount(sp_, weights=contract(dacc_L) * dLth, minlength=P)
+                + s_n * ((1.0 - t) * dLnth[a] + t * dLnth[b]))
+        dtth = np.bincount(ps.pt_path, weights=dt_pt * dvth, minlength=P)
+        dps = np.stack([-ps.direction[:, 1], ps.direction[:, 0]], axis=1)    # d_perp of each path
+        jac_th = None
+        for c in range(dim):
+            term = sp.diags(dps[:, c] / G) @ Ei @ gops[c]
+            jac_th = term if jac_th is None else jac_th + term
+        jac_R = jac_R + sp.diags(dRth) @ jac_th
+        jac_t = jac_t + sp.diags(dtth) @ jac_th
+        out.update(jac_theta=jac_th.tocsr(), dR_dtheta=dRth,
+                   e_dwdth=np.stack([-(1.0 - t) * mup[a], (1.0 - t) * mup[a], -t * mup[b], t * mup[b]], axis=1))
+    out.update(jac_R=jac_R.tocsr(), jac_t=jac_t.tocsr())
     return out
 
 
@@ -946,6 +1008,12 @@ def _assemble_entries(device: str, region: str, st: dict, res: dict, need_j: boo
         R_.append(re_[jt.row, k])
         C_.append(cpsi[jt.col])
         V_.append(-qv[jt.row] * R[jt.row] * res["e_dw"][jt.row, k] * jt.data)
+    if "jac_theta" in res:                                      # dynamic direction: d e_w/dtheta
+        jth = res["jac_theta"].tocoo()
+        for k in range(4):
+            R_.append(re_[jth.row, k])
+            C_.append(cpsi[jth.col])
+            V_.append(-qv[jth.row] * R[jth.row] * res["e_dwdth"][jth.row, k] * jth.data)
     jn = res["dR_dLn"].tocoo()
     emit(jn.row, cn[jn.col], jn.data * st["dLn"][jn.col], ew)
     allp = np.arange(P)
@@ -989,8 +1057,35 @@ def _term_class():
         def equations(self, device):
             return [(self.region, _EQ_N), (self.region, _EQ_P)]
 
+        def _geometry2d(self, device: str):
+            """Mesh2D + nodal-gradient operators of the region, built once per device instance (the mesh
+            never changes; a re-created device under the same name has a new marker token and a new term)."""
+            from dynameta.carriers import btbt_nonlocal_2d as B2
+            from dynameta.carriers.eq_registry import ds
+            key = (device, len(ds.get_node_model_values(device=device, region=self.region, name="x")))
+            if getattr(self, "_geo_key", None) != key:
+                reg = self.region
+                xy = np.stack([np.asarray(ds.get_node_model_values(device=device, region=reg, name=c), float)
+                               for c in ("x", "y")], axis=1)
+                tri = np.asarray(ds.get_element_node_list(device=device, region=reg), np.int64)
+                mesh = B2.build_mesh2d(xy, tri)
+                bnd_nodes = np.zeros(xy.shape[0], bool)
+                bnd_nodes[mesh.bnd_edges.ravel()] = True
+                # homogeneous-Neumann sides for psi: region boundary that is neither a contact nor an interface
+                other = set(CT._contact_node_set(device, reg))
+                for itf in ds.get_interface_list(device=device):
+                    if reg in ds.get_region_list(device=device, interface=itf):
+                        el = ds.get_element_node_list(device=device, region=reg, interface=itf)
+                        other.update(int(i) for e in el for i in e)
+                neu = bnd_nodes.copy()
+                neu[sorted(other)] = False
+                self._geo = (mesh, B2.gradient_ops_2d(mesh, neumann_nodes=neu))
+                self._geo_key = key
+            return self._geo
+
         def state(self, device: str) -> dict:
-            """Node arrays in x order (perm maps sorted position -> region node index)."""
+            """Node arrays; in 1-D in x order (perm maps sorted position -> region node index), in 2-D in
+            region order (perm = identity) plus the mesh and the gradient operators."""
             from dynameta.carriers.eq_registry import ds
             reg = self.region
 
@@ -1000,25 +1095,35 @@ def _term_class():
             def par(name):
                 return float(ds.get_parameter(device=device, region=reg, name=name))
             x = nv("x")
-            perm = np.argsort(x, kind="stable")
+            dim = int(ds.get_dimension(device=device))
+            perm = np.argsort(x, kind="stable") if dim == 1 else np.arange(x.size)
             vt = par("V_t")
             ok = np.ones(x.size, bool)
             ok[sorted(CT._contact_node_set(device, reg))] = False
             end_ok = ok[perm]
             start_ok = end_ok.copy()
-            start_ok[0] = start_ok[-1] = False
+            if dim == 1:
+                start_ok[0] = start_ok[-1] = False
             delta = math.log(par("N_dos") * par("N_dos_p") / par("n_i") ** 2) - self.phys.Eg_J / Q_E / vt
-            return {"perm": perm, "x": x[perm], "psi": nv("Potential")[perm],
-                    "Ln": nv("HJ_L_Electrons")[perm], "Lp": nv("HJ_L_Holes")[perm],
-                    "dLn": nv("HJ_L_Electrons:Electrons")[perm], "dLp": nv("HJ_L_Holes:Holes")[perm],
-                    "vol": nv("NodeVolume")[perm], "delta": delta, "start_ok": start_ok, "end_ok": end_ok}
+            st = {"dim": dim, "perm": perm, "x": x[perm], "psi": nv("Potential")[perm],
+                  "Ln": nv("HJ_L_Electrons")[perm], "Lp": nv("HJ_L_Holes")[perm],
+                  "dLn": nv("HJ_L_Electrons:Electrons")[perm], "dLp": nv("HJ_L_Holes:Holes")[perm],
+                  "vol": nv("NodeVolume")[perm], "delta": delta, "start_ok": start_ok, "end_ok": end_ok}
+            if dim == 2:
+                st["mesh"], st["gops"] = self._geometry2d(device)
+            return st
 
         def evaluate(self, device: str, derivatives: bool = False):
             """(state, result): result["pathset"] is the PathSet (indices in the state's node order)."""
             st = self.state(device)
-            res = path_rates_1d(st["x"], st["psi"], st["Ln"], st["Lp"], self.phys, st["delta"],
-                                self.spec.max_length_m, st["start_ok"], st["end_ok"],
-                                derivatives=derivatives)
+            if st["dim"] == 1:
+                res = path_rates_1d(st["x"], st["psi"], st["Ln"], st["Lp"], self.phys, st["delta"],
+                                    self.spec.max_length_m, st["start_ok"], st["end_ok"],
+                                    derivatives=derivatives)
+            else:
+                res = path_rates_2d(st["mesh"], st["psi"], st["Ln"], st["Lp"], self.phys, st["delta"],
+                                    self.spec.max_length_m, st["start_ok"], st["end_ok"],
+                                    direction=self.spec.direction, gops=st["gops"], derivatives=derivatives)
             self.last_stats = dict(res["pathset"].stats)
             return st, res
 
@@ -1071,12 +1176,20 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
     if not isinstance(spec, NonlocalBTBT):
         raise TypeError("setup_btbt_nonlocal: spec must be a NonlocalBTBT (got {!r})".format(type(spec)))
     dim = int(ds.get_dimension(device=device))
-    if dim != 1:
+    if dim == 3:
         raise NotImplementedError(
-            "setup_btbt_nonlocal: {}-D devices are not implemented in v0.15 (decision 21: 1-D first; the "
-            "2-D element walker follows the review of the 1-D results). Use the local model "
-            "(tunneling.setup_btbt) in 2-D/3-D.".format(dim))
+            "setup_btbt_nonlocal: 3-D devices are not implemented (user decision 23: 3-D deferred until the "
+            "2-D cost is reviewed). Use the local model (tunneling.setup_btbt) in 3-D.")
+    if dim == 1 and spec.direction is not None:
+        raise ValueError("setup_btbt_nonlocal: a frozen direction is a 2-D option (in 1-D the path runs "
+                         "along x towards rising potential)")
     _require_bipolar(device, region)
+    if dim == 2:
+        from dynameta.carriers.btbt_nonlocal_2d import require_numba
+        from dynameta.carriers.element_geometry import check_element_geometry
+        require_numba("setup_btbt_nonlocal")
+        # NodeVolume weights each start: exact only on a well-centred mesh (the local model's check)
+        check_element_geometry(device, region, caller="setup_btbt_nonlocal (2-D)")
     nodes = set(ds.get_node_model_list(device=device, region=region))
     edges = set(ds.get_edge_model_list(device=device, region=region))
     elems = set(ds.get_element_model_list(device=device, region=region)) if dim > 1 else set()
