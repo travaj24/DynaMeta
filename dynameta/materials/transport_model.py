@@ -85,17 +85,21 @@ class TransportModel:
                               for a single semiconductor or a same-material stack (zero offset by
                               identity), so those need neither. No other consumer reads them
                               (inventory 2026-11-04: docs/audit/2026-11-04-v0.14-user-decisions.md).
-      carrier_statistics   : bipolar_dd only (v0.15, decision 28): None (default) = the legacy
-                              statistics, BYTE-IDENTICAL (FD g-factor transport, Boltzmann-product
-                              detailed balance); "fermi_dirac" = FD transport AND FD detailed balance
-                              (degenerate layers; REQUIRED by an FD-paired BGN set such as the house Si
-                              bundle materials.semiconductor_presets.silicon_transport); "boltzmann" =
+      carrier_statistics   : (v0.15, decision 28; v0.15.0 default change, user decision 2026-11-07)
+                              None (default) = "fermi_dirac" = FD transport (the consistent quasi-field)
+                              AND FD detailed balance (exact zero-bias balance; REQUIRED by an FD-paired
+                              BGN set such as the house Si bundle materials.semiconductor_presets.
+                              silicon_transport); "legacy" = the v0.14 default, BYTE-IDENTICAL (FD
+                              g-factor transport with the edge-averaged g, Boltzmann-product detailed
+                              balance: a zero-bias current next to degenerate layers; NOT recommended,
+                              reproducing v0.14 numbers only); "boltzmann" =
                               no FD g-factor (an APPARENT, Boltzmann-extracted BGN set on a degenerate
                               layer -- removes the double count). Read by the 2-D LayeredDevsimBuilder
                               and Stacked3DSpec.from_design (carriers.bipolar_options module doc, item 2).
-                              drift_diffusion (v0.15 FD-mode integration): "fermi_dirac" selects the
-                              consistent FD quasi-field transport (physics_drift_diffusion.
-                              setup_semiconductor_region_dd(statistics=)); "boltzmann" is refused.
+                              drift_diffusion: None / "fermi_dirac" = the consistent FD quasi-field
+                              transport, "legacy" = the v0.14 edge-averaged g
+                              (physics_drift_diffusion.setup_semiconductor_region_dd(statistics=));
+                              "boltzmann" is refused.
       chi_reference_T_K    : the temperature [K] at which chi_eV (and band_gap_eV) were QUOTED. None =
                               unstated, read as T_REF (300 K). No chi(T) model exists in v0.14, so a
                               heterostack run at another temperature uses chi_eV unchanged; the 2-D
@@ -230,16 +234,16 @@ class TransportModel:
                 raise ValueError("TransportModel.bipolar_options applies only to physics='bipolar_dd' "
                                  "(got {!r}); it would be silently ignored".format(self.physics))
         if self.carrier_statistics is not None:
-            if self.carrier_statistics not in ("boltzmann", "fermi_dirac"):
-                raise ValueError("carrier_statistics must be None, 'boltzmann' or 'fermi_dirac', got {!r}"
+            if self.carrier_statistics not in ("boltzmann", "fermi_dirac", "legacy"):
+                raise ValueError("carrier_statistics must be None, 'fermi_dirac', 'boltzmann' or 'legacy', got {!r}"
                                  .format(self.carrier_statistics))
             ok = (self.physics == "bipolar_dd"
-                  or (self.physics == "drift_diffusion" and self.carrier_statistics == "fermi_dirac"))
+                  or (self.physics == "drift_diffusion" and self.carrier_statistics != "boltzmann"))
             if not ok:
                 raise ValueError("carrier_statistics={!r} applies only to physics='bipolar_dd' (and "
-                                 "'fermi_dirac' to 'drift_diffusion': the consistent FD transport; the "
-                                 "unipolar model has no Boltzmann mode) -- got physics={!r}; it would be "
-                                 "silently ignored".format(self.carrier_statistics, self.physics))
+                                 "'fermi_dirac' / 'legacy' to 'drift_diffusion': the unipolar model has no "
+                                 "Boltzmann mode) -- got physics={!r}; it would be silently ignored".format(
+                                     self.carrier_statistics, self.physics))
         for nm, need in (("hooge_alpha_n", ("drift_diffusion", "bipolar_dd")),
                          ("hooge_alpha_p", ("bipolar_dd",))):
             v = getattr(self, nm)

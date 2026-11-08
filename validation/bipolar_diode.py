@@ -182,6 +182,30 @@ def terminal_current(contact):
     return jn + jp, jn, jp
 
 
+def junction_current():
+    """The total current J_n + J_p on the mesh EDGE nearest the junction [A/m^2, oriented +x].
+
+    In 1-D steady state the total is the same on every edge, but wherever one carrier is a ~1e24 m^-3
+    majority its Scharfetter-Gummel flux is the difference of two ~1e11 A/m^2 terms, a float64 floor of
+    ~1e-4 .. 5e-3 A/m^2 (MEASURED: the oriented edge totals scatter between -2.6e-3 and +2.3e-3 A/m^2 at
+    -1 V on BOTH v0.14 and v0.15). At the junction both carriers are moderate and the total is clean.
+    Independent cross-check (2026-11-07): J_n(p_contact) [minority, clean] + J_p(p_contact) rebuilt from
+    -J_p(n_contact) [minority, clean] + sum_i HoleGeneration_i NodeVolume_i [exact discrete continuity]
+    equals this edge value to <= 1.2e-6 relative at every forward/reverse bias of the sweep (both versions).
+
+    v0.15.0: under the default statistics ('fermi_dirac') the p-contact HOLE floor reads a CONSTANT
+    -1.0811e-04 A/m^2 at every bias (v0.14 read 0.0, or -8.538e-04 at -1 V), larger than the true +0.1 V
+    current +1.2338e-04 -- and v0.14's +2.161e-04 there was itself floor-contaminated (true +1.2338e-04 on
+    both). So GATE A's forward branch uses this clean total."""
+    ds.edge_from_node_model(device=DEVICE, region=REGION, node_model="x")
+    x0 = np.asarray(ds.get_edge_model_values(device=DEVICE, region=REGION, name="x@n0"))
+    x1 = np.asarray(ds.get_edge_model_values(device=DEVICE, region=REGION, name="x@n1"))
+    k = int(np.argmin(np.abs(0.5 * (x0 + x1) - X_JUNC)))
+    jt = (ds.get_edge_model_values(device=DEVICE, region=REGION, name="ElectronCurrent")[k]
+          + ds.get_edge_model_values(device=DEVICE, region=REGION, name="HoleCurrent")[k])
+    return float(jt) * (1.0 if x1[k] > x0[k] else -1.0)
+
+
 def ramp_to(target_v, v_step=0.025, verbose=False):
     """Ramp p_contact bias to target_v in steps, n_contact grounded at 0.
     Halves the step on a convergence failure (down to a floor)."""
@@ -218,7 +242,7 @@ def jv_sweep(voltages, verbose=False):
         ramp_to(v, verbose=verbose)
         v_prev = v
         jtot, jn, jp = terminal_current("p_contact")
-        out.append((v, jtot, jn, jp))
+        out.append((v, jtot, jn, jp, junction_current()))
     return out
 
 
@@ -256,8 +280,8 @@ def main():
     print("[t] --- FORWARD bias J-V (p_contact swept +, n_contact grounded) ---", flush=True)
     print("[t]   V (V)      J_total (A/m^2)     J_n            J_p", flush=True)
     fwd = jv_sweep(fwd_V)
-    for v, jt, jn, jp in fwd:
-        print("[t]   {:+6.3f}    {:+14.6e}   {:+12.4e}  {:+12.4e}".format(v, jt, jn, jp),
+    for v, jt, jn, jp, jj in fwd:
+        print("[t]   {:+6.3f}    {:+14.6e}   {:+12.4e}  {:+12.4e}   junction {:+14.6e}".format(v, jt, jn, jp, jj),
               flush=True)
 
     # minority injection at forward bias (n-side holes) -- GATE B signature
@@ -272,15 +296,18 @@ def main():
     print("[t] --- REVERSE bias J-V ---", flush=True)
     print("[t]   V (V)      J_total (A/m^2)     J_n            J_p", flush=True)
     rev = jv_sweep(rev_V)
-    for v, jt, jn, jp in rev:
-        print("[t]   {:+6.3f}    {:+14.6e}   {:+12.4e}  {:+12.4e}".format(v, jt, jn, jp),
+    for v, jt, jn, jp, jj in rev:
+        print("[t]   {:+6.3f}    {:+14.6e}   {:+12.4e}  {:+12.4e}   junction {:+14.6e}".format(v, jt, jn, jp, jj),
               flush=True)
 
     # ---------- verdicts ----------
     # Sign convention: bias on the p-contact. Forward (V>0) -> large positive-growing
     # current; reverse (V<0) -> small saturating current of the opposite sign.
-    fwd_j = [jt for (v, jt, jn, jp) in fwd]
-    rev_j = [jt for (v, jt, jn, jp) in rev]           # printed only; see the J_n note below
+    # v0.15.0: the forward branch uses the CLEAN total at the junction edge (junction_current; the p-contact
+    # hole floor exceeds the +0.1 V current under the default statistics), oriented like the contact total
+    sgn = 1.0 if fwd[-1][4] * fwd[-1][1] > 0.0 else -1.0
+    fwd_j = [sgn * jj for (v, jt, jn, jp, jj) in fwd]
+    rev_j = [jt for (v, jt, jn, jp, jj) in rev]       # printed only; see the J_n note below
 
     # Monotonic in magnitude with bias magnitude (forward current strictly grows).
     fwd_abs = [abs(j) for j in fwd_j]
@@ -301,7 +328,11 @@ def main():
     # J_n is clean and strictly monotone over the same sweep (-5.7472e-08 -> -5.8440e-08 at
     # -0.25 -> -2.0 V), so the reverse-branch monotonicity is asserted on it: a STRONGER test than
     # one whose input is 4 orders of magnitude of rounding noise. (The forward branch runs at
-    # 1e2-1e3 A/m^2, far above that floor, and keeps using the total.)
+    # 1e2-1e3 A/m^2 at 0.4-0.7 V, far above that floor; its 0.0 / 0.1 / 0.2 V points are NOT -- v0.15.0
+    # reads the forward branch from the clean junction-edge total, junction_current().)
+    # NOTE (v0.15.0, measured, identical on v0.14): J_n is the DIFFUSION (Shockley) component; the true
+    # reverse TOTAL is depletion-generation dominated, -2.889e-05 / -1.039e-04 / -1.834e-04 /
+    # -3.156e-04 A/m^2 at -0.1 / -0.5 / -1 / -2 V (junction_current, printed), and does not saturate.
     #
     # DISCLOSURE: the C-10 contact change is what FORCED this gate change, and the gate change is
     # not cosmetic. Holding everything else fixed and toggling only the contact statistics
@@ -311,7 +342,7 @@ def main():
     # cancellation across the rounding boundary at -0.75 .. -1.5 V, J_p reads -8.538e-04 there and
     # |J_total| is NO LONGER monotone. |J_n| is monotone either way and differs by only ~3e-12
     # between them, which is why it is the honest oracle rather than the convenient one.
-    rev_abs = [abs(jn) for (v, jt, jn, jp) in rev]
+    rev_abs = [abs(jn) for (v, jt, jn, jp, jj) in rev]
     mono_rev = all(rev_abs[i + 1] >= rev_abs[i] - 1e-30 for i in range(len(rev_abs) - 1))
     monotonic = mono_fwd and mono_rev
 
@@ -320,7 +351,7 @@ def main():
     # the two have OPPOSITE sign.
     j_fwd_06 = fwd_j[fwd_V.index(0.6)]
     # the reverse points are read from J_n for the cancellation-floor reason documented above
-    rev_jn = [jn for (v, jt, jn, jp) in rev]
+    rev_jn = [jn for (v, jt, jn, jp, jj) in rev]
     j_rev_05 = rev_jn[rev_V.index(-0.5)]
     opposite_sign = (j_fwd_06 * j_rev_05) < 0.0
     big_ratio = abs(j_fwd_06) > 100.0 * max(abs(j_rev_05), 1e-300)

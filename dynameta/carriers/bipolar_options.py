@@ -102,8 +102,10 @@ here re-defines a composite by name, so options compose with trap levels, interf
    with N_A > N_ref is REFUSED with BGNFitPendingError instead of silently getting 0).
 
    STATISTICS (v0.15, decision 28; setup_bipolar_region(statistics=...), TransportModel.
-   carrier_statistics). Three choices -- which to use for which calculation:
-     None (default)  the legacy statistics, BYTE-IDENTICAL to v0.14: FD g-factor transport + FD contact
+   carrier_statistics). v0.15.0 (user decision, 2026-11-07): the DEFAULT (statistics None with the FD
+   g-factor) is "fermi_dirac". Three choices -- which to use for which calculation:
+     "legacy"        (was the default up to v0.14; now explicit, NOT recommended -- reproducing v0.14 numbers
+                     only) BYTE-IDENTICAL to v0.14: FD g-factor transport + FD contact
                      potential (fd_enhancement=True), but every recombination term and the contacts pin
                      the BOLTZMANN product n p = n_ie^2. On a DEGENERATE region that contradicts the
                      transport's own equilibrium n p = n_ie^2 exp(-Delta(n/N_c) - Delta(p/N_v)) (zero
@@ -112,7 +114,8 @@ here re-defines a composite by name, so options compose with trap levels, interf
                      diode with a 1e19 cm^-3 emitter; exp(-Delta(0.357)) - 1 = -0.122). The FORWARD
                      emitter J0 is the FD one (0.8789 of the Boltzmann J0, exp(-Delta) = 0.8781). Fine
                      for non-degenerate devices and for every v0.14 result; not for a paired FD set.
-     "fermi_dirac"   FD transport AND FD detailed balance: n_ie becomes the solution-dependent node model
+     "fermi_dirac"   (the DEFAULT since v0.15.0) FD transport AND FD detailed balance: n_ie becomes the
+                     solution-dependent node model
                      n_ie = n_i exp(dEg/2kT) sqrt(gamma_n gamma_p), gamma = exp(-Delta(c/N)) (Delta in the
                      closed form of physics_heterojunction.setup_log_activity, the transport's own
                      integral of g), so SRH, Auger, radiative and (neutral) bulk trap rates vanish
@@ -367,7 +370,9 @@ class RadiativeModel:
 _BGN_BASES = ("total", "donors", "acceptors")
 _BGN_DEFAULT_BASIS = {"slotboom": "total", "del_alamo": "donors", "power_log": "total"}
 _BGN_OUTSIDE = ("warn", "refuse")
-_STATISTICS = ("boltzmann", "fermi_dirac")
+# the accepted spellings of setup_bipolar_region(statistics=...); "fermi_dirac_legacy" is the resolved LABEL of
+# "legacy" (accepted back, so a resolved label can be passed on unchanged)
+_STATISTICS = ("boltzmann", "fermi_dirac", "legacy", "fermi_dirac_legacy")
 _VERIFICATION = ("primary", "secondary", "inferred", "unverified")
 
 
@@ -737,20 +742,27 @@ IONIZATION_SI_P_B = IonizationModel(dE_D_eV=0.045, dE_A_eV=0.045,
 # =====================================================================================================
 
 def resolve_statistics(statistics: Optional[str], fd_enhancement: bool) -> str:
-    """The region's statistics label from setup_bipolar_region's (statistics, fd_enhancement):
-    "boltzmann" (fd_enhancement False), "fermi_dirac" (FD transport + FD detailed balance; statistics=
-    "fermi_dirac") or "fermi_dirac_legacy" (statistics None with fd_enhancement True: the v0.14 model,
-    FD transport but the Boltzmann product n p = n_ie^2 in recombination and contacts). A statistics that
-    contradicts fd_enhancement raises (module doc item 2, STATISTICS)."""
+    """The region's statistics LABEL from setup_bipolar_region's (statistics, fd_enhancement) -- module doc,
+    STATISTICS:
+      None (default, v0.15.0)  -> "fermi_dirac" with the FD g-factor (fd_enhancement=True, its default), or
+                                  "boltzmann" with fd_enhancement=False (as before);
+      "fermi_dirac"            -> "fermi_dirac" (needs fd_enhancement=True);
+      "boltzmann"              -> "boltzmann" (needs fd_enhancement=False);
+      "legacy"                 -> "fermi_dirac_legacy" (needs fd_enhancement=True): the v0.14 model, FD
+                                  g-factor transport (edge-averaged g) with the Boltzmann product n p = n_ie^2
+                                  in recombination and contacts -- for reproducing v0.14 numbers only.
+    The label itself is accepted back (idempotent). A choice that contradicts fd_enhancement raises."""
     if statistics is None:
-        return "fermi_dirac_legacy" if fd_enhancement else "boltzmann"
+        return "fermi_dirac" if fd_enhancement else "boltzmann"
     if statistics not in _STATISTICS:
-        raise ValueError("statistics must be None, 'boltzmann' or 'fermi_dirac', got {!r}".format(statistics))
-    if (statistics == "fermi_dirac") != bool(fd_enhancement):
-        raise ValueError("statistics={!r} contradicts fd_enhancement={!r}: 'fermi_dirac' needs the FD "
-                         "g-factor (fd_enhancement=True), 'boltzmann' needs fd_enhancement=False"
+        raise ValueError("statistics must be None, 'fermi_dirac', 'boltzmann' or 'legacy', got {!r}".format(
+            statistics))
+    label = "fermi_dirac_legacy" if statistics == "legacy" else statistics
+    if (label != "boltzmann") != bool(fd_enhancement):
+        raise ValueError("statistics={!r} contradicts fd_enhancement={!r}: 'fermi_dirac' and 'legacy' need the "
+                         "FD g-factor (fd_enhancement=True), 'boltzmann' needs fd_enhancement=False"
                          .format(statistics, fd_enhancement))
-    return statistics
+    return label
 
 
 _PAIR_REL_TOL = 1.0e-3      # n_i / N_c / N_v are quoted to 3 significant figures; 1e-3 of n_i = 0.05 meV
@@ -1302,8 +1314,8 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
                 "install_bipolar_options: region {!r} combines an APPARENT bandgap-narrowing model "
                 "({}) with the Fermi-Dirac g-factor on a degenerate doping (FD built-in correction up "
                 "to {:.3g} V_t). Apparent BGN was extracted with Boltzmann statistics, so part of the "
-                "degeneracy is counted twice; use fd_enhancement=False with apparent BGN, or accept "
-                "the overlap knowingly.".format(region, o.bgn.kind,
+                "degeneracy is counted twice; use statistics='boltzmann' (fd_enhancement=False) with "
+                "apparent BGN, or accept the overlap knowingly.".format(region, o.bgn.kind,
                                                 float(np.max(np.maximum(f["fd_n"], f["fd_p"])))),
                 AdvisoryWarning, stacklevel=4)
         msg = bgn_basis_advisory(region, o.bgn, f["N_D"], f["N_A"])

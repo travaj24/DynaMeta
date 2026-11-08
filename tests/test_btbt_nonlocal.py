@@ -12,9 +12,9 @@ every path is too long) while the local model gives 2.6e-2 A/m^2 (N7).
       nothing; every refusal fires before any DEVSIM state changes (no registration); the local model refuses a
       region with a live nonlocal term (BTBTDoubleCountError); material= takes the gap from band_data_at_T.
   N3  detailed balance at V = 0 (Zener with E_g,tun = 0.9 eV < the 1.04 V built-in, so paths exist): |R|/one-way
-      <= 64 eps x 60 (Boltzmann). Refute: the f_n frame offset delta shifted by 1e-3 kT breaks it. The legacy
-      FD g-factor transport (fd_enhancement=True) is REPORTED: its zero-bias state is not a strict equilibrium
-      (physics_bipolar_dd.setup_bipolar_region, statistics=None) -- MEASURED 2.7e-4 / 1.6e-4 at 0.2 / 0.1 nm.
+      <= 64 eps x 60 (Boltzmann, and the FD default since v0.15.0). Refute: the f_n frame offset delta shifted
+      by 1e-3 kT breaks it. The legacy FD g-factor transport (statistics='legacy', the pre-v0.15.0 default) is
+      REPORTED: its zero-bias state is not a strict equilibrium -- MEASURED 2.7e-4 / 1.6e-4 at 0.2 / 0.1 nm.
   N5  conservation on the Zener sweep: the term's hole-row and electron-row residual shares cancel to round-off;
       the terminal current == q Int G within the SI contact-current floor (the Z3 budget); I_n == I_p; the DC
       Newton needs no more iterations than the local model's (+3 allowed). Refute: a flipped electron sign.
@@ -171,12 +171,19 @@ def test_n3_detailed_balance_boltzmann(equilibrium):
 
 
 def test_n3_fd_transport_reported(equilibrium):
-    """CONSISTENCY CHECK, not a gate: under the legacy FD g-factor transport the zero-bias state carries the
-    documented FD/Boltzmann inconsistency (setup_bipolar_region, statistics=None), so E_F is not flat to
-    round-off. Asserted only that the imbalance is small and shrinks under junction refinement."""
+    """The FD g-factor transport. REVISED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac'): at the DEFAULT
+    the zero-bias state is the exact FD equilibrium, so the nonlocal term's detailed balance holds to the
+    Boltzmann case's round-off budget (64 eps x 60) -- MEASURED 5.3e-15 / 6.2e-15 at 0.2 / 0.1 nm. Under
+    statistics='legacy' (the pre-v0.15.0 default; CONSISTENCY CHECK, not a gate) the zero-bias state carries
+    the documented FD/Boltzmann inconsistency, so E_F is not flat to round-off: asserted only that the imbalance
+    is small and shrinks under junction refinement (MEASURED 2.7e-4 / 1.6e-4 at 0.2 / 0.1 nm)."""
     a, b = equilibrium["fd_2e-10"]["ratio"], equilibrium["fd_1e-10"]["ratio"]
-    print("FD transport |R|/one-way at 0.2 / 0.1 nm:", a, b)
-    assert b < a < 1e-3
+    print("FD transport (default) |R|/one-way at 0.2 / 0.1 nm:", a, b)
+    assert a <= 64 * EPS * 60 and b <= 64 * EPS * 60
+    leg = C.run_child("equilibrium", h=[0.2e-9, 0.1e-9], fd=[True], statistics="legacy")
+    la, lb = leg["fd_2e-10"]["ratio"], leg["fd_1e-10"]["ratio"]
+    print("FD transport (legacy) |R|/one-way at 0.2 / 0.1 nm:", la, lb)
+    assert lb < la < 1e-3 and la > 1e6 * a
 
 
 def test_n3_refute_frame_offset_breaks_detailed_balance():

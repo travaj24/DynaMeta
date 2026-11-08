@@ -199,7 +199,9 @@ def test_q3_statistics_mismatch_is_refused():
     """Q3: an FD-paired set on the legacy statistics ('fermi_dirac_legacy': FD transport with the
     Boltzmann-product detailed balance) or on Boltzmann raises; a Boltzmann-paired (apparent) set on any
     FD statistics raises (the double count); matching statistics pass. resolve_statistics maps the
-    setup_bipolar_region pair and refuses a contradiction."""
+    setup_bipolar_region pair and refuses a contradiction. REVISED 2026-11-07 (v0.15.0 default): the unset
+    statistics with the FD g-factor resolve to 'fermi_dirac'; 'legacy' resolves to 'fermi_dirac_legacy' (and
+    the label is accepted back)."""
     for stats in ("fermi_dirac_legacy", "boltzmann"):
         with pytest.raises(BO.BGNPairingError, match="fermi_dirac"):
             _check(statistics=stats)
@@ -207,10 +209,12 @@ def test_q3_statistics_mismatch_is_refused():
         with pytest.raises(BO.BGNPairingError, match="twice"):
             _check(bgn=BO.BGN_SI_YAN_CUEVAS_2013_BOLTZMANN, statistics=stats)
     assert _check(bgn=BO.BGN_SI_YAN_CUEVAS_2013_BOLTZMANN, statistics="boltzmann") is None
-    assert BO.resolve_statistics(None, True) == "fermi_dirac_legacy"
+    assert BO.resolve_statistics(None, True) == "fermi_dirac"
+    assert BO.resolve_statistics("legacy", True) == "fermi_dirac_legacy"
+    assert BO.resolve_statistics("fermi_dirac_legacy", True) == "fermi_dirac_legacy"
     assert BO.resolve_statistics(None, False) == "boltzmann"
     assert BO.resolve_statistics("fermi_dirac", True) == "fermi_dirac"
-    for bad in (("boltzmann", True), ("fermi_dirac", False)):
+    for bad in (("boltzmann", True), ("fermi_dirac", False), ("legacy", False)):
         with pytest.raises(ValueError, match="contradicts"):
             BO.resolve_statistics(*bad)
 

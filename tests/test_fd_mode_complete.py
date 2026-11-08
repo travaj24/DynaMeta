@@ -106,7 +106,7 @@ def test_z_legacy_imbalance(key):
     at the FD equilibrium (eq_worst_local) are O(Delta)."""
     out = {}
     for h_scale in (1.0, 0.5):
-        o = _opts(key)
+        o = _opts(key, stats="legacy")
         base = 1e-9 if o.get("device") == "diode" else (1e-10 if o.get("device") == "mos" else 2e-10)
         o["h"] = base * h_scale
         r = _rb(**o)
@@ -123,7 +123,7 @@ def test_z_heterostack_battery_is_gone():
     here, and the currents' round-off ~1e-3 A/m^2 over G = 2e10 S/m^2 is 5e-14 V). SHOWN FAILING on the legacy
     statistics: 1.35e-4 V at h = 1 nm, 3.97e-5 V at 0.5 nm (the averaged-g battery, O(h^1.8))."""
     fd = [C.run_child("zero_bias_hetero", stats="fermi_dirac", h=h) for h in (1e-9, 5e-10)]
-    legacy = [C.run_child("zero_bias_hetero", h=h) for h in (1e-9, 5e-10)]
+    legacy = [C.run_child("zero_bias_hetero", stats="legacy", h=h) for h in (1e-9, 5e-10)]
     for r in fd:
         assert abs(r["V_battery"]) <= 1e-12, r
     assert abs(legacy[0]["V_battery"]) > 1e-5 and abs(legacy[1]["V_battery"]) > 1e-6
@@ -203,7 +203,7 @@ def test_f_fdt_against_dc_conductance(opts):
     if o.get("nonlocal"):
         assert r["share"]["btbt_nl"] >= 0.15
     if o:
-        legacy = C.run_child("fdt", dc=1, **o)
+        legacy = C.run_child("fdt", stats="legacy", dc=1, **o)
         assert abs(legacy["fdt_dc"]) > 1e-3
 
 
@@ -243,7 +243,7 @@ def test_f_thermionic_heterostack_fdt(unipolar):
     assert max(abs(v) for v in r["fdt"]) <= 1e-9, r["fdt"]
     if not unipolar:
         assert r["share"]["te_n"] >= 0.5
-    old = C.run_child("fdt_hetero", **(dict(unipolar=1) if unipolar else {}))
+    old = C.run_child("fdt_hetero", **(dict(unipolar=1, edge="average") if unipolar else dict(stats="legacy")))
     assert max(abs(v) for v in old["fdt"]) > 1e-6
 
 
@@ -266,7 +266,7 @@ def test_n_non_degenerate_limit_equals_legacy(opts):
     imbalance scales WITH delta_max (MEASURED 7.5e-4 / 1.13e-2 of the one-way: 0.61 / 0.89 delta_max) -- it
     vanishes only in the non-degenerate limit, where the two statistics coincide."""
     fd = C.run_child("nondeg", stats="fermi_dirac", **opts)
-    lg = C.run_child("nondeg", **opts)
+    lg = C.run_child("nondeg", stats="legacy", **opts)
     assert fd["residual"] <= 1e-12 and lg["residual"] <= 1e-12
     key = "one_way" if opts.get("device") == "mos" else "value"
     rel = abs(fd[key] / lg[key] - 1.0)
@@ -287,17 +287,18 @@ def test_n_non_degenerate_limit_equals_legacy(opts):
 _FDEXT_CALLLOG_DIGEST = "dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49"
 
 
-def test_d_defaults_off_legacy_definition_is_byte_identical():
-    """GATE D (defaults off, plan section 2 item 5): (ii) the recorded digest of every legacy path this work
-    touches; (i) same-tree A/B: statistics=None gives the identical log; ADVERSARIAL: statistics='fermi_dirac'
-    changes it. (iii) the SG cross-version gate tests/test_devsim_sg_flux.py and the existing digests
-    (bipolar options, BTBT presets, unipolar DG) run unchanged (audit note)."""
+def test_d_legacy_statistics_definition_is_byte_identical():
+    """GATE D (REVISED 2026-11-07 for the v0.15.0 default change). statistics='legacy' -- the v0.14 default,
+    kept reachable explicitly -- reproduces the recorded digest of every legacy path (recorded on 06b9ade, 501
+    calls) character-for-character; the DEFAULT (statistics unset) now equals statistics='fermi_dirac' and
+    differs from it (the intended change: docs/audit/2026-11-06-v0.15.0-release.md, decision (a))."""
     import _fdext_calllog as CL
     import devsim  # noqa: F401
-    log = CL.record_call_log()
+    log = CL.record_call_log(statistics="legacy")
     assert len(log) == 501 and CL.digest(log) == _FDEXT_CALLLOG_DIGEST
-    assert CL.record_call_log(statistics=None) == log
-    assert CL.digest(CL.record_call_log(statistics="fermi_dirac")) != _FDEXT_CALLLOG_DIGEST
+    default = CL.record_call_log()
+    assert default == CL.record_call_log(statistics="fermi_dirac")
+    assert CL.digest(default) != _FDEXT_CALLLOG_DIGEST
 
 
 def test_d_kernels_default_strings_unchanged_and_fd_guards():
@@ -348,7 +349,7 @@ def test_kfd_zero_bias_detailed_balance_is_exact(key):
     assert r["residual"] <= 1e-12
     b = _budget(r)
     assert _ratio(r) <= b and r["eq_worst_local"] <= b, (_ratio(r), r["eq_worst_local"], b)
-    legacy = _rb(**_KIN[key])
+    legacy = _rb(stats="legacy", **_KIN[key])
     assert legacy["eq_worst_local"] >= 0.5
 
 
@@ -395,7 +396,7 @@ def test_kfd_trap_noise_fdt():
     r = C.run_child("fdt", stats="fermi_dirac", **o)
     assert r["share"].get("trap_n", 0.0) + r["share"].get("trap_p", 0.0) >= 0.5
     assert abs(r["fdt_dc"]) <= _dc_budget(r), (r["fdt_dc"], _dc_budget(r))
-    legacy = C.run_child("fdt", **o)
+    legacy = C.run_child("fdt", stats="legacy", **o)
     assert abs(legacy["fdt_dc"]) > 1e-3
 
 
@@ -407,7 +408,8 @@ def test_b_unipolar_statistics_threaded_through_both_builders():
     """GATE B. TransportModel(physics='drift_diffusion', carrier_statistics='fermi_dirac') gives every unipolar
     region of the 2-D LayeredDevsimBuilder and of the 3-D Devsim3DEquilibrium (the primary and an extra
     heterostack semiconductor, via Stacked3DSpec.from_design / the spec field) the FD quasi-field transport
-    (g_enh == 1, the Delta edge models); the default (None) keeps the averaged g. Its physics: gate F-TE
+    (g_enh == 1, the Delta edge models). REVISED 2026-11-07: that is the DEFAULT (None) since v0.15.0;
+    'legacy' keeps the averaged g. Its physics: gate F-TE
     (unipolar). 'boltzmann' is refused for drift_diffusion (the unipolar model has no Boltzmann mode)."""
     from dynameta.carriers.physics_equilibrium import M_E
     from dynameta.materials.transport_model import TransportModel
@@ -419,5 +421,41 @@ def test_b_unipolar_statistics_threaded_through_both_builders():
     kw = dict(n_bg_m3=3e25, eps_static=9.0, dos_mass_kg_of_n_m3=lambda n: 0.3 * M_E,
               physics="drift_diffusion", mobility_m2Vs_of_n_m3=lambda n: 3e-3)
     assert TransportModel(carrier_statistics="fermi_dirac", **kw).carrier_statistics == "fermi_dirac"
+    assert TransportModel(carrier_statistics="legacy", **kw).carrier_statistics == "legacy"
     with pytest.raises(ValueError, match="no Boltzmann mode"):
         TransportModel(carrier_statistics="boltzmann", **kw)
+
+
+# =====================================================================================================
+# DG: density gradient under the v0.15.0 default statistics ('fermi_dirac')
+# =====================================================================================================
+
+def test_dg_bipolar_inversion_equilibrium_is_exact_with_fd():
+    """GATE DG-FD. The strongly inverted MOS of validation.bipolar_density_gradient GATE E (p 3e23, both
+    carriers quantum at the insulator wall, quantum_srh) with the FD transport, under the DEFAULT statistics:
+    the FD modified quasi-Fermi levels phi_n = psi + Lambda_n - V_t (L_n + ln(N_c/n_i)) and phi_p are flat
+    (= the body contact's 0) and L_n + L_p = ln(n_i^2/(N_c N_v)) + (Lambda_n + Lambda_p)/V_t node by node --
+    GATE E's identity with the transport's FD activity L in place of ln(c/N). Budget GATE E's own: 1e-11 V
+    and 1e-10 (its 1e-6 relative solve floor; the quantum-SRH detailed balance is exact by construction).
+    MEASURED (extended-precision Newton, as GATE E): max |phi_n| 7.8e-16 V, |phi_p| 1.1e-16 V, detailed balance
+    2.1e-14 (delta_max 6.1e-3). SHOWN FAILING under statistics='legacy' (the pre-v0.15.0 default: the
+    edge-averaged g and the Boltzmann-product SRH and contacts): |phi_n| 1.6e-4 V, |phi_p| 1.0e-7 V, detailed
+    balance 6.1e-3 (= delta_max: the Boltzmann product)."""
+    r = C.run_child("dg_fd")
+    assert r["max_phi_n"] <= 1e-11 and r["max_phi_p"] <= 1e-11, r
+    assert r["db"] <= 1e-10, r
+    legacy = C.run_child("dg_fd", stats="legacy")
+    assert max(legacy["max_phi_n"], legacy["max_phi_p"], legacy["db"]) > 1e-9, legacy
+
+
+def test_dg_bipolar_jacobian_with_fd():
+    """GATE DG-FD-J. The same device in DOUBLE precision (a perturbation does not reach the residual of a
+    128-bit device: every central difference read exactly 0, MEASURED), every equation variable (Potential,
+    Electrons, Holes, QSqrtN, QLambda, QSqrtP, QLambdaP) at the 4 nodes next to the wall, QSqrtN kicked x1.1
+    off the solved state: DEVSIM's matrix vs central differences of its residual (gate J's criterion).
+    MEASURED 5.3e-5. (A knock-out of the FD derivatives does not move it -- the inversion layer is barely
+    degenerate, delta_max 6.1e-3, so those entries sit below the criterion; the knock-out is gated on the
+    degenerate devices of gate J.)"""
+    r = C.run_child("dg_fd", jac=1)
+    assert any(v.startswith("Q") for v in r["variables"]) and "Electrons" in r["variables"], r["variables"]
+    assert r["jac_worst"] <= 1.0, r["jac_where"]
