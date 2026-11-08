@@ -5,8 +5,11 @@ DEVSIM phase, release v0.14.0, branch `wip/v014_ecfix` (off `feat/devsim-2.11-v0
 the DEVSIM issue). The draft and the source excerpts are in the session scratchpad `devsim_verify/`.
 
 **Bottom line.**
-- **Feasible, and done for 2-D and 3-D.** The new module is `dynameta.carriers.devsim_geometry`. Its
-  public function `apply_exact_geometry(device, region, *, negative="raise")` is opt-in.
+- **Feasible, and done for 2-D and 3-D.** The new module is `dynameta.carriers.devsim_geometry`, with
+  public function `apply_exact_geometry(device, region, *, negative=...)`.
+- **Now automatic (user decision 2026-11-06, section 7).** Both builders apply it right after
+  `create_device` with `negative="warn"` (`exact_geometry=True`; `False` / `"raise"` / `"clip"`).
+  Library meshes are only read, so they stay byte-identical. `mesher="gmsh"` stays and is corrected.
 - **What it does.** It recomputes DEVSIM's own circumcentric construction with the orientation sign
   of each piece kept, using the node coordinates and the element lists DEVSIM reports. It writes the
   result into DEVSIM's built-in `ElementEdgeCouple`. DEVSIM's dependency chain then rebuilds
@@ -167,7 +170,7 @@ The spread itself is an unstructured-mesh discretisation error, not a geometry e
 The check's refusal message could add one line: "or call
 `devsim_geometry.apply_exact_geometry(device, region, negative='warn')` after create_device".
 
-**To make the correction the default for user meshes:**
+**To make the correction the default for user meshes** (as proposed on 2026-11-06; done, section 7):
 1. Call it inside the builders right after `create_device`. For `Devsim3DEquilibrium` that is the
    end of `_create_mesh_device`; the validation's hook is exactly that. On the tensor and Kuhn
    meshes it is a round-off no-op (gated).
@@ -217,20 +220,106 @@ relies on "sum_e c_eT L_e t_e t_e^T = V_T I on a well-centred element".
 - `dynameta/carriers/devsim_geometry.py` (new): kernels, `apply_exact_geometry`,
   `measure_dual_geometry`, `exact_geometry_applied`, `ExactGeometryReport`,
   `NegativeDualGeometryError`.
-- `tests/test_devsim_geometry.py` (new, 14 tests), added to CI `solvers-devsim` (8 s).
+- `tests/test_devsim_geometry.py` (new, 16 tests), added to CI `solvers-devsim` (8 s).
+- Section 7 (automatic application): `dynameta/carriers/devsim_layered.py`,
+  `dynameta/carriers/devsim_3d.py`, `dynameta/carriers/element_geometry.py`,
+  `tests/test_devsim_3d_mesh.py`, `validation/devsim_3d_mesh.py`, `validation/devsim_geometry.py`, docs.
 - `validation/devsim_geometry.py` (new, 8 gates).
 - `.github/workflows/ci.yml`: the test module, with its measured time.
 
-No existing module changed. No digests moved.
+At first no existing module changed; section 7 wires the builders. No digests moved.
+
+## 7. Automatic application (user decision 2026-11-06; branch `wip/v014_geomdefault` off 1fbcfb8)
+
+The decision: apply the correction automatically, default negative policy `"warn"`, keep the gmsh
+mesher (no removal in v0.15).
+
+**Wiring.**
+- `devsim_geometry.correct_device_geometry(device, exact_geometry=True)` runs every region through
+  `apply_exact_geometry` and merges the regions' negative-couple warnings into ONE
+  `UnreliableResultWarning` per device.
+  - With `"raise"` it measures every region first, so a refusal leaves the whole device unchanged.
+  - `resolve_policy` maps the option: True -> `"warn"`, `"raise"` / `"clip"` as named, False -> off.
+- `LayeredDevsimBuilder(..., exact_geometry=True)` calls it right after `create_device`, before
+  `XP.enable`.
+- `Devsim3DEquilibrium._create_mesh_device` calls it right after `create_device`, through
+  `Stacked3DSpec.exact_geometry` (field, default True; `from_design(..., exact_geometry=)`).
+- These are the only two `create_device` calls in `dynameta/`.
+- The reports are on the builders as `geometry_reports`.
+- `apply_exact_geometry` itself now defaults to `negative="warn"`.
+
+**Byte-identity on library meshes: nothing is written.**
+- `geometry_already_exact(device, region)` decides first, using devsim `get_*` calls only.
+  - It recomputes the pieces per element in local order.
+  - It requires DEVSIM's `ElementEdgeCouple` to re-derive per element (as a multiset, to 1e-9
+    h_T^(d-1)).
+  - It requires no piece to be negative beyond 64 eps h_T^(d-1). The derivation: a zero piece
+    measured <= 1.15 eps h^k, and the smallest genuine negative seen anywhere is -1.5e-4 L^2.
+  - In 3-D it requires the same of every interface / contact triangle share.
+- When it holds, `apply_exact_geometry` returns `written=False` with no write. That means no temporary
+  model, no marker parameter and no value write.
+- Gates:
+  - `tests/test_devsim_geometry.py::test_already_exact_meshes_are_only_read`: a recorder wraps every
+    non-`get_` devsim function; zero calls on the 3-D Kuhn lattice with contacts and on the 2-D
+    rectilinear mesh. Adversarial: on the 5-tet lattice it records `set_element_values`.
+  - `tests/test_devsim_3d_mesh.py::test_builders_only_read_the_library_meshes`: a tripwire on the
+    write path stays silent while building three tensor topologies (full gate; patch +
+    multi-dielectric; semi inclusion + patch) and the 2-D layered builder. Adversarial: it fires on
+    the gmsh mesher.
+- MEASURED, `geometry_already_exact` = True on every region of the six 3-D tensor topologies and the
+  Kuhn bar:
+  - full gate, patch 0.5, multi-dielectric, buried-oxide inclusion, semi inclusion + patch, 60 nm patch
+    cell;
+  - cost 0.01-0.54 s per region, 1.85 s for the largest (108,864 tets).
+- The call-log digests and the SG-flux cross-version gate build raw-API 1-D devices, which the
+  builders' hook never sees. Their tests pass unchanged (section 7, tests).
+
+**gmsh mesher: kept, and what moves for its users (MEASURED, `validation/devsim_geometry.py` and
+`validation/devsim_3d_mesh.py` M6a/M6b).**
+
+| | `exact_geometry=False` (pre-v0.14 numbers) | default (`"warn"`) | `"clip"` |
+|---|---|---|---|
+| sum NodeVolume / V, semi / oxide | 1.1957 / 1.2932 | 1 + 2.2e-16 | -- |
+| series capacitor C / C_exact | 1.203236 | 1 - 5.6e-16 | 1 + 6.8e-4 |
+| max\|phi - exact\| | 2.98e-2 V | 3.3e-16 V | 2.1e-3 V |
+| bipolar MOS cap Gauss residual (0.5 V) | 0.228 | 1.28e-5 | 7.6e-4 |
+| lateral psi_s spread | 4.97 mV | 0.21 mV | 0.31 mV |
+
+Warnings:
+- The mesher's own `UnreliableResultWarning` now fires only with `exact_geometry=False`. Its new
+  text names "pre-v0.14" and "exact_geometry=False"; there is no "v0.15".
+- By default a gmsh build emits the one merged negative-couple warning instead.
+
+Pins changed, each with a numeric cross-check:
+- `test_legacy_gmsh_mesher_keeps_the_defect_and_warns` becomes
+  `test_gmsh_mesher_uncorrected_keeps_the_defect_and_warns` (exact_geometry=False: sum NV 1.1957 > 1.1,
+  the reworded warning).
+- New `test_gmsh_mesher_is_geometry_corrected_by_default`: sum NodeVolume and 2 sum ENV equal L^2 t
+  for every layer to 1e-12, and SurfaceArea equals L^2.
+- `test_3d_impact_ionization_refuses_an_inexact_mesh` now builds with `exact_geometry=False`. On the
+  default gmsh build the element-geometry check passes.
+- Validation M6 is split into M6a (False: defect + warning) and M6b (default: 1 to 1e-12).
+- No digest moved.
+
+**The element-geometry refusal** (`element_geometry.check_element_geometry`) now says the builders
+correct automatically and names `apply_exact_geometry(device, region, negative='warn')` for
+raw-API devices.
+
+**Docs** that promised removal now say the mesher is kept, geometry-corrected:
+- the `devsim_3d` module doc and the `Stacked3DSpec.mesher` comment;
+- the release note (sections 2, 4, 6, 7);
+- `2026-11-03-devsim-3d-mesh.md` section 8;
+- `2026-11-04-v0.14-user-decisions.md` row 1;
+- the v0.15 consolidated plan (rows on the release split and on the effort).
 
 ## Release-note lines
 
-- New opt-in `dynameta.carriers.devsim_geometry.apply_exact_geometry(device, region)`. It corrects
-  DEVSIM 2.11's over-counted control volumes and couplings on non-well-centred 2-D / 3-D meshes
-  (gmsh, Delaunay). Example: on the legacy gmsh 3-D stack, the capacitance goes from 1.20x to exact,
-  and the MOS-cap Gauss residual from 23 % to 1e-5. Call it right after `create_device`.
-- Negative couples on non-conforming boundaries are reported. The default `negative='raise'`
-  refuses; `negative='warn'` (recommended) keeps the exact values; `negative='clip'` keeps the
-  M-matrix property at a measured cost.
+- Both DEVSIM builders now correct DEVSIM 2.11's over-counted control volumes and couplings on
+  non-well-centred meshes automatically (`exact_geometry=True`; `False` restores the old numbers).
+  Library meshes are untouched (byte-identical). On the gmsh 3-D mesher, which is kept, the
+  capacitance goes from 1.20x to exact and the MOS-cap Gauss residual from 23 % to 1e-5.
+- Raw-API devices: `dynameta.carriers.devsim_geometry.apply_exact_geometry(device, region)` right
+  after `create_device`. Negative couples on non-conforming boundaries are kept and warned by default
+  (`negative='warn'`); `'raise'` refuses, `'clip'` keeps the M-matrix property at a measured cost.
 - (Resolved before release: the per-element 3-D Hooge 1/f source read 1.125x on Kuhn tensor meshes;
   fixed in v0.14.0, docs/audit/2026-11-06-v0.14-hooge-3d.md.)
