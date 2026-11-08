@@ -88,7 +88,12 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
   the junction line x_j, i.e. on the field peak). RUNTIME CHECK (v0.15 follow-up, 1-D): btbt_generation_current
   estimates the quadrature error on the solved field (btbt_quadrature_error) and warns (UnreliableResultWarning,
   naming the region and the worst edge) above BTBT_QUADRATURE_TOL = 1 %. It covers the field-factor
-  quadrature only, not the carrier (D) discretisation; 2-D/3-D are not checked (apply the rule above).
+  quadrature only, not the carrier (D) discretisation. 2-D / 3-D (v0.15.1): the same estimate on the element
+  assembly (it reduces to the 1-D one on a laterally uniform device), naming the worst element; there h is an
+  element's extent ALONG the field, and the rule applies wherever the field peaks (on the junction corner of
+  docs/audit/2026-11-08-v0.15-btbt-resolution-2d.md: where the junction meets a boundary next to a contact).
+  Put mesh lines ALONG abrupt junctions: an abrupt junction crossing the mesh obliquely carries a doping-
+  representation error the check does not see (MEASURED -4.7 % at 1 nm, no warning).
 
 STATISTICS (v0.15 completion). Under statistics="fermi_dirac" D is f_n(E_ie) - f_p(E_ie) with the
 transport's own FD quasi-Fermi levels, D = (n p - n_ie^2)/((n + n_ie0 gamma_n)(p + n_ie0 gamma_p)) (hurkx_d_expr
@@ -653,11 +658,17 @@ _GL_T, _GL_W = np.polynomial.legendre.leggauss(16)        # 16-point Gauss-Legen
 
 def btbt_quadrature_error(device: str, region: str, *, index: Optional[int] = None) -> Optional[dict]:
     """A-posteriori estimate of the relative QUADRATURE error of the local BTBT current on the SOLVED state
-    (v0.15 follow-up; the hazard of the module header's MESH RESOLUTION paragraph). 1-D only (returns None in
-    2-D/3-D: the element rates have no 1-D ordering to interpolate along; there the h <= 0.35/k rule is the
-    user's to apply), and None when the region has no setup_btbt record or a zero gross rate.
+    (v0.15 follow-up; the hazard of the module header's MESH RESOLUTION paragraph), in 1-D, 2-D and 3-D (v0.15.1);
+    None when the region has no setup_btbt record or a zero gross rate.
 
-    The estimator: the edge field E_e is EXACT at the edge midpoint s_e (Gauss's law; MEASURED to 3e-4 in
+    WHAT IT COVERS. The quadrature of the FIELD FACTOR A |E|^P exp(-B/|E|) on the solved field: the error of
+    sampling the field once per edge (1-D) or element (2-D/3-D) where the rate varies by e^(k h) across it. NOT
+    covered: the discretisation of the field itself and of the carriers in D -- O(h^2) terms that, MEASURED on
+    abrupt Si Zeners, make the total mesh error 0.75-0.95 x the estimate at moderate bias, and can cancel it at
+    high current (docs/audit/2026-11-08-v0.15-btbt-resolution-2d.md). Use it as a resolution ALARM (the 1 %
+    warning of btbt_generation_current) and as an estimate of the leading mesh error, not as a correction.
+
+    1-D. The edge field E_e is EXACT at the edge midpoint s_e (Gauss's law; MEASURED to 3e-4 in
     docs/audit/2026-11-06-v0.15-btbt-presets.md). The continuum field on each half edge (e toward neighbour j)
     is modelled by a quadratic through three midpoints containing e and j, the ENO choice (smaller second
     difference) of the outward (e, j, j+-1) and inward (e-+1, e, j) stencils: EXACT for the piecewise-linear
@@ -675,18 +686,51 @@ def btbt_quadrature_error(device: str, region: str, *, index: Optional[int] = No
     worst edge has the largest |U_e| |h_e - Int_e f/f_e|; k there is its steepest one-sided slope of ln f
     between midpoints; the max neighbour log ratio is max |ln f_e - ln f_e+1| over edge pairs carrying a rate
     >= 1e-3 of the peak.
+
+    2-D / 3-D (the same construction on the element assembly; derivation in the audit note above). The element
+    field |E_T| (the P1 gradient's magnitude) is the sample, placed ALONG the field at t* = (1/2) Sum s_i^2 g_i, where
+    the P1 gradient is exact for a field varying linearly along its direction (the 1-D midpoint; the cell centre of
+    a tensor mesh), and across it at the circumcentre (clamped into the element). Each element is split into the
+    scheme's own ElementNodeVolume pieces (node, edge midpoint, [face circumcentres,] circumcentre), the 1-D half
+    edges; the field on the pieces of node v is a least-squares fit quadratic ALONG the field and linear across it,
+    the ENO choice (smaller curvature along the field) between the centred stencil (the element and its vertex
+    neighbours: the 1-D inward stencil) and the one-sided stencil on v's side along the field (the vertex 2-ring
+    ahead of v plus the samples level with the element: the 1-D outward stencil). f is integrated on every piece by
+    a collapsed Gauss rule (16^2 points in 2-D, 8^3 in 3-D), D held at the piece's own value, and
+    error = Sum (S - C) / Sum C over the pieces as in 1-D. On a laterally uniform device on a tensor / Kuhn mesh it
+    IS the 1-D estimate (MEASURED to 1e-14), it does not depend on the mesh orientation (a rotated mesh: 4e-13),
+    and any conforming simplex mesh is handled (well-centred, or with apply_exact_geometry's signed volumes).
+    Elements whose largest possible share is below 1e-16 of the gross rate are not evaluated (they count as exact).
+    Cost MEASURED ~0.15 ms per evaluated triangle, ~0.7 ms per tetrahedron (4.9 s on a 58k-node 2-D device).
+    NOT covered in 2-D / 3-D: an ABRUPT junction that crosses the mesh obliquely -- the representation of the
+    doping on the oblique mesh is then the leading mesh error (MEASURED -4.7 % at 1 nm with an estimate of +0.5 %);
+    put mesh lines along abrupt junctions (a junction aligned with the mesh, rotated or not, is covered).
+    Returns {"error", "worst_element_m" (its vertices), "worst_centre_m", "worst_h_m" (its extent along the
+    field), "worst_k_per_m" (steepest slope of ln f between element samples), "worst_kh",
+    "max_neighbour_log_ratio" (over face neighbours carrying >= 1e-3 of the peak rate), "elements_evaluated"}.
     """
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
-    if int(ds.get_dimension(device=device)) != 1:
-        return None
+    dim = int(ds.get_dimension(device=device))
     sets = _INSTALLED_SETS.get((device, region))
     if sets is None:
         return None
-    terms = _btbt_rate_models(ds, device, region, 1)
+    terms = _btbt_rate_models(ds, device, region, dim)
     if len(terms) != len(sets):                               # a stale record (the region was rebuilt)
         return None
     pick = range(len(sets)) if index is None else [index]
+    if dim != 1:
+        return _quadrature_error_nd(ds, device, region, dim, sets, terms, pick)
+    return _quadrature_error_1d(ds, device, region, sets, terms, pick)
+
+
+def _log_f_ratio(Et, E, P: float, B: float):
+    """ln(f(Et) / f(E)) of the field factor f = E^P exp(-B/E): the one formula both estimators integrate (finite
+    wherever both fields are >= the 1 V/m floor, also where f itself underflows)."""
+    return P * np.log(Et / E) - B / Et + B / E
+
+
+def _quadrature_error_1d(ds, device: str, region: str, sets, terms, pick) -> Optional[dict]:
     x = np.asarray(ds.get_node_model_values(device=device, region=region, name="x"))
     en = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=int)
     order = np.argsort(0.5 * (x[en[:, 0]] + x[en[:, 1]]))
@@ -743,7 +787,7 @@ def btbt_quadrature_error(device: str, region: str, *, index: Optional[int] = No
             Et = np.where((j != idx)[:, None], best, E[:, None])
             Et = np.maximum(Et, 1.0)                                         # the model's own |E| floor
             # ln(|D_e| A f(E_t)) = ln|U_e| + ln(f(E_t)/f_e): bounded, so no overflow in the far tail
-            lr = lu[:, None] + P * np.log(Et / E[:, None]) - B / Et + (B / E)[:, None]
+            lr = lu[:, None] + _log_f_ratio(Et, E[:, None], P, B)
             cont += 0.5 * h * (0.5 * np.exp(lr) @ _GL_W)
             k_edge = np.maximum(k_edge, np.where(u > 0.0, np.abs(g[j] - g) / dist, 0.0))
         contrib += u * h - cont
@@ -760,11 +804,401 @@ def btbt_quadrature_error(device: str, region: str, *, index: Optional[int] = No
             "worst_kh": float(k_edge[w] * h[w]), "max_neighbour_log_ratio": max_ratio}
 
 
+
+# ---- the 2-D / 3-D estimator (v0.15.1; docs/audit/2026-11-08-v0.15-btbt-resolution-2d.md) ---------------------
+_ND_GL_POINTS = {2: 16, 3: 8}       # collapsed Gauss-Legendre points per direction on each dual piece
+_ND_LEVEL_RTOL = 1e-3               # two samples lie at one level (along / across the field) within this x h_T
+_ND_PINV_RCOND = 1e-10              # least-squares cut-off on the scaled basis (directions a stencil leaves free)
+_ND_ACTIVE_RTOL = 1e-16             # elements whose largest possible share is below this x the gross rate: skipped
+_ND_CHUNK_POINTS = 2_000_000        # quadrature points per evaluation chunk (memory bound)
+_ND_LAYOUT: Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]] = {}   # (device, region) -> (elements, slots)
+
+
+def _simplex_rule(dim: int, n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """The collapsed (Duffy / Stroud conical-product) n^dim-point Gauss-Legendre rule on a dim-simplex:
+    barycentric points (m, dim + 1) and weights (m,) normalised to sum 1, so a weighted sum is the AVERAGE over the
+    simplex, whatever its size, shape or orientation. Exact for polynomials of degree <= 2 n - dim."""
+    t, w = np.polynomial.legendre.leggauss(n)
+    t, w = 0.5 * (t + 1.0), 0.5 * w
+    g = np.meshgrid(*([t] * dim), indexing="ij")
+    gw = np.meshgrid(*([w] * dim), indexing="ij")
+    W = np.ones_like(g[0])
+    rest = np.ones_like(g[0])                 # the part of the simplex not yet used by earlier coordinates
+    coords = []
+    for k in range(dim):                      # x_k = t_k prod_{j<k} (1 - t_j); Jacobian prod_j (1 - t_j)^(d-1-j)
+        coords.append(g[k] * rest)
+        W = W * gw[k] * (1.0 - g[k]) ** (dim - 1 - k)
+        rest = rest * (1.0 - g[k])
+    lam = np.stack([1.0 - sum(coords)] + coords, axis=-1).reshape(-1, dim + 1)
+    W = W.ravel()
+    return lam, W / W.sum()
+
+
+def _p2_nodes(dim: int) -> Tuple[np.ndarray, np.ndarray]:
+    """The P2 Lagrange nodes of a dim-simplex (vertices, then edge midpoints) in barycentric coordinates
+    (nn, dim + 1), and a function giving the nodal basis at barycentric points: a QUADRATIC is evaluated on a piece
+    exactly from its values at these nodes (lambda_i (2 lambda_i - 1) at a vertex, 4 lambda_i lambda_j at a
+    midpoint), which turns the quadrature-point evaluation into one matrix product."""
+    I = np.eye(dim + 1)
+    pairs = [(i, j) for i in range(dim + 1) for j in range(i + 1, dim + 1)]
+    nodes = np.concatenate([I, np.array([0.5 * (I[i] + I[j]) for i, j in pairs])])
+
+    def basis(lam):
+        return np.concatenate([lam * (2.0 * lam - 1.0)] + [4.0 * lam[:, i:i + 1] * lam[:, j:j + 1]
+                                                           for i, j in pairs], axis=1)
+    return nodes, basis
+
+
+def _element_layout(ds, device: str, region: str) -> Tuple[np.ndarray, np.ndarray]:
+    """(elements (n, d+1), slot end nodes (n, k, 2)) of a 2-D/3-D region: DEVSIM's element-edge layout, read and
+    CHECKED once by devsim_geometry's region reader (temporary element models, deleted again), then cached while
+    the element list is unchanged."""
+    els = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=np.int64)
+    hit = _ND_LAYOUT.get((device, region))
+    if hit is not None and hit[0].shape == els.shape and np.array_equal(hit[0], els):
+        return hit
+    from dynameta.carriers.devsim_geometry import _Region
+    R = _Region(device, region)
+    if not np.array_equal(R.elems, els):                      # pragma: no cover - DEVSIM invariant
+        raise RuntimeError("btbt_quadrature_error: element list changed while reading the layout")
+    _ND_LAYOUT[(device, region)] = (els, R.slot_nodes)
+    return els, R.slot_nodes
+
+
+def _padded_rows(M, rows: np.ndarray) -> np.ndarray:
+    """Column indices of the given rows of a CSR matrix, padded with -1 to one width: (len(rows), width)."""
+    sub = M[rows]
+    cnt = np.diff(sub.indptr)
+    out = np.full((rows.size, int(cnt.max()) if rows.size else 0), -1, dtype=np.int64)
+    r = np.repeat(np.arange(rows.size), cnt)
+    out[r, np.arange(sub.indices.size) - sub.indptr[r]] = sub.indices
+    return out
+
+
+def _aligned_basis(zeta: np.ndarray, quadratic: bool) -> np.ndarray:
+    """The reconstruction basis in field-aligned coordinates zeta = (u, v[, w]) (u along the field) on the last
+    axis: [1, u, v, (w)] and, quadratic, [u^2, u v, (u w)] -- quadratic ALONG the field (the 1-D estimator's
+    quadratic), linear across it, with the cross terms that let the along-field slope vary across. The transverse
+    curvature is left out: across the field the rate varies slowly (k_v << k_u), so its curvature enters the
+    element quadrature at third order."""
+    d = zeta.shape[-1]
+    cols = [np.ones(zeta.shape[:-1])] + [zeta[..., i] for i in range(d)]
+    if quadratic:
+        cols += [zeta[..., 0] * zeta[..., i] for i in range(d)]
+    return np.stack(cols, axis=-1)
+
+
+def _field_frames(nhat: np.ndarray) -> np.ndarray:
+    """Orthonormal frames (m, d, d), rows (u = nhat, v[, w]); the identity where the field direction is 0. 3-D: v is
+    the coordinate axis least aligned with nhat, orthogonalised (on a tensor mesh with an axis-aligned field: the
+    other two axes), w = u x v."""
+    m, d = nhat.shape
+    R = np.zeros((m, d, d))
+    zero = ~(np.linalg.norm(nhat, axis=1) > 0.0)
+    u = np.where(zero[:, None], np.eye(d)[0], nhat)
+    R[:, 0] = u
+    if d == 2:
+        R[:, 1] = np.stack([-u[:, 1], u[:, 0]], axis=1)
+    else:
+        ax = np.eye(3)[np.argmin(np.abs(u), axis=1)]
+        v = ax - np.sum(ax * u, axis=1, keepdims=True) * u
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        R[:, 1] = v
+        R[:, 2] = np.cross(u, v)
+    return R
+
+
+def _levels(pi: np.ndarray, mask: np.ndarray, tol: np.ndarray) -> np.ndarray:
+    """Number of distinct values (clustered at tol per row) of pi over the masked entries of each row."""
+    v = np.sort(np.where(mask, pi, np.inf), axis=1)
+    fin = np.isfinite(v)
+    with np.errstate(invalid="ignore"):                       # inf - inf past the last entry: masked below
+        gaps = (np.diff(v, axis=1) > tol[:, None]) & fin[:, 1:]
+    return np.where(fin[:, 0], 1 + gaps.sum(axis=1), 0)
+
+
+def _element_samples(X: np.ndarray, cT: np.ndarray, nhat: np.ndarray) -> np.ndarray:
+    """Where the element field |E_T| is taken to be the continuum's (X (n, d+1, d), cT the circumcentres (n, d),
+    nhat the unit field directions (n, d); -> (n, d)). ALONG the field: the point t* at which the P1 gradient's
+    field component is EXACT for a field varying linearly along nhat (a planar quadratic potential, the uniformly
+    doped depletion): with s_i = nhat . v_i and g_i = nhat . grad(lambda_i), nhat . grad I(s^2) = sum s_i^2 g_i = 2 t*,
+    so t* = (1/2) sum_i s_i^2 g_i (translation-covariant; clamped to [min s_i, max s_i]). On an edge it is the
+    midpoint (the 1-D estimator's sample), on a right triangle / Kuhn tet of a tensor mesh the cell centre's, and
+    on ANY simplex with its vertices on two planes normal to nhat the midplane. ACROSS the field: the circumcentre,
+    clamped into the closed element (barycentric coordinates clamped at 0)."""
+    Tm = (X[:, 1:] - X[:, :1]).transpose(0, 2, 1)                     # columns: the edges from vertex 0
+    lb = np.linalg.solve(Tm, (cT - X[:, 0])[..., None])[..., 0]
+    lam = np.maximum(np.concatenate([1.0 - lb.sum(axis=1, keepdims=True), lb], axis=1), 0.0)
+    lam /= lam.sum(axis=1, keepdims=True)
+    pc = np.einsum("nv,nvd->nd", lam, X)
+    # grad(lambda_i), i = 1..d: the rows of Tm^-1; grad(lambda_0) = -their sum
+    Gi = np.linalg.inv(Tm)                                             # (n, d, d): row i-1 = grad(lambda_i)
+    g = np.einsum("nid,nd->ni", Gi, nhat)
+    g = np.concatenate([-g.sum(axis=1, keepdims=True), g], axis=1)    # (n, d+1)
+    sv = np.einsum("nvd,nd->nv", X - pc[:, None, :], nhat)            # vertex positions along the field
+    t = np.clip(0.5 * np.sum(sv * sv * g, axis=1), sv.min(axis=1), sv.max(axis=1))
+    return pc + t[:, None] * nhat
+
+
+def _vertex_sides(pv: np.ndarray, tol: np.ndarray) -> np.ndarray:
+    """Each element vertex's side of the element sample along the field (-1 / 0 / +1; 0 within tol): the side whose
+    one-sided (1-D outward) stencil competes with the centred one for that vertex's pieces."""
+    return np.where(pv > tol[:, None], 1, np.where(pv < -tol[:, None], -1, 0))
+
+
+def _quadrature_error_nd(ds, device: str, region: str, dim: int, sets, terms, pick) -> Optional[dict]:
+    """btbt_quadrature_error on a 2-D / 3-D region (element assembly). The derivation and its reduction to the 1-D
+    estimator are in docs/audit/2026-11-08-v0.15-btbt-resolution-2d.md (section 3); in short, per element T:
+      * data: the element field magnitude e_T (BTBT_Emag, the P1 gradient's |E|, what the scheme uses), located
+        along the field where the P1 gradient is exact for a field varying linearly along it (_element_samples:
+        the 1-D edge midpoint's analogue) and across it at the circumcentre;
+      * pieces: the scheme's own ElementNodeVolume pieces, the simplices (node, edge midpoint, [face
+        circumcentres], c_T), each with the |U| (so the Hurkx D) of its node -- the 1-D half edge's analogue;
+      * continuum field on the pieces of node v: a least-squares fit in field-aligned coordinates, quadratic along
+        the field and linear across it (_aligned_basis), the ENO choice (smaller curvature along the field) of the
+        centred stencil (T and its vertex neighbours: the 1-D inward stencil) and the one-sided stencil on v's side
+        along the field (the vertex 2-ring ahead of v and the samples level with T: the 1-D outward stencil);
+        linear where neither is determined along the field, constant where v has no element beyond it;
+      * f = A e^P exp(-B/e) integrated on every piece by the collapsed Gauss rule, D held at the piece's value;
+        error = Sum (S - C) / Sum C with S = |U| ENV the scheme's share and C the continuum share."""
+    from scipy import sparse
+    from dynameta.carriers.devsim_geometry import _TET_EDGES, tetrahedron_dual_parts, triangle_dual_pieces
+    els, slots = _element_layout(ds, device, region)
+    n_el, kk = slots.shape[:2]
+    xyz = np.column_stack([np.asarray(ds.get_node_model_values(device=device, region=region, name=c),
+                                      dtype=np.float64) for c in "xyz"[:dim]])
+    X = xyz[els]                                                       # (n, d+1, d)
+
+    def em(name):
+        return np.asarray(ds.get_element_model_values(device=device, region=region, name=name),
+                          dtype=np.float64).reshape(n_el, kk)
+    env = em("ElementNodeVolume")
+    Es = em("BTBT_Emag")                       # per element edge; equal within an element (the P1 gradient)
+    e = Es.mean(axis=1)
+    G = np.stack([em("ElectricField_" + c).mean(axis=1) for c in "xyz"[:dim]], axis=1)
+    gn = np.linalg.norm(G, axis=1)
+    nhat = G / np.where(gn > 0.0, gn, 1.0)[:, None]
+    loc = np.argmax(els[:, :, None, None] == slots[:, None, :, :], axis=1)        # (n, k, 2) local vertex
+    if dim == 2:
+        _s, L, c3 = triangle_dual_pieces(X)
+        cT = c3[:, :2]
+        cf = pp = None
+    else:
+        pp, L, cT, cf = tetrahedron_dual_parts(X)
+    rho = L.max(axis=1)                                                # the element's longest edge
+    tol = _ND_LEVEL_RTOL * rho
+    p = _element_samples(X, cT, nhat)
+    pv = np.einsum("nvd,nd->nv", X - p[:, None, :], nhat)              # vertices' positions along the field
+    side = _vertex_sides(pv, tol)                                      # (n, d+1)
+
+    # the scheme's shares, per term: |U| at each end node of each element edge (D of that node)
+    lnU = {}
+    S_el = np.zeros(n_el)
+    for i in pick:
+        for a in (0, 1):
+            u = np.abs(em(terms[i][a]))
+            with np.errstate(divide="ignore"):
+                lnU[(i, a)] = np.log(u)                                # -inf where the rate is 0
+            S_el += np.sum(u * np.abs(env), axis=1)
+    gross = float(S_el.sum())
+    if not gross > 0.0:
+        return None
+    inc = sparse.csr_matrix((np.ones(els.size), (np.repeat(np.arange(n_el), dim + 1), els.ravel())),
+                            shape=(n_el, xyz.shape[0]))
+    A1 = (inc @ inc.T).tocsr()                                         # shared-vertex counts (incl. self)
+    # SKIP elements that cannot matter: the scheme share AND a bound on the continuum share (D at its largest end
+    # value, the field 1.25 x the largest over the vertex 2-ring -- the factor covers the quadratic's overshoot;
+    # g is increasing in E) below _ND_ACTIVE_RTOL of the gross rate. They enter as exact (C = S).
+    m1 = np.asarray(A1.multiply(e[None, :]).max(axis=1).todense()).ravel()
+    m2 = np.asarray(A1.multiply(m1[None, :]).max(axis=1).todense()).ravel()
+    vol = np.sum(np.abs(env), axis=1) * 2.0
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        lnCb = np.full(n_el, -np.inf)
+        for i in pick:
+            P_, B_ = float(sets[i].P), float(sets[i].B_V_per_m)
+            for a in (0, 1):
+                lnCb = np.maximum(lnCb, np.max(lnU[(i, a)] + _log_f_ratio(1.25 * m2[:, None], Es, P_, B_),
+                                               axis=1))
+        active = (S_el > _ND_ACTIVE_RTOL * gross) | (lnCb + np.log(np.maximum(vol, 1e-300))
+                                                     > math.log(_ND_ACTIVE_RTOL * gross))
+    act = np.flatnonzero(active)
+    A1b = (A1 > 0).astype(np.float64)
+    pool1 = _padded_rows(A1b, act)                                     # centred: T and its vertex neighbours
+    pool2 = _padded_rows((A1b[act] @ A1b).tocsr(), np.arange(act.size))  # the vertex 2-ring (outward pool)
+    Rf = _field_frames(nhat[act])                                      # (m, d, d): rows u (= nhat), v (, w)
+    ta = tol[act]
+
+    def geom(pool):
+        ok = pool >= 0
+        q = np.where(ok, pool, act[:, None])
+        zeta = np.einsum("mij,mkj->mki", Rf, p[q] - p[act][:, None, :]) / rho[act][:, None, None]
+        return ok, zeta, e[q]
+
+    ok1, z1, e1 = geom(pool1)
+    ok2, z2, e2 = geom(pool2)
+    tz = ta / rho[act]                                                 # the level tolerance in zeta units
+
+    def fit(mask, zeta, ev, quadratic):
+        """Least squares on [1, u, v.., (u^2, u v..)]; a transverse column is used only where the stencil has >= 2
+        levels across the field in that direction (else it is near-null: no transverse fit)."""
+        Am = _aligned_basis(zeta, quadratic) * mask[..., None]
+        for j in range(1, dim):
+            free = _levels(zeta[..., j], mask, tz) < 2
+            Am[..., 1 + j] = np.where(free[:, None], 0.0, Am[..., 1 + j])
+            if quadratic:
+                Am[..., dim + j + 1] = np.where(free[:, None], 0.0, Am[..., dim + j + 1])
+        c = np.einsum("mij,mj->mi", np.linalg.pinv(Am, rcond=_ND_PINV_RCOND), ev * mask)
+        if not quadratic:                                              # pad to the quadratic layout
+            c = np.concatenate([c, np.zeros((c.shape[0], dim))], axis=1)
+        return c
+
+    def bounded(c, mask, ev):
+        """The overshoot guard: the fit's values at the element's P2 nodes stay within the stencil data range
+        widened by that range on either side (a smooth peak between samples overshoots by far less)."""
+        lo = np.min(np.where(mask, ev, np.inf), axis=1)
+        hi = np.max(np.where(mask, ev, -np.inf), axis=1)
+        nodes = np.einsum("nv,mvd->mnd", p2_nodes, X[act])
+        zn = np.einsum("mij,mnj->mni", Rf, nodes - p[act][:, None, :]) / rho[act][:, None, None]
+        q = np.einsum("mnb,mb->mn", _aligned_basis(zn, True), c)
+        return (q.min(axis=1) >= lo - (hi - lo)) & (q.max(axis=1) <= hi + (hi - lo))
+
+    p2_nodes, p2_basis = _p2_nodes(dim)
+    lev_cen = _levels(z1[..., 0], ok1, tz)
+    c_cen = fit(ok1, z1, e1, True)
+    ok_cen = (lev_cen >= 3) & bounded(c_cen, ok1, e1)
+    c_cen_lin = fit(ok1, z1, e1, False)
+    const = np.zeros_like(c_cen)
+    const[:, 0] = e[act]
+    coef = np.empty((act.size, 3, c_cen.shape[1]))                    # per side -1 / 0 / +1
+    for sg in (-1, 1):
+        lvl = np.abs(z2[..., 0]) <= tz[:, None]
+        m_out = ok2 & (lvl | (sg * z2[..., 0] > tz[:, None]))
+        c_out = fit(m_out, z2, e2, True)
+        ok_out = (_levels(z2[..., 0], m_out, tz) >= 3) & bounded(c_out, m_out, e2)
+        m_lin = ok1 & ((np.abs(z1[..., 0]) <= tz[:, None]) | (sg * z1[..., 0] > tz[:, None]))
+        c_lin = fit(m_lin, z1, e1, False)
+        ok_lin = (_levels(z1[..., 0], m_lin, tz) >= 2) & bounded(c_lin, m_lin, e1)
+        # the 1-D order: the centred (inward) stencil only if its curvature ALONG the field is strictly smaller
+        take_cen = ok_cen & (~ok_out | (np.abs(c_cen[:, 1 + dim]) < np.abs(c_out[:, 1 + dim])))
+        coef[:, sg + 1] = np.where(take_cen[:, None], c_cen,
+                                   np.where(ok_out[:, None], c_out, np.where(ok_lin[:, None], c_lin, const)))
+    ok_cl = (lev_cen >= 2) & bounded(c_cen_lin, ok1, e1)
+    coef[:, 1] = np.where(ok_cen[:, None], c_cen, np.where(ok_cl[:, None], c_cen_lin, const))
+
+    # the dual pieces of every (element edge, end node): simplices and their share of that end's volume
+    lam_q, w_q = _simplex_rule(dim, _ND_GL_POINTS[dim])
+    lagr_t = p2_basis(lam_q).T                                         # (nn, nq): P2 nodes -> Gauss points
+    nf = 1 if dim == 2 else 2
+    contrib = np.zeros(n_el)
+    num = den = 0.0
+    per = kk * 2 * nf * lam_q.shape[0]
+    step = max(1, _ND_CHUNK_POINTS // per)
+    for c0 in range(0, act.size, step):
+        ch = np.arange(c0, min(c0 + step, act.size))
+        T = act[ch]
+        Xc = X[T]
+        la, lb2 = loc[T][..., 0], loc[T][..., 1]                      # (m, k): the slot's two local vertices
+        va = np.take_along_axis(Xc, la[..., None], axis=1)
+        vb = np.take_along_axis(Xc, lb2[..., None], axis=1)
+        mid = 0.5 * (va + vb)                                          # (m, k, d)
+        if dim == 2:
+            # pieces (m, k, 2 ends, 1, d+1 vertices, d); weights 1 (one piece per end)
+            ends = np.stack([va, vb], axis=2)
+            pcs = np.stack([ends, np.broadcast_to(mid[:, :, None], ends.shape),
+                            np.broadcast_to(cT[T][:, None, None, :], ends.shape)], axis=3)[:, :, :, None]
+            pwt = np.ones(pcs.shape[:4])
+        else:
+            # the two faces holding the edge: opposite f_a and f_b (tetrahedron_dual_parts' order)
+            lo_, hi_ = np.minimum(la, lb2), np.maximum(la, lb2)
+            lut = np.full((4, 4), -1, dtype=np.int64)
+            for kk_, (i_, j_) in enumerate(_TET_EDGES):
+                lut[i_, j_] = kk_
+            le = lut[lo_, hi_]                                         # (m, k) local tet edge
+            others = np.array([[v for v in range(4) if v not in ij] for ij in _TET_EDGES])   # (6, 2)
+            fab = others[le]                                           # (m, k, 2)
+            cfs = np.take_along_axis(cf[T][:, None, :, :], fab[..., None], axis=2)          # (m, k, 2, 3)
+            ends = np.stack([va, vb], axis=2)                          # (m, k, 2, 3)
+            pcs = np.stack([np.broadcast_to(ends[:, :, :, None], ends.shape[:3] + (2, 3)),
+                            np.broadcast_to(mid[:, :, None, None], ends.shape[:3] + (2, 3)),
+                            np.broadcast_to(cfs[:, :, None], ends.shape[:3] + (2, 3)),
+                            np.broadcast_to(cT[T][:, None, None, None], ends.shape[:3] + (2, 3))], axis=4)
+            pr = np.take_along_axis(pp[T], le[..., None], axis=1)                         # (m, k, 2) faces
+            tot = pr.sum(axis=2, keepdims=True)
+            pwt = np.broadcast_to(np.where(tot != 0.0, pr / np.where(tot != 0.0, tot, 1.0), 0.5)[:, :, None],
+                                  pcs.shape[:4])
+        xn = np.einsum("nv,mkafvd->mkafnd", p2_nodes, pcs)            # the pieces' P2 nodes
+        rel = xn - p[T][:, None, None, None, None]
+        xi = np.einsum("mij,mkafnj->mkafni", Rf[ch], rel) / rho[T][:, None, None, None, None, None]
+        sd = np.take_along_axis(side[T][:, None, :], np.stack([la, lb2], axis=2).reshape(len(T), 1, -1),
+                                axis=2).reshape(len(T), kk, 2) + 1
+        cc = coef[ch][np.arange(len(T))[:, None, None], sd]           # (m, k, 2, nb)
+        qn = np.einsum("mkafnb,mkab->mkafn", _aligned_basis(xi, True), cc)
+        Et = np.maximum(qn @ lagr_t, 1.0)                              # the quadratic at the Gauss points
+        for i in pick:
+            P_, B_ = float(sets[i].P), float(sets[i].B_V_per_m)
+            lu = np.stack([lnU[(i, 0)][T], lnU[(i, 1)][T]], axis=2)    # (m, k, 2)
+            with np.errstate(under="ignore"):
+                avg = np.sum((np.exp(lu[..., None, None] + _log_f_ratio(Et, Es[T][:, :, None, None, None],
+                                                                         P_, B_)) @ w_q) * pwt, axis=3)
+            Sx = np.exp(lu) * env[T][:, :, None]
+            Cx = avg * env[T][:, :, None]
+            d_ = np.sum(Sx - Cx, axis=(1, 2))
+            contrib[T] += d_
+            num += float(d_.sum())
+            den += float(Cx.sum())
+    skipped = np.flatnonzero(~active)
+    for i in pick:
+        den += float(sum(np.sum(np.exp(lnU[(i, a)][skipped]) * env[skipped]) for a in (0, 1)))
+    if not den > 0.0:
+        return None
+    w = int(np.argmax(np.abs(contrib)))
+    # report: the worst element's steepest one-sided slope of ln f between element centres (vertex neighbours),
+    # its extent along the field, and the largest change of ln f between face neighbours carrying >= 1e-3 of the
+    # peak rate
+    nb_w = A1.indices[A1.indptr[w]:A1.indptr[w + 1]]
+    dist = np.linalg.norm(p[nb_w] - p[w], axis=1)
+    keep = dist > tol[w]
+    k_w, max_ratio = 0.0, 0.0
+    face = (A1 == dim).tocoo()                                         # elements sharing a face (d vertices)
+    uel = np.zeros(n_el)
+    for i in pick:
+        for a in (0, 1):
+            uel = np.maximum(uel, np.max(np.exp(lnU[(i, a)]), axis=1))
+    sig = uel >= 1e-3 * uel.max()
+    pair = (face.row < face.col) & (sig[face.row] | sig[face.col])
+    for i in pick:
+        P_, B_ = float(sets[i].P), float(sets[i].B_V_per_m)
+        g = P_ * np.log(e) - B_ / e
+        if np.any(keep):
+            k_w = max(k_w, float(np.max(np.abs(g[nb_w[keep]] - g[w]) / dist[keep])))
+        if np.any(pair):
+            max_ratio = max(max_ratio, float(np.max(np.abs(g[face.row[pair]] - g[face.col[pair]]))))
+    h_w = float(np.ptp(pv[w]))
+    return {"error": num / den, "worst_element_m": tuple(tuple(float(c) for c in v) for v in X[w]),
+            "worst_centre_m": tuple(float(c) for c in p[w]), "worst_h_m": h_w, "worst_k_per_m": k_w,
+            "worst_kh": k_w * h_w, "max_neighbour_log_ratio": max_ratio, "elements_evaluated": int(act.size)}
+
+
 def _check_btbt_resolution(device: str, region: str, index: Optional[int]) -> None:
     rep = btbt_quadrature_error(device, region, index=index)
     if rep is None or not abs(rep["error"]) > BTBT_QUADRATURE_TOL:
         return
     from dynameta.warning_types import UnreliableResultWarning
+    if "worst_centre_m" in rep:                               # 2-D / 3-D (element assembly)
+        warnings.warn(
+            "btbt_generation_current: region {!r} of {!r}: the local BTBT rate is under-resolved by the mesh -- "
+            "estimated quadrature error {:+.2%} of the BTBT current (budget {:.0%}). Worst element centred at ({}) "
+            "nm (extent {:.4g} nm along the field, k h = {:.3g} with k = {:.3g} /m the decay rate of "
+            "A E^P exp(-B/E) there); largest change of the rate between neighbouring elements exp({:.3g}). Make the "
+            "element extent along the field h <= 0.35/k wherever the field peaks (the junction, and its corners "
+            "and edges in 2-D/3-D), on a tensor mesh with explicit mesh lines at that spacing (a ps that does not "
+            "divide the interval leaves one long element row, often on the peak); see the tunneling module "
+            "header, MESH RESOLUTION.".format(
+                region, device, rep["error"], BTBT_QUADRATURE_TOL,
+                ", ".join("{:.6g}".format(c * 1e9) for c in rep["worst_centre_m"]), rep["worst_h_m"] * 1e9,
+                rep["worst_kh"], rep["worst_k_per_m"], rep["max_neighbour_log_ratio"]),
+            UnreliableResultWarning, stacklevel=3)
+        return
     x0, x1 = rep["worst_edge_m"]
     warnings.warn(
         "btbt_generation_current: region {!r} of {!r}: the local BTBT rate is under-resolved by the mesh -- "
@@ -787,10 +1221,12 @@ def btbt_generation_current(device: str, region: str, *, depth_m: Optional[float
     term's integral as for a single set), or term `index` alone (its position in the tuple; a single set
     is index 0).
 
-    check_resolution (default True; 1-D): estimate the quadrature error of this current on the solved state
-    (btbt_quadrature_error) and emit an UnreliableResultWarning naming the region and the worst edge when it
-    exceeds BTBT_QUADRATURE_TOL (1 %). The value returned is unchanged either way. Pass False only to skip the
-    check deliberately (e.g. a convergence study that is under-resolved by design)."""
+    check_resolution (default True; 1-D, and since v0.15.1 2-D and 3-D): estimate the quadrature error of this
+    current on the solved state (btbt_quadrature_error) and emit an UnreliableResultWarning naming the region and
+    the worst edge / element when it exceeds BTBT_QUADRATURE_TOL (1 %). The value returned is unchanged either
+    way. Pass False only to skip the check deliberately (e.g. a convergence study that is under-resolved by
+    design, or a loop over many bias points where the check was already made once: it costs ~0.1 ms per
+    triangle / ~0.6 ms per tetrahedron carrying the rate, MEASURED)."""
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
     if depth_m is not None and not (depth_m > 0.0):
