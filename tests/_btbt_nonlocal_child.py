@@ -57,7 +57,7 @@ def _quiet():
 # devices
 # =====================================================================================================
 
-def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9):
+def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9, statistics=None):
     ds = _ds()
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -77,7 +77,8 @@ def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9):
                       equation="ifelse(x < {}, {}, {})".format(ZXJ, -ZN, ZN))
         BP.setup_bipolar_region(dev, "b", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=ZNI,
                                 mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-3, tau_p_s=1e-3,
-                                fd_enhancement=fd, btbt=local)
+                                fd_enhancement=fd, btbt=local,
+                                **({"statistics": statistics} if (fd and statistics) else {}))
         BP.setup_equilibrium_seed_models(dev, "b")
         for c in ("pc", "nc"):
             BP.setup_contact_ohmic_bipolar(dev, c)
@@ -325,13 +326,15 @@ def sc_jacobian(opts):
 
 def sc_equilibrium(opts):
     """|R| / one-way rate at V = 0 on the Zener with a tunnelling gap below the built-in potential, so paths
-    exist at equilibrium; Boltzmann (fd=False) and the FD g-factor transport (fd=True)."""
+    exist at equilibrium; Boltzmann (fd=False) and the FD g-factor transport (fd=True; opts["statistics"]:
+    the FD devices' statistics, unset = the default, 'fermi_dirac' since v0.15.0)."""
     from dynameta.carriers import btbt_nonlocal as NL
     from dynameta.carriers.tunneling import SILICON_HURKX
     out = {}
     for fd in opts.get("fd", [False, True]):
         for h in opts.get("h", [0.2e-9]):
-            dev = build_zener("ze{}{}".format(int(fd), int(round(h * 1e12))), fd=fd, h_junction=h)
+            dev = build_zener("ze{}{}".format(int(fd), int(round(h * 1e12))), fd=fd, h_junction=h,
+                              statistics=opts.get("statistics"))
             term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=0.9))
             solve()
             if opts.get("delta_shift"):                    # refutation: the f_n frame offset off by kT x shift
