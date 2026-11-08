@@ -377,6 +377,23 @@ json.dump(out, open(sys.argv[2], "w"))
 '''
 
 
+def test_sp_oracle_reproduces_the_airy_triangular_well():
+    """The 2026-11-07 audit of the GATE G N_inv miss (suspect A, the SP oracle): in a frozen linear band
+    bending (F = 1e8 V/m, 1.1 V at an infinite wall) the oracle's subbands must be the Airy levels
+    E_i - E_c(0) = (hbar^2/2m)^(1/3) (q F)^(2/3) |a_i| and its sheet density the 2-D Fermi-Dirac sum over
+    them (both written in validation.bipolar_density_gradient.sp_airy_check from scipy's Airy zeros and the
+    standard 2-D DOS, independent of the oracle's filling code). Tolerances from the O(h^2) stencil:
+    MEASURED 1.8e-4 / 4.5e-5 (three lowest levels) and 7.8e-4 / 1.9e-4 (sheet) at h = 0.05 / 0.025 nm --
+    order 2 -> gates 4e-4 and 2e-3 at the oracle's h = 0.05 nm. Refutation: a quantization mass 1 % off
+    (MN x 1.01) breaks both (MEASURED 3.5e-3 / 3.5e-2)."""
+    ea, es = V.sp_airy_check()
+    assert ea <= 4e-4 and abs(es) <= 2e-3, (ea, es)
+    ea2, es2 = V.sp_airy_check(h=0.025e-9)
+    assert np.log2(ea / ea2) >= 1.7 and np.log2(abs(es) / abs(es2)) >= 1.7
+    ea3, es3 = V.sp_airy_check(m_q=V.MN * 1.01)
+    assert ea3 > 4e-4 and abs(es3) > 2e-3
+
+
 def test_ssac_is_the_low_frequency_cv_and_noise_refuses(tmp_path):
     """ssac IS allowed on a closed device (the row has no time term: the minority carrier follows
     instantaneously -- the low-frequency / quasi-static C-V, plan G1-5's cross-method gate): at 1.0 V of
