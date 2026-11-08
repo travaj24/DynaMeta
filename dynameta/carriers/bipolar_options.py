@@ -1314,8 +1314,8 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
                 "install_bipolar_options: region {!r} combines an APPARENT bandgap-narrowing model "
                 "({}) with the Fermi-Dirac g-factor on a degenerate doping (FD built-in correction up "
                 "to {:.3g} V_t). Apparent BGN was extracted with Boltzmann statistics, so part of the "
-                "degeneracy is counted twice; use fd_enhancement=False with apparent BGN, or accept "
-                "the overlap knowingly.".format(region, o.bgn.kind,
+                "degeneracy is counted twice; use statistics='boltzmann' (fd_enhancement=False) with "
+                "apparent BGN, or accept the overlap knowingly.".format(region, o.bgn.kind,
                                                 float(np.max(np.maximum(f["fd_n"], f["fd_p"])))),
                 AdvisoryWarning, stacklevel=4)
         msg = bgn_basis_advisory(region, o.bgn, f["N_D"], f["N_A"])
