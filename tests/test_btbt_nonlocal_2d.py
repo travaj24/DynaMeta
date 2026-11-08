@@ -210,13 +210,13 @@ def test_f2_fd_degenerate_equilibrium_and_fdt(slantfd_eq):
 
 
 def test_f2_fd_proveout_same_node_source_fails_fdt(slantfd_eq):
-    """MEASURED -1.8e-2 (the legacy run gives the same): the separated placement is what the FDT needs."""
+    """MEASURED -2.1e-2 (legacy: -1.8e-2): the separated placement is what the FDT needs."""
     dev = np.array(slantfd_eq["S_same"]) / (KT4 * np.array(slantfd_eq["ReY"])) - 1.0
     assert abs(dev[0]) > 1e-4
 
 
 def test_f2_fd_ssac_equals_dc_conductance_at_0v(slantfd_eq):
-    """The N8 budget. MEASURED 9.4e-9 (budget 2.4e-6)."""
+    """The N8 budget. MEASURED 9.4e-9 (budget 2.3e-6)."""
     r = slantfd_eq
     assert abs(r["ReY"][0] / r["G0"] - 1.0) <= _ssac_tol(r, "0")
 
@@ -323,7 +323,8 @@ def _bands(r):
 
 
 @pytest.mark.slow
-def test_corner_local_vs_nonlocal_measurement():
+@pytest.mark.parametrize("fd", [False, True], ids=["boltzmann", "fd_default"])
+def test_corner_local_vs_nonlocal_measurement(fd):
     """MEASUREMENT, ~15 min (890 s on the loaded dev box: two graded-mesh 2-D devices, 12769 nodes, x two
     models, 18 Newton solves each). An n+ quadrant in a p+ square (5e24 / 5e24 m^-3, Si Hurkx A, B in both
     models, 0.5 nm at the junction lines): the local / nonlocal generation ratio next to the corner and on
@@ -336,9 +337,12 @@ def test_corner_local_vs_nonlocal_measurement():
     influence left in the far window, bounded by the change of the ratio from the [c+25, c+35) window to the
     far one (it decays away from the corner), plus 0.5 % for the 1-D ratio's own mesh error at 0.5 nm (it
     moves by <= 0.6 % from 0.5 to 0.1 nm, measured). MEASURED: -0.9 / -0.3 / +1.8 % against budgets
-    3.7 / 4.1 / 9.9 %. The flank window [c+5, c+25) fails the same budget (+9.3 / +7.7 / +20 %)."""
-    r = C.run_child("corner", h=0.5e-9, vr=[0.9, 1.5, 2.5])
-    p = C.run_child("zener", h=0.5e-9, vr=[0.9, 1.5, 2.5], xj=C.CORNER_C, length=C.CORNER_L, check=False)
+    3.7 / 4.1 / 9.9 %. The flank window [c+5, c+25) fails the same budget (+9.3 / +7.7 / +20 %).
+    fd_default (the FD transport, default statistics, both devices and the 1-D reference; ~13 min, the FD
+    nonlocal device's equilibrium from the seed takes 186 Newton steps): MEASURED -1.0 / -0.3 / +1.8 % against
+    3.7 / 4.1 / 9.9 %; every ratio within 0.7 % of the Boltzmann run (audit note section 10)."""
+    r = C.run_child("corner", h=0.5e-9, vr=[0.9, 1.5, 2.5], fd=fd, timeout=3600)
+    p = C.run_child("zener", h=0.5e-9, vr=[0.9, 1.5, 2.5], xj=C.CORNER_C, length=C.CORNER_L, check=False, fd=fd)
     m = _bands(r)
     nl = [q for q in r["rows"] if q["kind"] == "nonlocal"]
     lo = [q for q in r["rows"] if q["kind"] == "local"]
