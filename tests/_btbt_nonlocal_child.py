@@ -58,7 +58,7 @@ def _quiet():
 # devices
 # =====================================================================================================
 
-def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9):
+def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9, xj=ZXJ, length=ZL):
     ds = _ds()
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -67,15 +67,15 @@ def build_zener(dev="z", *, fd=False, local=None, h_junction=0.2e-9):
     with _quiet():
         ds.create_1d_mesh(mesh=mesh)
         ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=2e-9, tag="pc")
-        ds.add_1d_mesh_line(mesh=mesh, pos=ZXJ, ps=h_junction)
-        ds.add_1d_mesh_line(mesh=mesh, pos=ZL, ps=2e-9, tag="nc")
+        ds.add_1d_mesh_line(mesh=mesh, pos=xj, ps=h_junction)
+        ds.add_1d_mesh_line(mesh=mesh, pos=length, ps=2e-9, tag="nc")
         ds.add_1d_contact(mesh=mesh, name="pc", tag="pc", material="metal")
         ds.add_1d_contact(mesh=mesh, name="nc", tag="nc", material="metal")
         ds.add_1d_region(mesh=mesh, material="Si", region="b", tag1="pc", tag2="nc")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
         ds.node_model(device=dev, region="b", name="NetDoping",
-                      equation="ifelse(x < {}, {}, {})".format(ZXJ, -ZN, ZN))
+                      equation="ifelse(x < {}, {}, {})".format(xj, -ZN, ZN))
         BP.setup_bipolar_region(dev, "b", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=ZNI,
                                 mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-3, tau_p_s=1e-3,
                                 fd_enhancement=fd, btbt=local)
@@ -227,7 +227,8 @@ def sc_zener(opts):
     out = {"nl": [], "loc": []}
     vrs = [float(v) for v in opts.get("vr", [0.3, 0.6, 0.9, 1.2])]
     hj = float(opts.get("h", 0.2e-9))
-    dev = build_zener("znl", h_junction=hj)
+    geo = {"xj": float(opts.get("xj", ZXJ)), "length": float(opts.get("length", ZL))}
+    dev = build_zener("znl", h_junction=hj, **geo)
     term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
     its0 = solve()
     out["eq"] = {"its": its0, "stats": dict(term.last_stats),
@@ -240,12 +241,12 @@ def sc_zener(opts):
         out["nl"].append({"vr": vr, "its": its, "I_p": g["I_p"], "I_n": g["I_n"], "J": terminal_zener(dev),
                           "stats": g["stats"], "hole_share": hs, "elec_share": es, "abs_share": habs})
     ds.delete_device(device=dev)
-    dev = build_zener("zloc", local=SILICON_HURKX, h_junction=hj)
+    dev = build_zener("zloc", local=SILICON_HURKX, h_junction=hj, **geo)
     out["loc_eq_its"] = solve()
     for vr in vrs:
         ds.set_parameter(device=dev, name="pc_bias", value=-vr)
         its = solve()
-        out["loc"].append({"vr": vr, "its": its, "I": btbt_generation_current(dev, "b"),
+        out["loc"].append({"vr": vr, "its": its, "I": btbt_generation_current(dev, "b", check_resolution=bool(opts.get("check", True))),
                            "J": terminal_zener(dev)})
     return out
 
@@ -683,7 +684,7 @@ def sc_slant(opts):
     one_way = 0.5 * res["R_pre"] * res["pair"]
     out["db_ratio"] = float(np.max(np.abs(res["R"]) / one_way))
     ff = [1.0, 1e5, 1e7]
-    if opts.get("part") == "rev":                                # skip the equilibrium noise block
+    if opts.get("part", "").startswith("rev"):                   # skip the equilibrium noise block
         Y = sn = None
     else:
         t1 = time.time()
@@ -703,13 +704,17 @@ def sc_slant(opts):
     if opts.get("part") == "eq":
         out["total_s"] = time.time() - t0
         return out
-    V.set_bias(-0.2, 1e8)
+    V.set_bias(-0.2, 1e8, step=0.05)
     V._solve(1e8, 1e-8)
-    out["Yr"] = _lst(V.ssac_Y([1.0]).real)
-    out["Gr"], out["Gr_1"] = g_rich(1e-4)
-    out["Gr_2"] = g_rich(2e-4)[0]
     g = NL.btbt_nonlocal_generation(dev, "b")
     out["Ip_r"], out["In_r"] = g["I_p"], g["I_n"]
+    if opts.get("part") != "rev_jac":                          # "rev_ssac" (or the whole run)
+        out["Yr"] = _lst(V.ssac_Y([1.0]).real)
+        out["Gr"], out["Gr_1"] = g_rich(1e-4)
+        out["Gr_2"] = g_rich(2e-4)[0]
+        if opts.get("part") == "rev_ssac":
+            out["total_s"] = time.time() - t0
+            return out
     # Jacobian vs FD of DEVSIM's residual at -0.2 V
     if opts.get("drop_rotation"):
         _drop_rotation(NL)
@@ -724,7 +729,8 @@ def sc_slant(opts):
     mid = int(ps.pt_n1[pts[len(pts) // 2]])
     patch = st["gops"][0][i].indices.tolist()                     # the start's gradient patch: theta(psi)
     e_nodes = sorted(set(res["e_nodes"][k].tolist()))
-    cols = sorted(set([i, mid] + patch[:4] + e_nodes))
+    patch = [j for j in patch if j not in (i, mid)]
+    cols = sorted(set([i, mid] + patch[:2] + e_nodes))
     rows = np.concatenate([CT.node_rows(dev, "b", "HoleContinuityEquation", [i]),
                            CT.node_rows(dev, "b", "ElectronContinuityEquation", e_nodes)])
     out["recs"] = CC.fd_columns(dev, "b", "Potential", cols, rows, lambda x: 1e-6, term)
@@ -748,17 +754,21 @@ def sc_corner(opts):
     from dynameta.carriers import btbt_nonlocal_2d as B2
     from dynameta.carriers.tunneling import SILICON_HURKX, btbt_generation_current
     ds = _ds()
-    h = float(opts.get("h", 2e-9))
+    h = float(opts.get("h", 0.5e-9))                     # spacing AT the junction lines x = c, y = c
     vrs = [float(v) for v in opts.get("vr", [0.9, 1.5])]
     L, c = CORNER_L, CORNER_C
-    xl = [(0.0, h), (L, h)]
-    dop = "ifelse((x > {c}) && (y > {c}), {n}, {mn})".format(c=c, n=ZN, mn=-ZN)
-    contacts = [("lo", 0.0, L, 0.0, 0.0), ("hi", c + 20e-9, L, L, L)]
-    out = {"h": h, "rows": []}
+    xl = [(0.0, 2e-9), (c, h), (L, 2e-9)]                 # graded tensor mesh, finest on the junction lines
+    if opts.get("geom", "corner") == "corner":
+        dop = "ifelse((x > {c}) && (y > {c}), {n}, {mn})".format(c=c, n=ZN, mn=-ZN)
+        contacts = [("lo", 0.0, L, 0.0, 0.0), ("hi", c + 20e-9, L, L, L)]
+    else:                            # the planar reference: the same square, junction along y = c
+        dop = "ifelse(y > {c}, {n}, {mn})".format(c=c, n=ZN, mn=-ZN)
+        contacts = [("lo", 0.0, L, 0.0, 0.0), ("hi", 0.0, L, L, L)]
+    out = {"h": h, "rows": [], "geom": opts.get("geom", "corner")}
     A, B, P = SILICON_HURKX.A_SI, SILICON_HURKX.B_V_per_m, SILICON_HURKX.P
     for kind in ("nonlocal", "local"):
         t0 = time.time()
-        dev = build_2d("cn" + kind[0], xl, xl, dop, n_i=ZNI, tau=1e-3, contacts=contacts,
+        dev = build_2d("cn" + kind[0] + out["geom"][0], xl, xl, dop, n_i=ZNI, tau=1e-3, contacts=contacts,
                        local=SILICON_HURKX if kind == "local" else None)
         term = (NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
                 if kind == "nonlocal" else None)
