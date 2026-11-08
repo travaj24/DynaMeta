@@ -17,6 +17,8 @@ below fails at its setup call (MEASURED by running this file against an export o
       differences of DEVSIM's residual at -0.2 V, the start's gradient-patch columns included (they carry the
       rotation of the path). Refutation: the Jacobian without the rotation terms fails it.
   D2  refusals: no numba -> ImportError before anything is registered.
+  CORNER (@slow, ~15 min) a MEASUREMENT of the local model's 2-D error on an n+ quadrant corner, with the
+      independent check that the far arms reproduce the 1-D planar Zener's local / nonlocal ratio.
 """
 import numpy as np
 import pytest
