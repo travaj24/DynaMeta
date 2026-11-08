@@ -548,6 +548,8 @@ jobs:
     #   interface traps, thermionic FDT, the FD quasi-field transport; every device case in a child process,
     #   tests/_fd_mode_child.py): 40 tests (incl. the kinetic-trap K-FD and builder gates), 4.5 min with -n 2
     #   on the Windows dev box (2026-11-06; ~8 min serial, inferred; no single test above 42 s).
+    #   v0.15.0 default change (2026-11-07): 42 tests (+ the two density-gradient FD gates); MEASURED 488 s of
+    #   summed test time inside a -n 2 run of the 67 DEVSIM files on the (loaded) dev box, longest 51 s.
     # + the four files whose time was missing here, MEASURED serial `-m "not slow"` on the (shared,
     #   loaded) Windows dev box at the v0.15.0 close-out, 2026-11-06 (pytest's own time):
     #   tests/test_devsim_btbt_presets.py 69 s (12 tests), tests/test_devsim_btbt_resolution.py 13 s
