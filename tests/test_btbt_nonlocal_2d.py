@@ -112,7 +112,12 @@ def test_s2_ssac_equals_dc_conductance_at_0v(slant_eq):
 
 @pytest.fixture(scope="module")
 def slant_rev():
-    return C.run_child("slant", part="rev")
+    return C.run_child("slant", part="rev_ssac")
+
+
+@pytest.fixture(scope="module")
+def slant_jac():
+    return C.run_child("slant", part="rev_jac")
 
 
 def test_s2_ssac_equals_dc_conductance_at_reverse_bias(slant_rev):
@@ -134,11 +139,11 @@ def _jac_ratio(recs):
         float(np.max(np.abs(J - rich) / scale))
 
 
-def test_s2_jacobian_matches_fd_of_devsim_residual(slant_rev):
+def test_s2_jacobian_matches_fd_of_devsim_residual(slant_jac):
     """The strongest path's hole row and end-triangle electron rows, columns: the start, a mid-path node, the
     end triangle and the start's gradient patch (theta(psi)). Budget: 1e-6 of the row scale (the J1 pattern)
     + 2 |fd - fd2|. MEASURED 1.4e-10 relative; dR/dtheta / R = 1.2 % per radian at that path."""
-    r = slant_rev
+    r = slant_jac
     ratio, rel = _jac_ratio(r["recs"])
     print("slant Jacobian: ratio", ratio, "rel", rel, "dR/dtheta", r["dR_dtheta"], "R", r["R_k"])
     assert r["dR_dtheta"] is not None and abs(r["dR_dtheta"]) > 1e-3 * abs(r["R_k"])
@@ -149,7 +154,7 @@ def test_s2_jacobian_matches_fd_of_devsim_residual(slant_rev):
 def test_s2_refute_jacobian_without_rotation_terms():
     """~50 s (a third slanted-diode child). The frozen-geometry Jacobian of a DYNAMIC-direction term misses the
     rotation of the paths: it must fail the gate above."""
-    r = C.run_child("slant", part="rev", drop_rotation=True)
+    r = C.run_child("slant", part="rev_jac", drop_rotation=True)
     ratio, rel = _jac_ratio(r["recs"])
     print("without rotation terms: ratio", ratio, "rel", rel)
     assert ratio > 10.0
@@ -190,3 +195,57 @@ def test_d2_numba_missing_refuses_before_registration(monkeypatch):
         for m in list(ds.get_mesh_list()):
             ds.delete_mesh(mesh=m)
         _R.clear("nm2")
+
+
+# =====================================================================================================
+# CORNER: a measurement (no closed form exists for a 2-D corner junction)
+# =====================================================================================================
+
+def _bands(r):
+    """Node masks of the corner device: within 12 nm of the corner; and, on the two junction arms (15 nm
+    either side of x = c / y = c), the windows [c + 5, c + 25) nm (next to the corner), [c + 25, c + 35) nm
+    and [c + 35 nm, L) (the FAR window, up to the homogeneous-Neumann far side), both arms together. Also the
+    vertical / horizontal arm masks from c + 25 nm on, for the mirror check."""
+    x, y = np.array(r["x"]), np.array(r["y"])
+    c, L = C.CORNER_C, C.CORNER_L
+    hb, vb = np.abs(y - c) < 15e-9, np.abs(x - c) < 15e-9
+
+    def win(a, b):
+        return (hb & (x >= c + a) & (x < c + b)) | (vb & (y >= c + a) & (y < c + b))
+
+    return {"corner": np.hypot(x - c, y - c) < 12e-9, "flank": win(5e-9, 25e-9), "mid": win(25e-9, 35e-9),
+            "far": win(35e-9, 1.0), "arm_v": vb & (y >= c + 25e-9), "arm_h": hb & (x >= c + 25e-9)}
+
+
+@pytest.mark.slow
+def test_corner_local_vs_nonlocal_measurement():
+    """MEASUREMENT, ~15 min (890 s on the loaded dev box: two graded-mesh 2-D devices, 12769 nodes, x two
+    models, 18 Newton solves each). An n+ quadrant in a p+ square (5e24 / 5e24 m^-3, Si Hurkx A, B in both
+    models, 0.5 nm at the junction lines): the local / nonlocal generation ratio next to the corner and on
+    the arms, at 0.9 / 1.5 / 2.5 V. Results in docs/audit/2026-11-07-v0.15-nonlocal-btbt-2d.md.
+
+    Asserted: what must hold whatever the physics (both models converge, nonlocal electron total == hole
+    total, the two arms -- mirror images -- agree to 1 %, every current positive), and the INDEPENDENT CHECK:
+    far from the corner the arms are planar junctions, so their local / nonlocal ratio is the 1-D planar
+    Zener's (same doping, contact distances 60 nm, same h; its own DEVSIM devices). Budget: the corner's
+    influence left in the far window, bounded by the change of the ratio from the [c+25, c+35) window to the
+    far one (it decays away from the corner), plus 0.5 % for the 1-D ratio's own mesh error at 0.5 nm (it
+    moves by <= 0.6 % from 0.5 to 0.1 nm, measured). MEASURED: -0.9 / -0.3 / +1.8 % against budgets
+    3.7 / 4.1 / 9.9 %. The flank window [c+5, c+25) fails the same budget (+9.3 / +7.7 / +20 %)."""
+    r = C.run_child("corner", h=0.5e-9, vr=[0.9, 1.5, 2.5])
+    p = C.run_child("zener", h=0.5e-9, vr=[0.9, 1.5, 2.5], xj=C.CORNER_C, length=C.CORNER_L, check=False)
+    m = _bands(r)
+    nl = [q for q in r["rows"] if q["kind"] == "nonlocal"]
+    lo = [q for q in r["rows"] if q["kind"] == "local"]
+    for a, b, pn, pl in zip(nl, lo, p["nl"], p["loc"]):
+        assert a["vr"] == b["vr"] == pn["vr"] == pl["vr"]
+        Gp, Gl = np.array(a["Gp"]), np.array(b["Gloc_post"])
+        assert a["I"] > 0 and b["I"] > 0
+        assert abs(np.sum(a["Gn"]) / np.sum(a["Gp"]) - 1.0) < 1e-12
+        assert abs(Gp[m["arm_v"]].sum() / Gp[m["arm_h"]].sum() - 1.0) < 0.01
+        ratio = {k: Gl[v].sum() / Gp[v].sum() for k, v in m.items()}
+        planar = pl["I"] / pn["I_p"]
+        budget = abs(ratio["mid"] - ratio["far"]) / planar + 0.005
+        print("Vr", a["vr"], "device local/nonlocal %.3f" % (b["I"] / a["I"]), "planar 1-D %.3f" % planar,
+              " ".join("%s %.3f" % kv for kv in ratio.items()), "budget %.3f" % budget)
+        assert abs(ratio["far"] / planar - 1.0) <= budget

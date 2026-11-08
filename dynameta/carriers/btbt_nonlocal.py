@@ -1,6 +1,6 @@
 """
 NONLOCAL band-to-band tunnelling (dynamic-path model) coupled into the bipolar drift-diffusion Newton,
-1-D (DynaMeta v0.15, plan item 4.1.3; user decisions 21-25). OPT-IN: importing this module does nothing
+1-D and 2-D (DynaMeta v0.15, plan item 4.1.3; user decisions 21-25; 2-D: carriers/btbt_nonlocal_2d.py). OPT-IN: importing this module does nothing
 to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
 
 =====================================================================================================
@@ -118,6 +118,16 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
      recombination U enters HoleGeneration = +q U; MEASURED identical to add_recombination_term), and the
      SAME amount goes to the electron rows of the end edge's nodes a, b with the linear weights
      (1 - t), t (ElectronGeneration = -q U). Charge is conserved exactly by construction (gate N5).
+   * 2-D (btbt_nonlocal_2d module doc). Each start node's ray runs along its nodal gradient of psi
+     (-grad E_V; DYNAMIC: it turns with the solution) or a frozen direction (NonlocalBTBT.direction), and
+     is walked through the triangles by a numba kernel (decision 23); its points lie on mesh edges
+     (value (1 - mu) X[n1] + mu X[n2] of any nodal field), so the same segment closed forms, prefactor
+     moments, occupancies and assembly apply unchanged (_rates_core on a PathSet). The nodal gradient
+     (start |grad E_V|, direction, prefactor slopes) is a least-squares quadratic recovery (second
+     order; exactly the 1-D 3-point formula on a tensor mesh with a laterally uniform potential, Neumann
+     sides mirrored). The electron lands at the end point inside one triangle, spread over its nodes by
+     the end point's barycentric weights. A path that leaves the region (a Neumann side, an interface, a
+     contact) is discarded -- decision 24: specular reflection is not implemented.
 
 4. JACOBIAN (decision 25). In 1-D the direction is a sign, fixed except where the nodal gradient
    crosses zero (measure zero, and there the rate is zero): the Jacobian is EXACT and the term declares
@@ -132,6 +142,17 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
    The sparsity pattern follows the paths (pattern_changes = True); DEVSIM re-does the symbolic
    factorisation when the matrix grows (UMFPACK, PARDISO with DEVSIM_NEW_SYMBOLIC != "0";
    custom_terms warns otherwise).
+   2-D: EXACT too, including the DYNAMIC direction (decision 25 anticipated an approximate Jacobian and
+   ssac / noise refusals there; the exact one turned out affordable, so nothing is refused). The path
+   angle theta = atan2(grad psi at the start) moves every point along its edge; the walker returns each
+   point's d s/d theta and d mu/d theta (the same 2 x 2 edge system), and the chain rule carries them
+   through the point values, the prefactor slopes (which also depend on the direction itself), the
+   segment lengths (complex step in L), the end point's occupancy and its deposition weights;
+   d theta/d psi = (d_perp . d g_start)/|g_start| through the gradient operators. A ray through a NODE
+   (vertex passage) is not differentiable in theta (the one-sided derivatives differ; measure zero, and
+   0 is used there). Gates: tests/test_btbt_nonlocal_2d_kernels.py J1 (<= 7e-10 vs central differences,
+   dynamic and frozen; without the rotation terms O(1)), tests/test_btbt_nonlocal_2d.py S2 (DEVSIM's
+   residual, 1.4e-10).
 
 5. NOISE. Each tunnelling event moves ONE electron between two places: a recombination event removes a
    hole at the start node (+1 on its HoleContinuityEquation row) and an electron at the end point (-1
@@ -153,24 +174,28 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
    implemented (decision 22, first option), not our average-field form; gate N10 re-checks the identity
    numerically to 1e-12. The direct form was verified the same way (Eqs. 495-496).
 
-7. SCOPE (1-D, v0.15) AND REFUSALS. 1-D devices only (2-D/3-D raise NotImplementedError: decision 21;
-   the walker and the nodal gradient are the only 1-D-specific pieces -- the segment kernels, the
-   per-path rate, the chain rule and the assembly are written over generic (path, segment) arrays).
-   One region; a path does not cross a region boundary. Refused: the local model in the same region
-   (double counting), bandgap narrowing in the region (the gap would vary along the path: not
-   implemented) -- and tunneling.setup_btbt refuses a
-   region that carries a live nonlocal term (both raise tunneling.BTBTDoubleCountError). A region whose
-   temperature is not the set's quoted one warns (AdvisoryWarning) unless the gap follows a temperature law
-   (material= with a band-temperature model).
+7. SCOPE AND REFUSALS. 1-D and 2-D devices (3-D: NotImplementedError, decision 23 -- deferred until the
+   2-D cost is reviewed). 2-D needs numba (ImportError without it) and a well-centred mesh (the element-
+   geometry check of the local model: NodeVolume weights each start). One region; a path does not cross a
+   region boundary (decision 24). Refused: the local model in the same region (double counting), bandgap
+   narrowing in the region (the gap would vary along the path: not implemented), a frozen direction in
+   1-D -- and tunneling.setup_btbt refuses a region that carries a live nonlocal term (both raise
+   tunneling.BTBTDoubleCountError). A region whose temperature is not the set's quoted one warns
+   (AdvisoryWarning) unless the gap follows a temperature law (material= with a band-temperature model).
+   WHEN TO USE 2-D: wherever the junction is not planar on the scale of the tunnelling length -- corners of
+   implants, gate edges, TFET source edges -- or the carriers' separation across a 2-D geometry matters.
+   Laterally uniform devices give exactly the 1-D result (gate L2), at 2-D cost.
 
 8. CONSTANTS. h = H_PLANCK and hbar = h/(2 pi) (NOT the rounded HBAR literal, which differs by 6e-10 and
    would break the uniform-field identity at ~1e-8 through B/F ~ 30).
 
 PUBLIC API: NonlocalBTBT, setup_btbt_nonlocal, btbt_nonlocal_generation, physical_from_fitted,
 fitted_from_physical, kane_segment, keldysh_segment, kane_moments, keldysh_moments, path_rates_1d,
-PROCESSES, MECHANISM.
-Gates: tests/test_btbt_nonlocal_kernels.py (kernels, no DEVSIM), tests/test_btbt_nonlocal.py (DEVSIM,
-child processes: tests/_btbt_nonlocal_child.py). Audit note: docs/audit/2026-11-06-v0.15-nonlocal-btbt-1d.md.
+path_rates_2d, PathSet, PROCESSES, MECHANISM.
+Gates: tests/test_btbt_nonlocal_kernels.py and tests/test_btbt_nonlocal_2d_kernels.py (kernels, no DEVSIM),
+tests/test_btbt_nonlocal.py and tests/test_btbt_nonlocal_2d.py (DEVSIM, child processes:
+tests/_btbt_nonlocal_child.py). Audit notes: docs/audit/2026-11-06-v0.15-nonlocal-btbt-1d.md,
+docs/audit/2026-11-07-v0.15-nonlocal-btbt-2d.md.
 """
 
 from __future__ import annotations
@@ -1155,9 +1180,9 @@ def _term_class():
 # =====================================================================================================
 
 def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: str = MECHANISM):
-    """Install the nonlocal path BTBT term (module doc) on an EXISTING 1-D bipolar region (call after
+    """Install the nonlocal path BTBT term (module doc) on an EXISTING 1-D or 2-D bipolar region (call after
     physics_bipolar_dd.setup_bipolar_region and the contacts). Returns the custom term (its last_stats
-    count the paths of the latest assembly). Refuses: a non-1-D device, a region without both continuity
+    count the paths of the latest assembly). Refuses: a 3-D device, 2-D without numba, a region without both continuity
     equations, the local BTBT term in the same region (double counting) and bandgap narrowing (BgnDc /
     a fixed n_ie in the region). Warns (AdvisoryWarning) at T != T_REF. statistics="fermi_dirac" (v0.15
     completion) is supported: the occupancies are the FD log activities in the n_i frame, which is exactly
@@ -1167,10 +1192,13 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
     Si/Ge indirect gap; tunneling.SILICON_HURKX is Sentaurus' default set of this model) or P = 2
     (direct gap: III-V, the Ge direct process). The gap: material= (fundamental gap from the package gap
     kernel, temperature-aware with a band-temperature model) or Eg_tun_eV= (explicit; the Gamma gap of an
-    indirect material's direct process) -- NonlocalBTBT docstring. max_length_m: longer than the longest path that matters (the 20 nm default covers average
-    fields above E_g/20 nm = 5.6e7 V/m in Si, where exp(-B/F) < 2e-15). Use the LOCAL model
-    (tunneling.setup_btbt) instead for 2-D/3-D, for regions with bandgap narrowing, and where speed
-    matters more than the nonlocal effects of the module doc, section 1."""
+    indirect material's direct process) -- NonlocalBTBT docstring. max_length_m: longer than the longest
+    path that matters (the 20 nm default covers average fields above E_g/20 nm = 5.6e7 V/m in Si, where
+    exp(-B/F) < 2e-15). 2-D: direction=None (default) follows the field (exact Jacobian; ssac and noise
+    allowed); a frozen direction (NonlocalBTBT.direction) only where the tunnelling direction is known and
+    fixed (Sentaurus' option). Use the LOCAL model (tunneling.setup_btbt) instead for 3-D, for regions with
+    bandgap narrowing, and where speed matters more than the nonlocal effects of the module doc, section 1
+    (2-D cost: module doc of btbt_nonlocal_2d / the audit note)."""
     from dynameta.carriers.eq_registry import ds
     from dynameta.carriers.tunneling import _require_bipolar
     if not isinstance(spec, NonlocalBTBT):
