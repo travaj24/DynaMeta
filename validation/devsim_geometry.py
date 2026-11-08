@@ -4,8 +4,9 @@ dynameta.carriers.devsim_geometry.apply_exact_geometry replaces DEVSIM 2.11.2's 
 box-method geometry by the signed one (module doc; docs/audit/2026-11-06-devsim-geometry-workaround.md).
 tests/test_devsim_geometry.py gates it on hand-built meshes; this script measures it where it matters --
 the legacy gmsh 3-D stack (semi 30 nm / oxide 8 nm, 12 nm cell), which has ~45 % non-well-centred tets
-AND ~1.3 % negative assembled edge couples (gmsh's 3-D meshes are not Delaunay), so the default
-negative='raise' refuses it and the choice is between 'warn' (exact) and 'clip'.
+AND ~1.3 % negative assembled edge couples (gmsh's 3-D meshes are not Delaunay). Since v0.14.0 the builder
+applies the correction itself (Stacked3DSpec.exact_geometry=True -> negative policy 'warn'); this script
+compares exact_geometry=False (DEVSIM's own geometry, the pre-v0.14 numbers), True ('warn') and 'clip'.
 
   GATE G1  geometry: DEVSIM's sum NodeVolume over-counts (> 1.1 x, MEASURED 1.196 semi / 1.293 oxide);
            after the correction (warn) sum NodeVolume, 2 sum ElementNodeVolume and sum EdgeCouple L / 3
@@ -38,34 +39,17 @@ sys.path.insert(0, HERE)
 Q, EPS0 = 1.602176634e-19, 8.8541878128e-12
 
 
-def _apply_hook(sol, policy):
-    """Wrap the builder's _create_mesh_device so the correction runs right after create_device and
-    before ANY physics setup -- the integration point a builder option would use."""
-    from dynameta.carriers.devsim_env import import_devsim
-    from dynameta.carriers import devsim_geometry as G
-    ds = import_devsim()
-    orig = sol._create_mesh_device
-    reps = {}
-
-    def patched():
-        orig()
-        for r in ds.get_region_list(device=sol.device):
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                reps[r] = G.apply_exact_geometry(sol.device, r, negative=policy)
-            reps[r].warned = [str(x.category.__name__) for x in w]
-    sol._create_mesh_device = patched
-    return reps
-
-
 def _builder(tag, physics="drift_diffusion", policy=None, **kw):
+    """The gmsh stack through the builder; policy None = Stacked3DSpec(exact_geometry=False) (DEVSIM's
+    own geometry), else the builder's automatic correction with that negative policy (v0.14.0: the
+    builder calls devsim_geometry.correct_device_geometry right after create_device). The reports are
+    sol.geometry_reports once the mesh device exists."""
     import validation.devsim_3d_mesh as M
     from dynameta.carriers.devsim_3d import Devsim3DEquilibrium
-    spec = M._spec(physics=physics, mesher="gmsh", **kw)
+    spec = M._spec(physics=physics, mesher="gmsh", exact_geometry=(policy if policy else False), **kw)
     tmp = tempfile.mkdtemp(prefix="geo_{}_".format(tag))
     sol = Devsim3DEquilibrium(spec, device_name=tag, mesh_name=tag + "m", msh_path=os.path.join(tmp, tag + ".msh"))
-    reps = _apply_hook(sol, policy) if policy else {}
-    return sol, spec, reps
+    return sol, spec, None
 
 
 def geometry(policy):
@@ -74,7 +58,7 @@ def geometry(policy):
     import validation.devsim_3d_mesh as M
     ds = import_devsim()
     M._clear()
-    sol, spec, reps = _builder("g1" + (policy or "none"), policy=policy)
+    sol, spec, _ = _builder("g1" + (policy or "none"), policy=policy)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sol._create_mesh_device()
@@ -86,7 +70,7 @@ def geometry(policy):
         el = np.asarray(ds.get_edge_model_values(device=sol.device, region=r, name="EdgeLength"))
         env = np.asarray(ds.get_element_model_values(device=sol.device, region=r, name="ElementNodeVolume"))
         sa = M._v(sol.device, r, "SurfaceArea").sum() / (M.L * M.L)
-        rep = reps.get(r) or G.measure_dual_geometry(sol.device, r)
+        rep = sol.geometry_reports.get(r) or G.measure_dual_geometry(sol.device, r)
         out[r] = {"nv": nvv.sum() / V, "env": 2 * env.sum() / V, "ec": (ec * el).sum() / 3 / V, "sa": sa,
                   "n_el": rep.n_elements, "nwc": rep.n_not_well_centred, "neg_ec": rep.n_negative_couples,
                   "n_edges": el.size, "min_ec": rep.min_couple_rel, "neg_nv": rep.n_negative_volumes,
@@ -103,7 +87,7 @@ def capacitor(policy):
     import validation.devsim_3d_mesh as M
     ds = import_devsim()
     M._clear()
-    sol, spec, reps = _builder("g2" + (policy or "none"), policy=policy)
+    sol, spec, _ = _builder("g2" + (policy or "none"), policy=policy)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sol._create_mesh_device()
@@ -136,7 +120,7 @@ def gauss(policy, vg=0.5):
     import validation.devsim_3d_mesh as M
     ds = import_devsim()
     M._clear()
-    sol, spec, reps = _builder("g3" + (policy or "none"), physics="bipolar_dd", policy=policy, n_i_m3=1e17,
+    sol, spec, _ = _builder("g3" + (policy or "none"), physics="bipolar_dd", policy=policy, n_i_m3=1e17,
                                mobility_p_m2Vs=0.048, tau_srh_s=1e-7)
     t0 = time.time()
     with warnings.catch_warnings():
