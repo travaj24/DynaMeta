@@ -574,7 +574,8 @@ def qe_mesh(h0, length=QE_LEN, ratio=40.0):
 
 def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN, ext=False,
            rel=1e-5, close=("electrons",), tau=1e-7, step=0.05, dg_holes=False, tag="q",
-           closure=True, quantum_srh=True, probe=None, dg_at_target=False, lateral=None, v_ch=None):
+           closure=True, quantum_srh=True, probe=None, dg_at_target=False, lateral=None, v_ch=None,
+           u_floor_rel=1e-6):
     """1-D p-type MOS (N_A), fixed surface potential psi_s = psi_b + delta at the wall, body ohmic
     'sub'. Classical solve at flat band; optionally the bipolar DG (electrons; holes too with dg_holes)
     at dg_gamma with setup_dg_insulator_wall, gamma-ramped at flat band; then the quasi-equilibrium
@@ -657,11 +658,11 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
                     DG.setup_bipolar_dg(dev, "s", m_eff_n_kg=MN, m_eff_p_kg=MP if dg_holes else None,
                                         gamma_n=dg_gamma, gamma_p=dg_gamma, quantum_srh=quantum_srh)
                     DG.setup_contact_bipolar_dg(dev, "sub")
-                    DG.setup_dg_insulator_wall(dev, "wall")
+                    DG.setup_dg_insulator_wall(dev, "wall", u_floor_rel=u_floor_rel)
                 for k, fr in enumerate((0.1, 0.3, 1.0)):
                     DG.set_dg_gamma(dev, "s", fr)
                     if k == 0:
-                        DG.seed_bipolar_dg(dev, "s", walls=("wall",))
+                        DG.seed_bipolar_dg(dev, "s", walls=("wall",), u_floor_rel=u_floor_rel)
                     solve()
             if closure:
                 if v_ch is not None:
@@ -752,7 +753,7 @@ def _fd_quad(eta, order):
 
 
 def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30e-9, n_states=240,
-                 tol_V=1e-9, max_outer=200, m_scale=1.0):
+                 tol_V=1e-9, max_outer=200, m_scale=1.0, boltzmann=False, fixed_delta=None):
     """NEW independent Schrodinger-Poisson INVERSION oracle (v0.15 4.4.3, plan G1-4): p-type Si (N_A),
     surface band bending delta_s at an infinite wall (z = 0), neutral body at z = length (delta = 0).
     Electrons: subbands of the 1-D effective-mass Schrodinger equation (carriers.schrodinger_poisson
@@ -764,8 +765,14 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
     N_c = nc_model(MN, GVN) and the body electron density n_b = n_i^2/p_b of the DD.
     valleys: None (that isotropic model) or [(m_z, m_d, g_v), ...] (REPORTED anisotropic Si runs).
     m_scale: multiply every quantization mass by m_scale and the 2-D prefactor by 1/sqrt(m_scale),
-    which keeps N_c and sends hbar^2/m -> 0: the CLASSICAL limit (self-check). Returns dict(z, n, p,
-    delta, N_inv (excess over n_b, m^-2), centroid (m), converged, top_state_kT)."""
+    which keeps N_c and sends hbar^2/m -> 0: the CLASSICAL limit (self-check).
+    boltzmann (2026-11-07 audit of the GATE G N_inv miss): Boltzmann statistics everywhere -- subband
+    occupation e^x instead of ln(1 + e^x), holes N_v e^eta, classical electrons N_c e^eta -- the oracle
+    for a comparison against the Boltzmann (fd=False) DG, which removes every Fermi-Dirac approximation
+    from both sides. fixed_delta: a band-bending profile on the oracle's z grid; Poisson is skipped and
+    the electrons are filled in that frozen potential (the Airy / triangular-well cross-check).
+    Returns dict(z, n, p, delta, N_inv (excess over n_b, m^-2), centroid (m), converged, top_state_kT,
+    subbands = [(E_i - E_F [J], sheet density [m^-2]), ...] per valley set)."""
     from scipy.linalg import solve_banded
     from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D
     kT = KB * T_REF
@@ -778,7 +785,10 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
     p_b = 1.0 + 0.5 * (N_A + np.sqrt(N_A ** 2 + 4.0 * NI_SI ** 2))     # the DD's CHOLE
     n_b = NI_SI ** 2 / p_b
     from scipy.optimize import brentq
-    eta_pb = brentq(lambda e: nv * _fd_series(np.array([e]), 0.5)[0] - p_b, -60.0, -1.0, xtol=1e-15)
+    if boltzmann:
+        eta_pb = float(np.log(p_b / nv))
+    else:
+        eta_pb = brentq(lambda e: nv * _fd_series(np.array([e]), 0.5)[0] - p_b, -60.0, -1.0, xtol=1e-15)
     eta_nb = float(np.log(n_b / nc))                                     # e^-38: F_1/2 = e^eta exactly
     vals = [(MN, MN, GVN)] if valleys is None else list(valleys)
     sps = [(SchrodingerPoisson1D(z[:nb_box + 1], mz * m_scale, T_K=T_REF, g_s=2, g_v=1), md, gv)
@@ -786,10 +796,14 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
 
     def holes(d):
         e = eta_pb - d / vt
+        if boltzmann:
+            return nv * np.exp(e), -nv / vt * np.exp(e)
         return nv * _fd_series(e, 0.5), -nv / vt * _fd_series(e, -0.5)
 
     def elec_classical(d):
         e = eta_nb + d / vt
+        if boltzmann:
+            return nc * np.exp(e), nc / vt * np.exp(e)
         if np.any(e > -1.0):
             f = np.array([_fd_quad(x, 0.5) for x in e])
             fm = np.array([_fd_quad(x, -0.5) for x in e])
@@ -820,8 +834,11 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
         shift = Q_E * (d[inner] - d_k[inner])[:, None]                  # rigid floor shift (predictor)
         for E, w, pref in sb:
             x = (-E[None, :] + shift) / kT
-            occ = np.where(x > 40.0, x, np.log1p(np.exp(np.minimum(x, 40.0))))
-            fer = 1.0 / (1.0 + np.exp(-np.clip(x, -700.0, 700.0)))
+            if boltzmann:
+                occ = fer = np.exp(np.minimum(x, 700.0))
+            else:
+                occ = np.where(x > 40.0, x, np.log1p(np.exp(np.minimum(x, 40.0))))
+                fer = 1.0 / (1.0 + np.exp(-np.clip(x, -700.0, 700.0)))
             n[inner] += np.sum(w * occ, axis=1) * pref
             dn[inner] += np.sum(w * fer, axis=1) * pref * Q_E / kT
         return n, dn
@@ -831,6 +848,9 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
     d = np.where(z < W, delta_s * (1.0 - z / W) ** 2, 0.0)
     d[0], d[-1] = delta_s, 0.0
     converged, top = False, np.nan
+    if fixed_delta is not None:
+        d = np.asarray(fixed_delta, dtype=np.float64).copy()
+        max_outer, converged = 0, True
     for _ in range(max_outer):
         sb, top = subbands(d)
         d_k = d.copy()
@@ -855,8 +875,14 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
     p, _ = holes(d)
     ex = n - n_b
     s = float(trapz(ex, z))
+    sheets = []
+    for E, _w, pref in sb:
+        x = -E / kT
+        occ = np.exp(np.minimum(x, 700.0)) if boltzmann else np.where(
+            x > 40.0, x, np.log1p(np.exp(np.minimum(x, 40.0))))
+        sheets.append((E, pref * occ))
     return {"z": z, "n": n, "p": p, "delta": d, "N_inv": s, "centroid": float(trapz(z * ex, z)) / s,
-            "converged": converged, "top_state_kT": float(top)}
+            "converged": converged, "top_state_kT": float(top), "subbands": sheets}
 
 
 def classical_fd_surface_charge(N_A, delta_s):
@@ -941,6 +967,29 @@ def gate_g_convergence():
     return res, diff
 
 
+def sp_airy_check(F=1e8, delta_s=1.1, h=0.05e-9, N_A=3.0e23, m_q=None):
+    """SP oracle cross-check against the TRIANGULAR WELL (2026-11-07 audit of the GATE G N_inv miss):
+    a frozen linear band bending delta(z) = max(delta_s - F z, 0) at the infinite wall, Fermi level at the
+    body. Exact (infinite triangular well): E_i - E_c(0) = (hbar^2/(2 m))^(1/3) (q F)^(2/3) |a_i|, a_i the
+    zeros of Ai (scipy.special.ai_zeros); sheet density sum_i (g_s g_v m kT/(2 pi hbar^2))
+    ln(1 + exp(-(E_i - E_F)/kT)) -- the 2-D Fermi-Dirac sum written here from the standard 2-D DOS, not
+    from the oracle. m_q: the quantization mass the ORACLE uses (default MN; a refutation knob). Returns
+    (max relative error of the three lowest E_i - E_c(0), relative error of the total sheet density)."""
+    from scipy.special import ai_zeros
+    kT = KB * T_REF
+    z = np.arange(0.0, 200e-9 + 0.5 * h, h)
+    vals = None if m_q is None else [(m_q, MN, GVN)]
+    r = sp_inversion(N_A, delta_s, fixed_delta=np.maximum(delta_s - F * z, 0.0), h=h, valleys=vals)
+    E, ns = r["subbands"][0]
+    p_b = 1.0 + 0.5 * (N_A + np.sqrt(N_A ** 2 + 4.0 * NI_SI ** 2))
+    e0 = -kT * np.log(NI_SI ** 2 / p_b / nc_model(MN, GVN)) - Q_E * delta_s       # E_c(0) - E_F
+    ea = e0 + (HBAR ** 2 / (2.0 * MN)) ** (1.0 / 3.0) * (Q_E * F) ** (2.0 / 3.0) * (-ai_zeros(4000)[0])
+    x = -ea / kT
+    ns_a = float(np.sum(2.0 * GVN * MN * kT / (2.0 * np.pi * HBAR ** 2)
+                        * np.where(x > 40.0, x, np.log1p(np.exp(np.minimum(x, 40.0))))))
+    return float(np.max(np.abs((E[:3] - ea[:3]) / (ea[:3] - e0)))), float(np.sum(ns)) / ns_a - 1.0
+
+
 def gate_g():
     """GATE G (v0.15 4.4.3): strong inversion through the quasi-equilibrium closure. Printed and
     gated: G1-3 (convergence matrix), the SP oracle's self-checks, G1-4 (registered fidelity
@@ -968,6 +1017,14 @@ def gate_g():
           "(m x 4e4, N_c kept) vs the FD first integral at 0.6 / 0.9 V: {:+.1e} / {:+.1e} -> {}".format(
               qm, cl[0], cl[1], "PASS" if g_self else "FAIL"), flush=True)
     ok = ok and g_self
+    # the triangular-well (Airy) limit, the 2026-11-07 audit: subband energies and the 2-D FD sheet sum.
+    # Budget: the 3-point Schrodinger stencil is O(h^2): MEASURED 1.8e-4 / 4.5e-5 (energies, max of three) and
+    # +7.8e-4 / +1.9e-4 (sheet) at h = 0.05 / 0.025 nm, F = 1e8 V/m -> 4e-4 / 2e-3 at the oracle's h.
+    ea, es = sp_airy_check()
+    g_airy = bool(ea <= 4e-4 and abs(es) <= 2e-3)
+    print("[bdg] GATE G SP vs the Airy triangular well (F = 1e8 V/m): lowest three subbands {:.1e}, sheet "
+          "{:+.1e} -> {}".format(ea, es, "PASS" if g_airy else "FAIL"), flush=True)
+    ok = ok and g_airy
 
     r = strong_inversion_vs_sp()
     gw, dl = r["gw"], r["deltas"]
@@ -1021,6 +1078,18 @@ def gate_g():
           "{:.0f} mV, the N_inv pin): {}".format(SP_TOL_CENTROID, SP_GAP_CLOSED_GAMMA1, SP_DVTH_MV,
                                                   "PASS" if g4 else "FAIL"), flush=True)
     ok = ok and g4
+
+    # REPORTED (2026-11-07 audit of the N_inv miss): the same comparison with BOLTZMANN statistics on both
+    # sides (fd=False DG, sp_inversion(boltzmann=True)) -- no Fermi-Dirac approximation anywhere. The
+    # excess persists and grows (+12.0 % at 1.0 V .. +16.5 % at 1.3 V, measured), so it is the DG model at
+    # the free-gas gamma_wall in a field-confined well, not the FD g-fit (which moves the classical N_inv by
+    # only -0.35 .. -0.89 %, the opposite sign; audit note).
+    for d in (1.0, 1.3):
+        spb = sp_inversion(3e23, d, boltzmann=True)
+        dgb = mos_sheet(mos_qe(3e23, (d,), fd=False, dg_gamma=gw, tag="gb")[0])
+        print("[bdg] GATE G (reported) Boltzmann on both sides, {:.2f} V: gamma_wall N_inv {:+.1%}, centroid "
+              "{:+.1%} vs SP".format(d, dgb[0] / spb["N_inv"] - 1.0, dgb[1] / spb["centroid"] - 1.0),
+              flush=True)
 
     # G1-7 (1-D): mesh convergence of the DG gamma_wall N_inv and centroid at 1.2 V, nested meshes
     sh = [mos_sheet(mos_qe(3e23, (1.2,), fd=True, dg_gamma=gw, mesh_nb=qe_mesh(h), tag="g17_%d" % k)[0])
