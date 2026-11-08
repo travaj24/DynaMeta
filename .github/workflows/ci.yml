@@ -330,6 +330,11 @@ jobs:
           pytest -q -m "not slow" -k numba \
             tests/test_fdtd_mo_oblique.py tests/test_fdtd_chi2_raman.py \
             tests/test_fdtd_hot_carrier.py tests/test_soa.py tests/test_soa_generality.py
+      - name: Run the 2-D nonlocal BTBT kernels (numba walker; v0.15, 2026-11-07)
+        # tests/test_btbt_nonlocal_2d_kernels.py importorskips numba, so it runs here and nowhere else
+        # on the PR tier (devsim-free; ~49 s serial on the Windows dev box, the @slow rotated-junction
+        # convergence cases run nightly, step (a2)).
+        run: pytest -q -m "not slow" tests/test_btbt_nonlocal_2d_kernels.py
       - name: Run the numba parity oracle for real
         # ~60 s with numba present (measured). This is the oracle that exited 42 and read green.
         run: python -m validation.run_all --tier smoke qd_soa_numba_parity
@@ -573,6 +578,13 @@ jobs:
     # `-n 2` with pytest-xdist (installed as the `floor` job does; a 17-file DEVSIM subset ran green
     # 3 times at -n 3 after the all-live-devices tolerance fix, but this whole list has not been run
     # under xdist). PROPOSED, NOT APPLIED.
+    # + tests/test_btbt_nonlocal_2d.py (v0.15 nonlocal BTBT in 2-D, 2026-11-07; every term-adding case in a
+    #   child process): 131 s serial MEASURED on the loaded Windows dev box (9 tests, four children:
+    #   laterally uniform Zener 9 s, slanted FDT diode equilibrium 36 s, reverse-bias ssac 51 s, reverse-bias
+    #   Jacobian 35 s) -- ~1.1-1.7 min more on the runner (0.5-0.8x, INFERRED), so the estimate above
+    #   becomes ~22-35 min with the install: the split proposed above is now due if the next run is over
+    #   ~30 min. It needs numba (user decision 23), hence `numba` in this job's install; no other module of
+    #   this list imports numba.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -590,9 +602,9 @@ jobs:
       - name: Install (core + dev + plot + solvers + mpmath)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,plot,solvers]" mpmath
+          pip install -e ".[dev,plot,solvers,numba]" mpmath
       - name: Assert the solver stack really imported
-        run: python -c "import ngsolve, devsim, gmsh, mpmath; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
+        run: python -c "import ngsolve, devsim, gmsh, mpmath, numba; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok'); print('numba', numba.__version__)"
       - name: Run the DEVSIM test modules (v0.14 + v0.15)
         run: |
           pytest -q -m "not slow" \
@@ -610,7 +622,7 @@ jobs:
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
             tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
             tests/test_devsim_noise_method.py tests/test_quasi_equilibrium.py tests/test_devsim_btbt_resolution.py \
-            tests/test_trap_noise.py tests/test_fd_mode_complete.py
+            tests/test_trap_noise.py tests/test_fd_mode_complete.py tests/test_btbt_nonlocal_2d.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
@@ -710,6 +722,16 @@ jobs:
         # them under pyproject's `filterwarnings = ["error", ...]` policy -- a RuntimeWarning on a
         # default path fails here and is invisible to run_all's exit-code gate.
         run: pytest tests/ -q -m slow
+      - name: (a2) the 2-D nonlocal BTBT @slow cases (numba)
+        # The rotated-junction convergence gates (4 x ~30 s), their refutation, the DEVSIM rotation-term
+        # refutation (~50 s) and the corner-geometry measurement (890 s MEASURED on the loaded dev box:
+        # two 12769-node devices x two models, 18 Newton solves each): ~18 min in all, so this job's
+        # estimate above becomes ~35-45 min, still 2x under its cap. They importorskip numba, which
+        # step (a)'s install leaves out on purpose (adding it there would switch other modules' @slow cases
+        # to their numba kernels). Installed here, after (a), for these two files only.
+        run: |
+          pip install "numba>=0.58"
+          pytest -q -m slow tests/test_btbt_nonlocal_2d_kernels.py tests/test_btbt_nonlocal_2d.py
       - name: (b1) the heavy FEM/solver modules the `solvers` job excludes
         # Two of the three modules named in that job's comment as too slow for the PR tier. KEEP
         # THIS IN SYNC WITH IT: a module dropped from the solvers leg for being slow belongs here
