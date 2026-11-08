@@ -898,7 +898,7 @@ def build_hetero_unipolar(dev, opts):
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
         own = {}
-        kw = {} if opts.get("edge", "average") == "average" else {"statistics": "fermi_dirac"}
+        kw = {"statistics": "legacy"} if opts.get("edge") == "average" else {}   # default: the quasi-field
         for r, N, m in (("r0", N0, 0.35), ("r1", N1, 0.28)):
             DD.setup_semiconductor_region_dd(dev, r, n_bg_m3=N, eps_static=9.0, dos_mass_kg=m * M_E,
                                              mobility_m2Vs=3e-3, **kw)
@@ -1020,7 +1020,7 @@ def _transport_markers(dev, region):
     ds = _ds()
     edges = set(ds.get_edge_model_list(device=dev, region=region))
     g = np.asarray(ds.get_edge_model_values(device=dev, region=region, name="g_enh"))
-    return {"g_is_one": bool(np.all(g == 1.0)), "quasi_field": "HJ_Electrons_Delta@n0" in edges}
+    return {"g_is_one": bool(np.all(g == 1.0)), "quasi_field": "HJ_Electrons_dDelta" in edges}
 
 
 def sc_builders(opts):
@@ -1039,7 +1039,7 @@ def sc_builders(opts):
     from dynameta.sweep import BiasPoint
     ds = _ds()
     out = {}
-    for tag, st in (("legacy", None), ("fd", "fermi_dirac")):
+    for tag, st in (("legacy", "legacy"), ("fd", None)):
         tr = TransportModel(n_bg_m3=3e25, eps_static=9.0, dos_mass_kg_of_n_m3=lambda n: 0.3 * M_E,
                             physics="drift_diffusion", mobility_m2Vs_of_n_m3=lambda n: 3e-3,
                             carrier_statistics=st)
@@ -1074,11 +1074,68 @@ def sc_builders(opts):
     return out
 
 
+def sc_dg_fd(opts):
+    """Bipolar DENSITY GRADIENT (both carriers quantum at an insulator wall, quantum_srh) on the strongly
+    inverted MOS of validation.bipolar_density_gradient GATE E, with the FD transport (fd=True) under
+    opts['stats'] (None = the v0.15.0 default 'fermi_dirac'; 'legacy' injected into setup_bipolar_region).
+    Returns the FD modified quasi-Fermi levels phi_n = psi + Lambda_n - V_t (L_n + ln(N_c/n_i)),
+    phi_p = psi - Lambda_p + V_t (L_p + ln(N_v/n_i)) (L = ln u + Delta(u), the transport's activity; their
+    max |.| -- flat at 0 = the body contact's level at an exact equilibrium), the detailed-balance residual
+    |L_n + L_p - ln(n_i^2/(N_c N_v)) - (Lambda_n + Lambda_p)/V_t|, the degeneracy max Delta, and -- with
+    opts['jac'] -- the Jacobian check (all equation variables, the 4 nodes nearest the wall, electrons
+    kicked x1.2 off the solved state)."""
+    import validation.bipolar_density_gradient as V
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
+    ds = _ds()
+    real = BP.setup_bipolar_region
+    if opts.get("stats"):
+        def patched(*a, **k):
+            k.setdefault("statistics", opts["stats"])
+            return real(*a, **k)
+        BP.setup_bipolar_region = patched
+    keep = {}
+    if opts.get("jac"):
+        V._drop = lambda dev, mesh: keep.setdefault("dev", dev) and None
+        # the validation's devices opt into DEVSIM's 128-bit models (extended_precision); there a perturbation
+        # set_node_value(...) does not reach the assembled residual (MEASURED: every central difference exactly
+        # 0, either statistics), so the Jacobian check runs the same device in double precision
+        V.XP.enable = lambda dev: None
+    N_A, delta = float(opts.get("N_A", 3e23)), float(opts.get("delta", 0.6))
+    r = V.mos("holes", N_A, delta, fd=True, length=150e-9, quantum_srh=True, steps=16, rel=1e-6)
+    nc, nv = V.nc_model(V.MN, V.GVN), V.nc_model(V.MP, V.GVP)
+    psi, n, p, ln, lp = (r[k] for k in ("Potential", "Electrons", "Holes", "QLambda", "QLambdaP"))
+    Ln = np.log(n / nc) + np.asarray(fd_potential_shift(n / nc), float)
+    Lp = np.log(p / nv) + np.asarray(fd_potential_shift(p / nv), float)
+    vt = V.V_T
+    phi_n = psi + ln - vt * (Ln + math.log(nc / V.NI_SI))
+    phi_p = psi - lp + vt * (Lp + math.log(nv / V.NI_SI))
+    db = np.abs(Ln + Lp - math.log(V.NI_SI ** 2 / (nc * nv)) - (ln + lp) / vt)
+    out = {"max_phi_n": float(np.max(np.abs(phi_n))), "max_phi_p": float(np.max(np.abs(phi_p))),
+           "db": float(np.max(db)),
+           "delta_max": float(max(np.max(fd_potential_shift(n / nc)), np.max(fd_potential_shift(p / nv)))),
+           "lam_wall_n_Vt": float(ln[0] / vt)}
+    if opts.get("jac"):
+        dev = keep["dev"]
+        reg = ds.get_region_list(device=dev)[0]
+        variables = [ds.get_equation_command(device=dev, region=reg, name=e)["variable_name"]
+                     for e in ds.get_equation_list(device=dev, region=reg)]
+        ds.set_node_values(device=dev, region=reg, name="QSqrtN", values=_lst(1.1 * _v(dev, "QSqrtN", reg)))
+        x = _v(dev, "x", reg)
+        nodes = [int(i) for i in np.argsort(x)[1:5]]
+        out["variables"] = variables
+        out["jac_worst"], out["jac_where"] = jac_check(dev, reg, nodes, variables=tuple(variables))
+        if opts.get("knockout"):
+            _knock_out_fd_derivatives(dev, reg)
+            out["ko_worst"], out["ko_where"] = jac_check(dev, reg, nodes, variables=tuple(variables))
+    return out
+
+
 SCENARIOS = {"zero_bias": sc_zero_bias, "jacobian": sc_jacobian, "jacobian_2d": sc_jacobian_2d,
              "jacobian_nonlocal": sc_jacobian_nonlocal, "fdt": sc_fdt, "fdt_hetero": sc_fdt_hetero,
              "zero_bias_hetero": sc_zero_bias_hetero, "nondeg": sc_nondeg,
              "nonlocal_refusals": sc_nonlocal_refusals, "dc_kinetic": sc_dc_kinetic_vs_quasi_static,
-             "builders": sc_builders}
+             "builders": sc_builders, "dg_fd": sc_dg_fd}
 
 
 def run_child(scenario, **opts):

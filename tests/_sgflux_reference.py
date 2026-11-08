@@ -79,8 +79,16 @@ def _perturb(ds, dev, region):
         ds.set_parameter(device=dev, region=region, name="mu_n", value=mu * (1.0 + 1e-6))
 
 
-def solve_fixtures():
+def solve_fixtures(statistics=None):
+    """`statistics` (v0.15.0; default: the SGFLUX_STATISTICS environment variable, else None): None passes no
+    keyword (the tree's DEFAULT; on a pre-v0.15.0 tree the legacy statistics); a value goes to the FD
+    fixture's setup_bipolar_region and the DG bar's setup_semiconductor_region_dd -- 'legacy' is the path the
+    6595bde arrays pin (the v0.15.0 default, 'fermi_dirac', moves fd and dg by physics: audit note
+    2026-11-06-v0.15-fermi-dirac-mode-complete.md, section 10)."""
     import numpy as np
+    if statistics is None:
+        statistics = os.environ.get("SGFLUX_STATISTICS") or None
+    st = {} if statistics is None else {"statistics": statistics}
     try:
         from dynameta.carriers.devsim_env import import_devsim
         ds = import_devsim()
@@ -126,7 +134,8 @@ def solve_fixtures():
                           equation="ifelse(x < 1e-7, -1e24, 3e25)")
             BP.setup_bipolar_region(dev, "bulk", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1.0e16,
                                     mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-7,
-                                    tau_p_s=2e-7, fd_enhancement=fd, n_dos_p_m3=1.04e25)
+                                    tau_p_s=2e-7, fd_enhancement=fd, n_dos_p_m3=1.04e25,
+                                    **(st if fd else {}))
             BP.setup_equilibrium_seed_models(dev, "bulk")
             BP.setup_contact_ohmic_bipolar(dev, "lo")
             if circuit:
@@ -193,7 +202,7 @@ def solve_fixtures():
         ds.create_device(mesh=mesh, device=dev)
         mstar = 0.35 * M_E
         setup_semiconductor_region_dd(dev, "bar", n_bg_m3=4.0e26, eps_static=9.5,
-                                      dos_mass_kg=mstar, mobility_m2Vs=0.004)
+                                      dos_mass_kg=mstar, mobility_m2Vs=0.004, **st)
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
         DG.setup_contact_dg(dev, "back", 4.0e26)

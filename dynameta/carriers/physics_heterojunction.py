@@ -429,19 +429,66 @@ def fd_quasi_field_expr(device: str, region: str, carrier: str, dos_param: str) 
     density (g_e = 1 + Delta1/ln(c1/c0) across a degenerate-to-minority edge): from the usual charge-neutral
     seed of an abrupt n+ 1e26 m^-3 junction its Newton drove a minority node to 1e-28 and stalled under the
     positive-variable update (MEASURED). This form is smooth in both densities and converges from that seed.
-    Installs (idempotently) the log activity, d Delta/dc (fd_delta_derivative) and their edge copies with the
-    derivative names DEVSIM's diff() looks up for a node-model reference (<m>@n0:<carrier>@n0 -- without them
-    diff() returns 0 silently, MEASURED). Returns the edge expression."""
+    Installs (idempotently) the log activity, d Delta/dc (fd_delta_derivative), the cancellation-free edge
+    difference HJ_<carrier>_dDelta (_fd_delta_difference_models) and its exact derivative edge models
+    (HJ_<carrier>_dDelta:<carrier>@n0/@n1, the names DEVSIM's diff() looks up for an edge-model reference).
+    Returns the edge model name."""
     delta = "HJ_{}_Delta".format(carrier)
     ddelta = "{}:{}".format(delta, carrier)
-    if "{}@n0".format(ddelta) not in ds.get_edge_model_list(device=device, region=region):
+    diff = "HJ_{}_dDelta".format(carrier)
+    if diff not in ds.get_edge_model_list(device=device, region=region):
         fd_delta_derivative(device, region, carrier, dos_param)
-        for m in (delta, ddelta):
-            ds.edge_from_node_model(device=device, region=region, node_model=m)
-        for nd in ("@n0", "@n1"):
-            ds.edge_model(device=device, region=region, name="{d}{n}:{c}{n}".format(d=delta, n=nd, c=carrier),
-                          equation="{}{}".format(ddelta, nd))
-    return "({d}@n1 - {d}@n0)".format(d=delta)
+        ds.edge_from_node_model(device=device, region=region, node_model=ddelta)
+        _fd_delta_difference_models(device, region, carrier, dos_param, diff)
+        # its EXACT derivatives: d(Delta1 - Delta0)/dc1 = Delta'(c1), /dc0 = -Delta'(c0) (the closed-form node
+        # derivative carried to the edge) -- the difference form is the same function, written without
+        # cancellation, so these are its derivatives too
+        ds.edge_model(device=device, region=region, name="{}:{}@n1".format(diff, carrier),
+                      equation="{}@n1".format(ddelta))
+        ds.edge_model(device=device, region=region, name="{}:{}@n0".format(diff, carrier),
+                      equation="-{}@n0".format(ddelta))
+    return diff
+
+
+def _fd_delta_difference_models(device: str, region: str, carrier: str, dos_param: str, name: str) -> None:
+    """Edge model `name` = Delta(u1) - Delta(u0) WITHOUT the cancellation of the plain difference of the two
+    node values. Delta = K1 s^2 + K2 s + KL ln(1 + b s + d s^2) + KA atan(D s/(2 + b s)), s = u^(1/3), is
+    ~20-40 at the eta ~ 20-30 of an accumulated TCO, and Delta@n1 - Delta@n0 carries eps |Delta| absolute
+    error -- in the FD quasi-field that is an error eps |Delta| in the Bernoulli argument of EVERY degenerate
+    edge (against eps g |d ln c| for the averaged g), a Newton noise floor ~100x higher (MEASURED: the gated
+    ITO bar of tests/_abs_tol_fixtures stalled at relative updates ~1e-8, where the averaged g reaches 1e-10).
+    Written term by term from the EDGE differences instead:
+        ds = s1 - s0 = (u1 - u0)/(s1^2 + s1 s0 + s0^2),   s1^2 - s0^2 = ds (s1 + s0),
+        ln(1 + b s1 + d s1^2) - ln(1 + b s0 + d s0^2) = ln(1 + t),  t = (b ds + d ds (s1 + s0))/(1 + b s0 + d s0^2)
+            (a 5-term series below |t| = 1e-3: remainder < 2e-19),
+        atan(z1) - atan(z0) = atan((z1 - z0)/(1 + z1 z0)),  z1 - z0 = 2 D ds/((2 + b s1)(2 + b s0))   (z >= 0)
+            (the same half-angle reductions + Taylor tail as the node activity's atan),
+    each to a few ulps of ITSELF, so the edge difference is accurate to ~eps of its own size."""
+    c, N = carrier, dos_param
+    pfx = "HJ_{}_e".format(carrier)
+
+    def em(nm, eq):
+        ds.edge_model(device=device, region=region, name=pfx + nm, equation=eq)
+        return pfx + nm
+    s0 = em("s0", "pow({}@n0/{}, {!r})".format(c, N, 1.0 / 3.0))
+    s1 = em("s1", "pow({}@n1/{}, {!r})".format(c, N, 1.0 / 3.0))
+    dsm = em("ds", "(({c}@n1 - {c}@n0)/{N})/({a}*{a} + {a}*{b} + {b}*{b})".format(c=c, N=N, a=s1, b=s0))
+    t = em("t", "({b!r}*{d} + {dd!r}*{d}*({a} + {z}))/(1.0 + {b!r}*{z} + {dd!r}*{z}*{z})".format(
+        b=GB, dd=GD, d=dsm, a=s1, z=s0))
+    series = " + ".join("({:+.17g})*pow({}, {})".format((-1.0) ** (k + 1) / k, t, k) for k in range(1, 6))
+    lg = em("log", "ifelse(abs({t}) < 1e-3, {s}, log(1.0 + {t}))".format(t=t, s=series))
+    z0 = "({D!r}*{s}/(2.0 + {b!r}*{s}))".format(D=_D, b=GB, s=s0)
+    z1 = "({D!r}*{s}/(2.0 + {b!r}*{s}))".format(D=_D, b=GB, s=s1)
+    x = em("x0", "(2.0*{D!r}*{d}/((2.0 + {b!r}*{a})*(2.0 + {b!r}*{z})))/(1.0 + {z1}*{z0})".format(
+        D=_D, b=GB, d=dsm, a=s1, z=s0, z1=z1, z0=z0))
+    for k in range(_ATAN_HALVINGS):
+        x = em("x{}".format(k + 1), "{x}/(1.0 + pow(1.0 + {x}*{x}, 0.5))".format(x=x))
+    terms = " + ".join("({:+.17g})*pow({}, {})".format((-1.0) ** k / (2 * k + 1), x, 2 * k + 1)
+                       for k in range(_ATAN_TERMS))
+    at = em("atan", "{:.17g}*({})".format(2.0 ** _ATAN_HALVINGS, terms))
+    ds.edge_model(device=device, region=region, name=name,
+                  equation="{k1!r}*{d}*({a} + {z}) + {k2!r}*{d} + {kl!r}*{lg} + {ka!r}*{at}".format(
+                      k1=_K1, k2=_K2, kl=_KLOG, ka=_KATAN, d=dsm, a=s1, z=s0, lg=lg, at=at))
 
 
 def temperature_of_V_t(v_t: float) -> float:

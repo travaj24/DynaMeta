@@ -20,6 +20,8 @@ FAILS ON THE OLD DEFAULT (MEASURED 2026-11-06, scipy OpenBLAS, DEVSIM 2.11.2, th
 Runtime 65 s serial on the Windows dev box (every test < 13 s; DEVSIM model setup and the two
 extended-precision MOS ramps dominate).
 """
+import math
+
 import numpy as np
 import pytest
 
@@ -80,7 +82,11 @@ def test_default_matches_the_formula_and_the_threshold():
         F.drop("abs_ito")
     F.r27a_slab("abs_ext", extended=True, nd=8e25)
     try:
-        assert F.XP.is_enabled("abs_ext") and _S_oracle("abs_ext") >= 8e25
+        # v0.15.0 (default statistics 'fermi_dirac'): the contacts pin the FD charge-neutral root (a bisection
+        # to 1e-15 in ln n plus the activity inverse, bipolar_options._neutral_root_fd) and the slab relaxes to
+        # it -- MEASURED S = 7.999999999999953e25 = N_D (1 - 5.9e-15); the check is that S is N_D (the 2^-113
+        # threshold below is 13 decades away), so 1e-12 relative
+        assert F.XP.is_enabled("abs_ext") and _S_oracle("abs_ext") >= 8e25 * (1.0 - 1e-12)
         assert DC.default_abs_tol("abs_ext") == 1e10       # G5-5: 1024 * 2^-113 * 8e25 ~ 8e-6
     finally:
         F.drop("abs_ext")
@@ -106,7 +112,14 @@ def test_degenerate_devices_converge_like_the_extended_newton(name):
         assert np.all(np.abs(x_d[k] - xs) <= rel * np.abs(xs) + abs_new), k
     if name == "mos_accumulation":
         h = x_ref[("s", "Holes")]
-        assert h.max() == pytest.approx(1e8, rel=1e-6) and x_ref[("s", "Electrons")].max() > 8e25
+        # v0.15.0 (default statistics 'fermi_dirac'): the bulk minority is the FD detailed-balance root
+        # n_i^2 gamma_n gamma_p / N_D (gamma = exp(-Delta), the code's activity) -- MEASURED 9.8227e7, was
+        # n_i^2/N_D = 1e8 under the legacy Boltzmann product
+        from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
+        nc, nv = F.nc_model(F.MN, 6), F.nc_model(F.MP, 2)
+        p_fd = 1e16 ** 2 / 1e24 * math.exp(-float(fd_potential_shift(1e24 / nc)) - float(fd_potential_shift(
+            1e8 / nv)))
+        assert h.max() == pytest.approx(p_fd, rel=1e-6) and x_ref[("s", "Electrons")].max() > 8e25
         assert np.max(np.abs(x_d[("s", "Holes")] / h - 1.0)) < rel
 
 

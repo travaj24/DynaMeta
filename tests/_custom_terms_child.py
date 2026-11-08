@@ -362,7 +362,7 @@ def sc_defaults(opts):
     if opts.get("register"):
         CT.register_dispatcher()
     import _sgflux_reference as REF
-    res = {"registered": CT.is_registered(), "sgflux": REF.solve_fixtures()}
+    res = {"registered": CT.is_registered(), "sgflux": REF.solve_fixtures(statistics="legacy")}   # v0.15.0
     import validation.devsim_noise as V
     from dynameta.carriers.tunneling import BTBTParams
     ff = [1.0, 1e5, 1e7, 1e9]

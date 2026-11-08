@@ -27,7 +27,7 @@ _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "cont
              "circuit_element")
 
 
-def record_call_log():
+def record_call_log(statistics=None):
     """The call log, recorded in a CHILD process on the caller's sys.path (same dynameta, same BLAS
     environment). The cl_bz fixture adds a process-global DEVSIM circuit (node cl_n, source Vcl) that
     the caller's process could not get rid of (MEASURED 2026-11-03, devsim 2.11.2): a second
@@ -36,12 +36,15 @@ def record_call_log():
     next circuit-coupled solve trips NodeKeeper.cc:266 CIRCUIT_UNEXPECTED; and once any analysis has
     run with the circuit present, no later test may add a circuit node ("cannot be added once an
     analysis has been performed"). JSON turns the log's tuples into lists, which dump identically, so
-    the digest is unchanged."""
+    the digest is unchanged. `statistics` (v0.15.0): None passes NO keyword (the recorder then runs unchanged on
+    older trees, and records this tree's DEFAULT); a value is passed to the FD fixture's setup_bipolar_region
+    and ohmic_built_in_offset_V ('legacy' reproduces the pre-v0.15.0 default)."""
     fd, out = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
-        subprocess.run([sys.executable, os.path.abspath(__file__), "--emit", out], env=env, check=True,
+        extra = [] if statistics is None else [statistics]
+        subprocess.run([sys.executable, os.path.abspath(__file__), "--emit", out] + extra, env=env, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         with open(out, encoding="utf-8") as f:
             return json.load(f)
@@ -49,7 +52,7 @@ def record_call_log():
         os.remove(out)
 
 
-def _record_in_this_process():
+def _record_in_this_process(statistics=None):
     import devsim as ds
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -68,6 +71,7 @@ def _record_in_this_process():
         setattr(ds, nm, _wrap(nm, saved[nm]))
     try:
         for dev, fd, circuit in (("cl_fd", True, False), ("cl_bz", False, True)):
+            st = {} if (statistics is None or not fd) else {"statistics": statistics}
             mesh = dev + "_m"
             for d in list(ds.get_device_list()):
                 if d == dev:
@@ -89,7 +93,7 @@ def _record_in_this_process():
                           equation="ifelse(x < 1e-7, -1e24, 3e25)")
             BP.setup_bipolar_region(dev, "bulk", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1.0e16,
                                     mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-7,
-                                    tau_p_s=2e-7, fd_enhancement=fd, n_dos_p_m3=1.04e25)
+                                    tau_p_s=2e-7, fd_enhancement=fd, n_dos_p_m3=1.04e25, **st)
             BP.setup_equilibrium_seed_models(dev, "bulk")
             BP.setup_contact_ohmic_bipolar(dev, "lo")
             if circuit:
@@ -99,7 +103,7 @@ def _record_in_this_process():
             ds.node_model(device=dev, region="bulk", name="_seed_psi",
                           equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(dev, "bulk")))
             log.append(["ohmic_built_in_offset_V", repr(BP.ohmic_built_in_offset_V(
-                3e25, n_i_m3=1e16, n_dos_m3=2.8e25, n_dos_p_m3=1.04e25, fd_enhancement=fd))])
+                3e25, n_i_m3=1e16, n_dos_m3=2.8e25, n_dos_p_m3=1.04e25, fd_enhancement=fd, **st))])
             ds.delete_device(device=dev)
             ds.delete_mesh(mesh=mesh)
             _R.clear(dev)
@@ -115,7 +119,7 @@ def digest(log) -> str:
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--emit"]:   # the child of record_call_log()
     with open(sys.argv[2], "w", encoding="utf-8") as f:
-        json.dump(_record_in_this_process(), f)
+        json.dump(_record_in_this_process(sys.argv[3] if len(sys.argv) > 3 else None), f)
 elif __name__ == "__main__":                                # pragma: no cover - re-recording aid
     import dynameta
     lg = _record_in_this_process()

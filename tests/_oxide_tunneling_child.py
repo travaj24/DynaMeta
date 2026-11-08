@@ -114,7 +114,7 @@ class Dev:
     def __init__(self, name, *, doping=-1e23, L=1.0e-6, t_ox=2e-9, layers=None, gate_offset=0.0,
                  circuit=False, fd=False, tau=1e-6, h_if=0.05e-9, h_body=20e-9, h_ox=0.1e-9, eps_ox=3.9,
                  source=None, node=None, dummy_circuit=False, v_ref=0.0, i_park=None, extended=False,
-                 dim=1, x_nodes=None, width=4e-9, n_lat=3, ni=NI):
+                 dim=1, x_nodes=None, width=4e-9, n_lat=3, ni=NI, statistics=None):
         ds = _ds()
         from dynameta.carriers import eq_registry as _R
         from dynameta.carriers import physics_bipolar_dd as BP
@@ -161,7 +161,7 @@ class Dev:
             ds.node_model(device=dev, region="semi", name="NetDoping", equation="{:.6e}".format(doping))
             BP.setup_bipolar_region(dev, "semi", eps_static=EPS_SI, n_dos_m3=NDOS, n_i_m3=ni,
                                     mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=tau, tau_p_s=tau,
-                                    fd_enhancement=fd)
+                                    fd_enhancement=fd, **({} if statistics is None else {"statistics": statistics}))
             BP.setup_equilibrium_seed_models(dev, "semi")
             prev = "semi"
             for reg, t, eps in self.layers:
@@ -391,7 +391,8 @@ def sc_balance_fd(opts):
     surface zone at h = 0.1 nm x s."""
     out = []
     for k, sc in enumerate(opts.get("scales", [1.0, 0.5, 0.25])):
-        d = Dev("bfd{}".format(k), doping=1e24, gate_offset=1.5, fd=True, h_if=0.1e-9 * sc)
+        d = Dev("bfd{}".format(k), doping=1e24, gate_offset=1.5, fd=True, h_if=0.1e-9 * sc,
+                statistics=opts.get("statistics"))
         term = install(d)
         solve()
         te = term.state(d.name)["te"]

@@ -230,8 +230,8 @@ class Stacked3DSpec:
     # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
     # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
     extended_precision: bool = False
-    # v0.15 (decision 28): bipolar carrier statistics -- None (the legacy FD g-factor, byte-identical) |
-    # "fermi_dirac" (FD transport + FD detailed balance) | "boltzmann"; see TransportModel.carrier_statistics.
+    # carrier statistics (v0.15; default since v0.15.0: "fermi_dirac") -- None = "fermi_dirac" (FD transport +
+    # FD detailed balance) | "boltzmann" | "legacy" (the v0.14 default); see TransportModel.carrier_statistics.
     carrier_statistics: Optional[str] = None
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
@@ -361,13 +361,13 @@ class Stacked3DSpec:
             if self.physics != "bipolar_dd":
                 raise ValueError("Stacked3DSpec.bipolar_options applies only to physics='bipolar_dd'")
         if self.carrier_statistics is not None:
-            if self.carrier_statistics not in ("boltzmann", "fermi_dirac"):
-                raise ValueError("Stacked3DSpec.carrier_statistics must be None, 'boltzmann' or "
-                                 "'fermi_dirac', got {!r}".format(self.carrier_statistics))
+            if self.carrier_statistics not in ("boltzmann", "fermi_dirac", "legacy"):
+                raise ValueError("Stacked3DSpec.carrier_statistics must be None, 'fermi_dirac', 'boltzmann' or "
+                                 "'legacy', got {!r}".format(self.carrier_statistics))
             if not (self.physics == "bipolar_dd"
-                    or (self.physics == "drift_diffusion" and self.carrier_statistics == "fermi_dirac")):
+                    or (self.physics == "drift_diffusion" and self.carrier_statistics != "boltzmann")):
                 raise ValueError("Stacked3DSpec.carrier_statistics applies only to physics='bipolar_dd' (and "
-                                 "'fermi_dirac' to 'drift_diffusion': the consistent FD transport)")
+                                 "'fermi_dirac' / 'legacy' to 'drift_diffusion')")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -975,7 +975,7 @@ class Devsim3DEquilibrium:
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
             tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s),
-            fd_enhancement=s.carrier_statistics != "boltzmann",  # v0.15 statistics (None -> legacy FD)
+            fd_enhancement=s.carrier_statistics != "boltzmann",  # statistics (None -> fermi_dirac, v0.15.0)
             statistics=s.carrier_statistics, n_dos_p_m3=Nv,
             options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
             btbt=s.btbt,                                         # D1d: None -> no BTBT (byte-identical)

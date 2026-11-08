@@ -189,9 +189,13 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
     `statistics` (v0.15): the region's setup_bipolar_region(statistics=...) -- "fermi_dirac" takes the
     FD detailed-balance root, and a PAIRED BGN set in `options` is checked here by the SAME function
     (bipolar_options.check_bgn_pairing, inside equilibrium_fields) the region setup uses, so the gate
-    frame refuses exactly what the body refuses. None keeps the legacy value."""
+    frame refuses exactly what the body refuses. None (v0.15.0) resolves like the region: the FD root
+    with fd_enhancement=True (bipolar_options.resolve_statistics); 'legacy' keeps the v0.14 value."""
     eq_traps = _PT.equilibrium_trap_levels(traps)
-    if (options is not None and options.active) or eq_traps or statistics is not None:
+    from dynameta.carriers.bipolar_options import resolve_statistics
+    label = resolve_statistics(statistics, fd_enhancement)       # v0.15.0: None -> 'fermi_dirac' (FD root)
+    explicit = statistics is not None and label != "fermi_dirac_legacy"   # 'legacy' = the v0.14 closed form
+    if (options is not None and options.active) or eq_traps or explicit or label == "fermi_dirac":
         from dynameta.carriers.bipolar_options import BipolarOptions, equilibrium_fields
         nd = float(n_dos_m3)
         f = equilibrium_fields(np.array([float(net_doping_m3)]), n_i_m3=float(n_i_m3), N_c_m3=nd,
@@ -279,6 +283,23 @@ def _fd_contact_shift(device: str, contact: str):
     # what degrades in that case, not this offset. That SOLUTION-level half is now covered by
     # `warn_if_solution_exceeds_fd_ceiling` (audit C10-d), which `dc_solve.solve_dc` runs on every
     # converged DC/Gummel solve; this setup-time test remains the one that fires BEFORE any solve.
+    _warn_fd_doping_ceiling(u)
+    # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
+    # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
+    # otherwise allocate an (nnodes, 96) quadrature array.
+    uq, inv = np.unique(u, return_inverse=True)
+    shift = np.asarray(fd_potential_shift(uq), dtype=np.float64).reshape(-1)[inv]
+    ds.node_solution(device=device, region=region, name=name)
+    ds.set_node_values(device=device, region=region, name=name,
+                       values=[float(v) for v in shift])
+    return name
+
+
+def _warn_fd_doping_ceiling(u, stacklevel: int = 4) -> None:
+    """The setup-time FD-ceiling advisory (audit C-10 / DD-2) on the contact region's charge-neutral majority
+    ratio u = n0/N_dos (or p0/N_dos_p): one UnreliableResultWarning past _FD_U_MAX. Shared by the legacy
+    contact shift (_fd_contact_shift) and, since v0.15.0, the FD-detailed-balance contact path (the default
+    statistics), which pins EquilibriumPotential instead and would otherwise have dropped it."""
     if float(np.max(u)) > _FD_U_MAX:
         warnings.warn(
             "setup_contact_ohmic_bipolar: the contact's majority density reaches n/N_dos = {:.3g} "
@@ -292,16 +313,33 @@ def _fd_contact_shift(device: str, contact: str):
             "is caught after each converged solve instead (audit C10-d, "
             "warn_if_solution_exceeds_fd_ceiling). Supply a larger N_dos, or drop fd_enhancement "
             "and accept the Boltzmann model knowingly.".format(float(np.max(u))),
-            UnreliableResultWarning, stacklevel=3)
-    # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
-    # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
-    # otherwise allocate an (nnodes, 96) quadrature array.
-    uq, inv = np.unique(u, return_inverse=True)
-    shift = np.asarray(fd_potential_shift(uq), dtype=np.float64).reshape(-1)[inv]
-    ds.node_solution(device=device, region=region, name=name)
-    ds.set_node_values(device=device, region=region, name=name,
-                       values=[float(v) for v in shift])
-    return name
+            UnreliableResultWarning, stacklevel=stacklevel)
+
+
+def _fd_root_ceiling_check(device: str, contact: str) -> None:
+    """The setup-time FD-ceiling advisory for a contact pinning the option-equilibrium fields (statistics=
+    'fermi_dirac', the v0.15.0 default): u from the region's pinned charge-neutral densities
+    (NeutralElectrons / N_dos on n-type nodes, NeutralHoles / N_dos_p on p-type ones), once per region
+    (the region parameter fd_ceiling_checked marks it; set only when the check runs on an FD region)."""
+    region = _contact_region(device, contact)
+    if region is None:
+        return
+    try:
+        if not float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) > 0.0:
+            return
+    except Exception:
+        return
+    if "fd_ceiling_checked" in ds.get_parameter_list(device=device, region=region):
+        return
+    nd = np.asarray(ds.get_node_model_values(device=device, region=region, name="NetDoping"), np.float64)
+    n0 = np.asarray(ds.get_node_model_values(device=device, region=region, name="NeutralElectrons"), np.float64)
+    p0 = np.asarray(ds.get_node_model_values(device=device, region=region, name="NeutralHoles"), np.float64)
+    nc = float(ds.get_parameter(device=device, region=region, name="N_dos"))
+    nv = float(ds.get_parameter(device=device, region=region, name="N_dos_p"))
+    u = np.where(nd > 0.0, n0 / nc, p0 / nv)
+    if float(np.max(u)) > _FD_U_MAX:
+        ds.set_parameter(device=device, region=region, name="fd_ceiling_checked", value=1.0)
+        _warn_fd_doping_ceiling(u, stacklevel=5)
 
 
 # --- audit C10-d: the SOLUTION-level counterpart of the ceiling test above ----------------------
@@ -895,16 +933,18 @@ def setup_bipolar_region(device: str, region: str, *,
                          recombination (tau=0 would make the SRH denominator 0/0 -> NaN)
       fd_enhancement   : if True, apply the degenerate FD g-factor to BOTH currents;
                          if False, plain Boltzmann Scharfetter-Gummel (g==1).
-      statistics       : v0.15 carrier statistics (bipolar_options module doc, STATISTICS). None
-                         (default): the legacy model selected by fd_enhancement, BYTE-IDENTICAL (with
-                         fd_enhancement=True: FD transport + contact potential, but the Boltzmann
-                         product n p = n_ie^2 in recombination and contacts -- a degenerate layer next to
-                         a junction then carries a zero-bias current, -0.12 J0 at 1e19 cm^-3 Si).
-                         "fermi_dirac" (needs fd_enhancement=True): FD transport AND FD detailed balance
-                         (n_ie carries exp(-Delta/2) per carrier; contacts pin the FD root) -- use it on
-                         degenerate layers and with an FD-paired BGN set (the house Si bundle).
-                         "boltzmann" (needs fd_enhancement=False): Boltzmann everywhere -- use it with an
-                         APPARENT (Boltzmann-extracted) BGN set. v0.15 completion: "fermi_dirac" also
+      statistics       : carrier statistics (bipolar_options module doc, STATISTICS). v0.15.0 DEFAULT
+                         (None with fd_enhancement=True): "fermi_dirac" -- FD transport (the consistent
+                         quasi-field) AND FD detailed balance (n_ie carries exp(-Delta/2) per carrier;
+                         contacts pin the FD root): use it for every calculation unless you reproduce
+                         v0.14 numbers. None with fd_enhancement=False, or "boltzmann" (needs
+                         fd_enhancement=False): Boltzmann everywhere -- use it with an APPARENT
+                         (Boltzmann-extracted) BGN set. "legacy" (needs fd_enhancement=True): the v0.14
+                         default, byte-identical -- FD transport with the edge-averaged g and the
+                         Boltzmann product n p = n_ie^2 in recombination and contacts; it carries a
+                         zero-bias current next to degenerate layers (-0.12 J0 at 1e19 cm^-3 Si, plus the
+                         averaged g's O(h^2) battery). NOT recommended; for reproducing published v0.14
+                         results only. v0.15 completion: "fermi_dirac" also
                          carries btbt (the Hurkx D with the FD Fermi functions at E_ie), CHARGED trap levels
                          (exact FD emission densities gamma_n n1, gamma_p p1 -- also for the built-in SRH
                          channel -- and their exact FD equilibrium occupancy in the contacts' neutral root),
@@ -961,7 +1001,8 @@ def setup_bipolar_region(device: str, region: str, *,
     # kT of the region: BipolarOptions.T_K when set (V_T otherwise -- the same float), so a level keeps
     # its energy at the simulated temperature.
     from dynameta.carriers.bipolar_options import resolve_statistics
-    _fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"   # validates the pair
+    _label = resolve_statistics(statistics, fd_enhancement)                 # validates the pair
+    _fdc = _label == "fermi_dirac"
     _opt = options if (options is not None and options.active) else None
     if _fdc:
         if _opt is None:                       # FD detailed balance alone still needs the option path
@@ -1054,7 +1095,7 @@ def setup_bipolar_region(device: str, region: str, *,
     if _opt is not None:
         from dynameta.carriers.bipolar_options import install_option_fields
         install_option_fields(device, region, _opt, fd_enhancement=fd_enhancement,
-                              **({"statistics": statistics} if _fdc else {}))
+                              statistics=_label)
 
     # --- SRH recombination: one node model into BOTH continuity equations ---
     # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py); with
@@ -1077,7 +1118,7 @@ def setup_bipolar_region(device: str, region: str, *,
     if _opt is not None or _eq_traps:
         from dynameta.carriers.bipolar_options import install_option_terms
         install_option_terms(device, region, _opt, fd_enhancement=fd_enhancement, traps=_eq_traps,
-                             **({"statistics": statistics} if _fdc else {}))
+                             statistics=_label)
 
     # --- transient / AC charge: the d(q n)/dt time term of each continuity equation. NCharge =
     #     -q n (electron charge density), PCharge = +q p. Defined ALWAYS: a steady-state DC solve
@@ -1204,6 +1245,7 @@ def contact_potential_residual(device: str, contact: str, drive_symbol: str,
     legacy one character-for-character."""
     drv = drive_symbol + psi_offset_term(psi_offset_V)
     if _options_contact_exprs(device, contact):
+        _fd_root_ceiling_check(device, contact)                # v0.15.0: the default FD path keeps the advisory
         return "Potential - {} - EquilibriumPotential".format(drv)
     shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
     return "Potential - {} + {}".format(drv, _pot_offset(shift, CELEC, CHOLE))

@@ -216,7 +216,7 @@ def test_house_fd_slab_relaxes_to_yan_cuevas_eq1(N_cm3):
     # --- the old configurations miss by far more than the budget ---
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        legacy, _ = _slab_np("g1l", N_cm3, statistics=None,
+        legacy, _ = _slab_np("g1l", N_cm3, statistics="legacy",
                              options=_house_options(allow_unpaired_bgn=True))
     assert [w.category.__name__ for w in caught if "PAIRED" in str(w.message)] == ["AdvisoryWarning"]
     leg_miss = float(np.max(legacy)) / oracle - 1.0
@@ -301,7 +301,7 @@ def test_fd_detailed_balance_removes_the_zero_bias_current(ND):
     J0 = QE * NI * NI * Dp / (ND * Lp)
     from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
     expected_legacy = math.expm1(-float(fd_potential_shift(ND / NC300)))
-    legacy = _zero_bias_jp("l", ND, None)[0] / J0
+    legacy = _zero_bias_jp("l", ND, "legacy")[0] / J0
     (fd_h, T_h), (fd_h2, T_h2) = (_zero_bias_jp(t, ND, "fermi_dirac", sc=s_) for t, s_ in (("f", 1.0), ("h", 0.5)))
     eps = np.finfo(float).eps
     assert legacy == pytest.approx(expected_legacy, rel=3e-2)                # the defect, as described
@@ -415,7 +415,7 @@ def test_fd_root_matches_eq1_and_the_papers_maximum():
         warnings.simplefilter("ignore")
         f = equilibrium_fields(np.array([5e19, 1e20, 2e20]) * CM3, n_i_m3=NI_YC * CM3, N_c_m3=NC_YC * CM3,
                                N_v_m3=NV_YC * CM3, options=_house_options(allow_unpaired_bgn=True),
-                               fd_enhancement=True)
+                               fd_enhancement=True, statistics="legacy")
     prod = f["n0"] * f["p0"]
     assert prod[0] < prod[1] < prod[2]
 
@@ -475,9 +475,10 @@ def test_layered_builder_threads_the_bundle_and_its_statistics():
     fd_detailed_balance = 1, the n_ie node model with FDGammaN/P on NieBgn) and solves at 0 V to
     n p = n_ie^2 (1e-9) with NO warning (plan P8: the FD-paired set does not trip the apparent-BGN
     double-count advisory); (ii) the Boltzmann bundle builds fd_enhancement = 0 and no detailed-balance
-    models, silently; (iii) the FD set under the legacy statistics (carrier_statistics=None) is REFUSED at
-    build (BGNPairingError naming 'fermi_dirac'); (iv) without a paired set, carrier_statistics=None is the
-    v0.14 region (no fd_detailed_balance parameter, fd_enhancement = 1). FAILS ON OLD CODE: no
+    models, silently; (iii) the FD set under the legacy statistics (carrier_statistics='legacy'; the default
+    before v0.15.0) is REFUSED at build (BGNPairingError naming 'fermi_dirac'); (iv) without a paired set,
+    carrier_statistics='legacy' is the v0.14 region (no fd_detailed_balance parameter, fd_enhancement = 1),
+    and carrier_statistics=None (the v0.15.0 default) is the FD region. FAILS ON OLD CODE: no
     semiconductor_presets module / carrier_statistics field."""
     import dataclasses
     from dynameta.carriers.bipolar_options import BGNPairingError
@@ -490,11 +491,13 @@ def test_layered_builder_threads_the_bundle_and_its_statistics():
     bz = _bar_solve("bz", silicon_transport(pairing=SI_PAIRING_YC2013_BOLTZMANN, **common))
     assert bz["fd"] == 0.0 and bz["fdc"] is None and "FDGammaN" not in bz["models"] and bz["warnings"] == []
     legacy_tr = dataclasses.replace(silicon_transport(pairing=SI_PAIRING_YC2013_FD, **common),
-                                    carrier_statistics=None)
+                                    carrier_statistics="legacy")
     with pytest.raises(BGNPairingError, match="fermi_dirac"):
         _bar_solve("lg", legacy_tr)
     plain = _bar_solve("pl", dataclasses.replace(legacy_tr, bipolar_options=None))
     assert plain["fdc"] is None and plain["fd"] == 1.0 and "FDGammaN" not in plain["models"]
+    dflt = _bar_solve("df", dataclasses.replace(legacy_tr, bipolar_options=None, carrier_statistics=None))
+    assert dflt["fdc"] == 1.0 and "FDGammaN" in dflt["models"]
 
 
 def test_3d_cell_threads_statistics_and_the_gate_frame_shares_the_pairing_check():
@@ -663,7 +666,9 @@ def test_defaults_off_statistics_unset_equals_absent_and_boltzmann_equals_fd_off
     """GATE G7 (defaults off, tier (i) of plan section 2 item 5: same-tree A/B). The full ordered DEVSIM
     definition log of a pn fixture (every model / equation / parameter / solution call, as
     tests/_bipolar_calllog.py records it) is IDENTICAL with statistics absent and statistics=None (FD and
-    Boltzmann fixtures), and statistics='boltzmann' equals fd_enhancement=False without it -- the switch
+    Boltzmann fixtures), and statistics='boltzmann' equals fd_enhancement=False without it. REVISED
+    2026-11-07 (v0.15.0 default): the unset statistics with the FD g-factor IS 'fermi_dirac' (identical log),
+    'legacy' differs from it -- the switch
     adds nothing unless set to 'fermi_dirac', which must differ (the adversarial half). Tier (ii) is the
     recorded digest gate (tests/test_bipolar_recombination_bgn_ionization.py::test_defaults_off_physics_
     definition_is_byte_identical_to_the_recorded_digest), tier (iii) the numeric cross-version gate of
@@ -672,4 +677,6 @@ def test_defaults_off_statistics_unset_equals_absent_and_boltzmann_equals_fd_off
         assert _call_log("g7a", fd) == _call_log("g7b", fd, statistics=None)
     assert _call_log("g7c", False) == _call_log("g7d", False, statistics="boltzmann")
     fdc = _call_log("g7e", True, statistics="fermi_dirac")
-    assert fdc != _call_log("g7f", True) and any("fd_detailed_balance" in repr(c) for c in fdc)
+    assert fdc == _call_log("g7f", True) and any("fd_detailed_balance" in repr(c) for c in fdc)
+    legacy = _call_log("g7g", True, statistics="legacy")
+    assert legacy != fdc and not any("fd_detailed_balance" in repr(c) for c in legacy)
