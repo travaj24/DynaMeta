@@ -886,6 +886,8 @@ CV_TOL_CINV, CV_TOL_VTR_MV = 0.05, 20.0             # quasi-static C-V: C_inv/C_
 GATE_G_DELTAS = tuple(np.round(np.arange(0.85, 1.3001, 0.05), 10))
 # MEASURED 2026-11-06 (after registration): the gamma_wall N_inv excess over SP is +10.6..+11.7 % -- the
 # registered 10 % is MISSED, a model result (gate_g). The characterization pin (measured range +- 1 point):
+# (v0.15.0 default statistics 'fermi_dirac', MEASURED 2026-11-07: +10.5..+11.1 %, inside the pin; the
+# 2026-11-06 range above is the 'legacy' statistics. The pin is NOT re-centred: that is a decision.)
 G14_NINV_PIN = (0.096, 0.127)
 
 

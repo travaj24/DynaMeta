@@ -10,7 +10,9 @@ GATE G (see bipolar_density_gradient.gate_g and docs/audit/2026-11-06-v0.15-dg-w
         double (REL 1e-5) and extended (REL 1e-7), both carriers DG and closed;
   SP self-checks (free-gas deficit; the hbar^2/m -> 0 classical limit vs the FD first integral);
   G1-4  DG vs the SP inversion oracle with tolerances REGISTERED IN ADVANCE; the registered N_inv 10 % is
-        MISSED (+10.6..+11.7 %): a documented model result, reported and pinned as a characterization;
+        MISSED (+10.5..+11.1 % at the v0.15.0 default statistics 'fermi_dirac'; +10.6..+11.7 % under
+        'legacy', the pre-v0.15.0 default -- MEASURED 2026-11-07): a documented model result, reported
+        and pinned as a characterization;
   G1-7  1-D mesh convergence of N_inv and the centroid; G1-5 the quasi-static C-V vs SP;
   the anisotropic-Si SP run, reported only (decision 51).
 
