@@ -292,7 +292,12 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
     devsim.error carries 'near-singular DC Jacobian', sigma_min/sigma_max <= 1e-15 (measured 4.4e-16)
     and 'mode in Electrons'. Refutations: a failure that is NOT a stall -- a 0.78 -> 1.2 V jump that
     ends far from a solution -- carries no diagnosis (the dense SVD is not paid on every routine
-    failure); and the same diagnosis at 0.30 V does not say near-singular."""
+    failure); and the same diagnosis at 0.30 V does not say near-singular.
+    REVISED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac', the FD contact root + quasi-field): the stall
+    moved ONE step earlier, to 0.78 V (MEASURED; the last converged step is 0.76 V). The gate walks the 20 mV
+    ladder to the FIRST stall and requires it in [0.70, 0.90] V -- the double-precision floor of this
+    inversion layer, not a statistics effect -- then checks the same diagnosis there and the jump refutation
+    from the last converged step."""
     from dynameta.carriers import dc_solve as DC
     from dynameta.carriers import well_posedness as WP
     dev = "wp_mos"
@@ -300,24 +305,26 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
         bend, _ = W.mos_inversion(dev)
         with W.quiet():
             DC.solve_dc(dev, rel_tol=1e-7, max_iter=100)
-        for k in range(1, 40):
+        e, v_stall = None, None
+        for k in range(1, 46):
             bend(0.02 * k)
-            with W.quiet():
-                DC.solve_dc(dev, rel_tol=1e-7, max_iter=40)
+            try:
+                with W.quiet():
+                    DC.solve_dc(dev, rel_tol=1e-7, max_iter=40)
+            except devsim.error as err:
+                e, v_stall = err, 0.02 * k
+                break
             if k == 15:
                 d30 = WP.diagnose_singular(dev)
-        bend(0.80)
-        with pytest.raises(devsim.error) as e:
-            with W.quiet():
-                DC.solve_dc(dev, rel_tol=1e-7, max_iter=40)
-        bend(1.2)                                           # DEVSIM restored the 0.78 V state
+        assert e is not None and 0.70 <= v_stall <= 0.90, v_stall
+        bend(1.2)                                           # DEVSIM restored the last converged state
         with pytest.raises(devsim.error) as e_jump:
             with W.quiet():
                 DC.solve_dc(dev, rel_tol=1e-7, max_iter=40)
     finally:
         W.drop(dev)
     assert str(e_jump.value).startswith("Convergence failure!") and "sigma_min" not in str(e_jump.value)
-    msg = str(e.value)
+    msg = str(e)
     assert msg.startswith("Convergence failure!") and "near-singular DC Jacobian" in msg
     assert "mode in Electrons" in msg
     assert "physics_bipolar_dd.setup_quasi_equilibrium_carrier" in msg     # the remedy is named (v0.15 4.4.3)
