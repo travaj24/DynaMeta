@@ -151,7 +151,7 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
     # degeneracy is the Delta1 - Delta0 term of the classical argument, carried over here; the legacy averaged g
     # is the division (unchanged string)
     fdq = ""
-    if "HJ_Electrons_Delta@n0" in ds.get_edge_model_list(device=device, region=region):
+    if "HJ_Electrons_dDelta" in ds.get_edge_model_list(device=device, region=region):
         from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
         fdq = " + " + fd_quasi_field_expr(device, region, "Electrons", "N_c")
     _edge_with_derivs(device, region, "vdiff_g_dg", "vdiff_dg / g_enh" + fdq,
