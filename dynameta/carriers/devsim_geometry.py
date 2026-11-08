@@ -1,5 +1,8 @@
-"""Exact (signed) box-method geometry for DEVSIM 2-D / 3-D regions -- an OPT-IN workaround for the
-DEVSIM 2.11.2 unsigned-dual defect (v0.14.0, docs/audit/2026-11-06-devsim-geometry-workaround.md).
+"""Exact (signed) box-method geometry for DEVSIM 2-D / 3-D regions -- DynaMeta's workaround for the
+DEVSIM 2.11.2 unsigned-dual defect (v0.14.0, docs/audit/2026-11-06-devsim-geometry-workaround.md),
+applied AUTOMATICALLY by both builders (LayeredDevsimBuilder(exact_geometry=True) and
+Stacked3DSpec.exact_geometry=True, user decision 2026-11-06: correct_device_geometry right after
+create_device, negative policy 'warn'); call apply_exact_geometry yourself on a raw-API device.
 
 THE DEFECT (verified 2026-11-04 against the DEVSIM source, tag v2.11.2rc5). DEVSIM builds every
 box-method quantity from ONE element-level model, ElementEdgeCouple (the area / length of the piece of
@@ -64,17 +67,19 @@ per-element tensor identity sum_e c_eT L_e t_e t_e^T = V_T I in 3-D (only its tr
 tet (diag(0.75, 1.5, 0.75) V_T for the path x, y, z) or a well-centred one (eigenvalues 0.88-1.11 V_T,
 MEASURED). That identity holds per element for the P1-FEM edge weights -V_T L_e grad(l_i).grad(l_j), which
 equal the circumcentric couples in 2-D only. A kernel that squares a per-element sum (noise_analysis's
-per-element Hooge source) is therefore biased in 3-D on every mesh: MEASURED S f N / (alpha I^2) = 1.125 on
-the devsim_3d Kuhn bar (validation/devsim_noise.unipolar_3d_resistor), 1.000 on a 5-tet bar, with or
-without this correction (audit note).
+per-element Hooge source) was therefore biased in 3-D on every mesh (MEASURED S f N / (alpha I^2) = 1.125
+on the devsim_3d Kuhn bar, 1.000 on a 5-tet bar, with or without this correction); noise_analysis now uses
+the P1 element couples (ab3419e), so this correction and that one are independent.
 
-WHEN TO USE IT. On any user mesh that is not made of rectilinear right triangles (2-D) or path
-tetrahedra (3-D): imported gmsh meshes, Delaunay meshes, devsim_3d mesher='gmsh'. Call it once per
-region right after create_device (or the builder's mesh build) and BEFORE any physics setup that reads
+WHEN TO USE IT. The builders do it for you (exact_geometry=True; False reproduces DEVSIM's uncorrected
+geometry, 'raise' / 'clip' pick the other negative policies -- resolve_policy). By hand: on any raw-API
+device whose mesh is not made of rectilinear right triangles (2-D) or path tetrahedra (3-D) -- imported
+gmsh meshes, Delaunay meshes. Call it once per
+region right after create_device and BEFORE any physics setup that reads
 the geometry (install_interface_traps computes ItArea from NodeVolume at install time), and re-apply
 after anything that makes DEVSIM rebuild its geometry (adding a contact / interface, reloading a device).
-On a mesh where DEVSIM is already exact it changes nothing beyond round-off (gate:
-tests/test_devsim_geometry.py). 1-D regions are exact already (returned untouched). Cylindrical or other
+On a mesh where DEVSIM is already exact (geometry_already_exact) it only READS DEVSIM and writes nothing,
+so such devices are byte-identical (gates: tests/test_devsim_geometry.py, tests/test_devsim_3d_mesh.py). 1-D regions are exact already (returned untouched). Cylindrical or other
 user geometry models already selected on the region are refused: not covered here (DEVSIM's 2-D
 cylindrical couple takes the same magnitude, TriangleCylindricalEdgeCouple.cc:153; no DynaMeta module
 uses DEVSIM's cylindrical mode).
@@ -93,16 +98,16 @@ sums). What matters is the ASSEMBLED quantities:
   * SurfaceArea < 0 (3-D, an obtuse interface / contact triangle at the edge of the surface).
 DEVSIM's magnitudes hide these by making everything positive -- at the price of the wrong volumes. The
 policy, applied BEFORE anything is written:
-  'raise' (DEFAULT): refuse with NegativeDualGeometryError (counts, worst values; `.report`), leaving the
-          device unchanged, so the first call on a new mesh shows how many negatives it has instead of
-          silently choosing for the caller. A boundary-conforming (Gabriel / non-obtuse-boundary)
-          Delaunay remesh removes them and is the only fix that keeps every property.
-  'warn'  (RECOMMENDED once the report has been read): write the exact signed values anyway and emit
-          UnreliableResultWarning: volumes and the patch test are exact, the M-matrix property is not
+  'warn'  (DEFAULT, user decision 2026-11-06 -- here and in the builders): write the exact signed values
+          anyway and emit UnreliableResultWarning (the counts and worst values): volumes and the patch test are exact, the M-matrix property is not
           guaranteed. MEASURED on the legacy devsim_3d gmsh stack (validation/devsim_geometry.py; ~1.3 %
           of the edges negative, worst -0.12 L^2, no negative node volumes): the series capacitor is
           exact to 6e-16 (DEVSIM's geometry: 1.203 x), the bipolar FD-SG MOS cap converges and its Gauss
           residual drops from 0.228 to 1.3e-5 -- 60 x better than 'clip'.
+  'raise' : refuse with NegativeDualGeometryError (counts, worst values; `.report`), leaving the device
+          unchanged -- for a pipeline that must not run on such a mesh. A boundary-conforming (Gabriel /
+          non-obtuse-boundary) Delaunay remesh removes the negatives and is the only fix that keeps every
+          property.
   'clip'  : set every negative assembled EdgeCouple to 0 (and all element pieces of that edge, so the
           edge and element assembly agree), keep ElementNodeVolume as the exact signed partition, and
           clip negative NodeVolume / SurfaceArea to 0. Keeps the M-matrix property; costs the patch test
@@ -529,22 +534,22 @@ def measure_dual_geometry(device: str, region: str) -> ExactGeometryReport:
     return _measure(device, region)[1]
 
 
-def apply_exact_geometry(device: str, region: str, *, negative: str = "raise") -> ExactGeometryReport:
-    """OPT-IN: replace DEVSIM's unsigned box-method geometry of `region` by the exact signed one (module
+def apply_exact_geometry(device: str, region: str, *, negative: str = "warn") -> ExactGeometryReport:
+    """Replace DEVSIM's unsigned box-method geometry of `region` by the exact signed one (module
     doc), so every equation DEVSIM assembles -- edge, element, node, contact and (3-D) interface
     terms -- and every DynaMeta kernel that reads NodeVolume / EdgeCouple / EdgeNodeVolume /
     ElementEdgeCouple / ElementNodeVolume / SurfaceArea uses the correct control volumes.
 
-    Use it on any 2-D / 3-D user mesh that is not rectilinear-right-triangle / path-tetrahedron (gmsh,
-    Delaunay, devsim_3d mesher='gmsh'); call it per region right after the device is created and before
+    The builders call it on every region (correct_device_geometry). By hand: on any raw-API 2-D / 3-D mesh
+    that is not rectilinear-right-triangle / path-tetrahedron (gmsh, Delaunay); call it per region right
+    after the device is created and before
     physics setup; re-apply after DEVSIM rebuilds its geometry. On meshes where DEVSIM is already exact
     it changes the geometry by round-off only.
 
     negative: what to do when the exact geometry has negative ASSEMBLED couples / node volumes / surface
-      shares (non-Delaunay edges, non-conforming boundary): 'raise' (default: NegativeDualGeometryError
-      with the counts in `.report`, device untouched), 'warn' (the recommended choice once the counts
-      are known: the exact values, UnreliableResultWarning -- exact volumes + patch test, no M-matrix
-      guarantee), 'clip' (negatives -> 0, exact element volumes kept; the clipped fractions are measured
+      shares (non-Delaunay edges, non-conforming boundary): 'warn' (DEFAULT: the exact values,
+      UnreliableResultWarning with the counts -- exact volumes + patch test, no M-matrix guarantee),
+      'raise' (NegativeDualGeometryError with the counts in `.report`, device untouched), 'clip' (negatives -> 0, exact element volumes kept; the clipped fractions are measured
       into the report and warned -- the fallback if a drift-diffusion Newton fails under 'warn'). See the
       module doc for the trade-offs and the measured gmsh-stack numbers.
 
@@ -552,8 +557,8 @@ def apply_exact_geometry(device: str, region: str, *, negative: str = "raise") -
     makes only devsim get_* reads and returns with written=False, so a device built on them is
     byte-identical with and without the correction (gate: tests/test_devsim_geometry.py).
 
-    Returns the ExactGeometryReport (applied=True; written says whether DEVSIM was modified). Raises ValueError for a region that already uses
-    cylindrical / user geometry models, RuntimeError if DEVSIM's values do not re-derive from the
+    Returns the ExactGeometryReport (applied=True; written says whether DEVSIM was modified). Raises
+    ValueError for a region that already uses cylindrical / user geometry models, RuntimeError if DEVSIM's values do not re-derive from the
     coordinates (layout check) or do not propagate after the write (read-back check)."""
     if negative not in NEGATIVE_POLICIES:
         raise ValueError("apply_exact_geometry: negative must be one of {}, got {!r}"
