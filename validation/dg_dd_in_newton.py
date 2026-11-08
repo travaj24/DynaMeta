@@ -219,7 +219,14 @@ def main():
     from dynameta.carriers.eq_registry import edge_with_derivs as _ewd
     _ewd(devc, regc, "vdiff_f",
          "(Potential@n0 + LambdaFrozen@n0 - Potential@n1 - LambdaFrozen@n1)/V_t", ("Potential",))
-    _ewd(devc, regc, "vdiff_g_f", "vdiff_f / g_enh", ("Potential", "Electrons"))
+    # the SAME transport as the coupled device: under the v0.15.0 default statistics ('fermi_dirac') the
+    # electron flux carries the FD quasi-field (g_enh = 1 + HJ_Electrons_dDelta, physics_density_gradient);
+    # without it this re-solve is the legacy averaged-g flux and GATE C read rel 3.8e-01 (MEASURED 2026-11-07)
+    fdq = ""
+    if "HJ_Electrons_dDelta" in ds.get_edge_model_list(device=devc, region=regc):
+        from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
+        fdq = " + " + fd_quasi_field_expr(devc, regc, "Electrons", "N_c")
+    _ewd(devc, regc, "vdiff_g_f", "vdiff_f / g_enh" + fdq, ("Potential", "Electrons"))
     from dynameta.carriers.sg_flux import install_sg_current      # the ONE SG kernel (2026-11-04)
     install_sg_current(devc, regc, carrier="electrons", density="Electrons", vdiff="vdiff_g_f",
                        bern="Bern_g_f", bern_m="Bern_g_f_m", current="ElectronCurrentF",
