@@ -21,7 +21,9 @@ split into right-angled Kuhn tets, on which every piece is >= 0.
   GATE M4  lateral invariance of that laterally uniform cap: max - min psi_s over the interface < 1e-9 V.
   GATE M5  the D1c trap gates (validation/traps_oracles.py gate G): G2 3-D D_it shift == 1-D (5 %, the 3-D
            z-resolution) and G3 == the 1-D solve on the 3-D z-lines (1e-6).
-  GATE M6  the legacy mesher='gmsh' still carries the defect (sum NodeVolume > 1.1 x) and warns.
+  GATE M6  mesher='gmsh' (kept, user decision 2026-11-06): with exact_geometry=False it carries DEVSIM's
+           defect (sum NodeVolume > 1.1 x) and warns; by default (exact_geometry=True) the builder's automatic
+           correction makes sum NodeVolume = L^2 t_si to 1e-12 (devsim_geometry).
   GATE M7  (--base PATH) M1-M5 FAIL on a pre-D2c checkout (run in a subprocess on that tree).
 
 Run:  python -m validation.devsim_3d_mesh [--base <pre-D2c checkout, e.g. a worktree at e46bd25>]
@@ -55,8 +57,10 @@ def _spec(**kw):
                 n_bg_m3=1e23, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E, mobility_m2Vs=0.135,
                 grid_n=(4, 4, 33), mesh_min_nm=0.5)
     base.update(kw)
-    if "mesher" in base and "mesher" not in {f.name for f in dataclasses.fields(Stacked3DSpec)}:
-        base.pop("mesher")                     # a pre-D2c tree: its only mesher is gmsh
+    names = {f.name for f in dataclasses.fields(Stacked3DSpec)}
+    for k in ("mesher", "exact_geometry"):     # a pre-D2c tree: its only mesher is gmsh, uncorrected
+        if k in base and k not in names:
+            base.pop(k)
     return Stacked3DSpec(**base)
 
 
@@ -267,20 +271,25 @@ def main():
     for (label, ok, det) in verdicts(m):
         H.gate(label, ok, det)
 
-    def legacy():
+    def legacy(exact):
         from dynameta.carriers.devsim_3d import Devsim3DEquilibrium
         from dynameta.warning_types import UnreliableResultWarning
-        spec = _spec(physics="drift_diffusion", mesher="gmsh")
+        spec = _spec(physics="drift_diffusion", mesher="gmsh", exact_geometry=exact)
         sol = Devsim3DEquilibrium(spec, device_name="m6", mesh_name="m6m",
                                   msh_path=os.path.join(tempfile.mkdtemp(prefix="d2c_leg_"), "m6.msh"))
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             sol.build_device()
         r = _v("m6", "semi", "NodeVolume").sum() / (L * L * TSI)
-        warned = any(issubclass(x.category, UnreliableResultWarning) for x in w)
+        msgs = [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]
         sol.teardown()
-        return r > 1.1 and warned, "sum NodeVolume / V(semi) = {:.3f}, UnreliableResultWarning {}".format(r, warned)
-    H.run("M6 legacy mesher='gmsh' keeps the defect, warns", legacy)
+        if exact:
+            ok = abs(r - 1.0) < 1e-12 and not any("exact_geometry=False" in m for m in msgs)
+        else:
+            ok = r > 1.1 and any("exact_geometry=False" in m for m in msgs)
+        return ok, "sum NodeVolume / V(semi) = {:.15f}, UnreliableResultWarnings {}".format(r, len(msgs))
+    H.run("M6a mesher='gmsh', exact_geometry=False keeps DEVSIM's defect, warns", lambda: legacy(False))
+    H.run("M6b mesher='gmsh' default: geometry corrected (sum NodeVolume = V to 1e-12)", lambda: legacy(True))
 
     if a.base:
         def base_fails():

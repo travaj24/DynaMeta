@@ -768,7 +768,10 @@ def sc_gmsh(opts):
                          oxide_thk_m=2e-9, n_bg_m3=1e24, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E,
                          dos_mass_p_kg=0.81 * M_E, physics="bipolar_dd", n_i_m3=1e16, mobility_m2Vs=0.1,
                          mobility_p_m2Vs=0.04, tau_srh_s=1e-7, grid_n=(3, 3, 9), mesh_min_nm=0.5,
-                         mesh_max_nm=2.0, mesher="tensor" if var == "tensor" else "gmsh")
+                         mesh_max_nm=2.0, mesher="tensor" if var == "tensor" else "gmsh",
+                         # v0.14.0 builders correct the geometry by default: "gmsh" measures DEVSIM's own
+                         # (uncorrected) geometry, "gmsh_exact" applies the correction once, by the hook below
+                         exact_geometry=(var == "tensor"))
     tmp = tempfile.mkdtemp(prefix="oxg_")
     sol = Devsim3DEquilibrium(spec, device_name="g3", mesh_name="g3m",
                               msh_path=None if var == "tensor" else os.path.join(tmp, "g3.msh"))

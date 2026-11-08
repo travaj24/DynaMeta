@@ -366,7 +366,9 @@ F_1/2), which took 151-153 s on both meshers back to back.
 ## 8. Open questions
 
 1. **Keep `mesher="gmsh"`?** DECIDED 2026-11-04: kept in v0.14 only to reproduce pre-v0.14 numbers
-   (the warning says so) and removed in v0.15.
+   and removed in v0.15. SUPERSEDED 2026-11-06 (user): kept, because the builders now correct DEVSIM's
+   geometry automatically (`Stacked3DSpec.exact_geometry=True`), which makes the gmsh volumes exact;
+   `exact_geometry=False` reproduces the old numbers (`2026-11-06-devsim-geometry-workaround.md`).
 2. **Upstream.** Report the magnitude sum in `TetrahedronEdgeCouple.cc` to DEVSIM. With signed pieces,
    volumes are exact on any mesh, although couplings can still go negative on non-Delaunay meshes.
 3. **2-D impact ionization.** Should 2-D move to the same element reconstruction? It would be isotropic
