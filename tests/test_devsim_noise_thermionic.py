@@ -193,9 +193,15 @@ def _assembled_flux_weights(dev, iface, flux_model, var="Electrons", eq=EQ_N):
     its derivatives) set to 1.0 vs 0.0 at the same state, residual difference -(rhs_1 - rhs_0) per region row
     (get_matrix_and_rhs returns rhs = -F). Also a round-off bound per row: both assemblies sum the row's
     other terms identically, so the difference is the unit flux up to the running sum's rounding,
-    <= 16 eps (P_row + |w|) with P_row = Sum_edges |ElectronCurrent| EdgeCouple + |ElectronGeneration|
-    NodeVolume of the node (the magnitude of every term the row adds). DESTRUCTIVE: the flux model stays
-    replaced -- measure last."""
+    <= 16 eps (P_row + |w|) with P_row = Sum_edges |ElectronCurrent EdgeCouple| + |ElectronGeneration
+    NodeVolume| of the node (the magnitude of every term the row adds). The magnitude is of the PRODUCT:
+    devsim_geometry.apply_exact_geometry writes the SIGNED exact EdgeCouple, negative on the non-Delaunay
+    edges of the jittered 3-D stack (MEASURED 1106 of r_lo's and 236 of r_hi's edges; DEVSIM's own couples
+    are unsigned), and the pre-2026-11-08 form |ElectronCurrent| EdgeCouple then summed to a NEGATIVE
+    'magnitude' at a node whose currents are round-off (equilibrium): a negative budget, which an exact 0
+    difference fails (MEASURED on Linux, r_lo node 64 of jitter_exact: P = -3.0e-24, w = code = 0; the sign
+    is the platform's round-off -- docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). DESTRUCTIVE: the
+    flux model stays replaced -- measure last."""
     regs = list(ds.get_region_list(device=dev, interface=iface))
     scale = {}
     for r in regs:
@@ -206,9 +212,9 @@ def _assembled_flux_weights(dev, iface, flux_model, var="Electrons", eq=EQ_N):
         i1 = np.asarray(ds.get_edge_model_values(device=dev, region=r, name="node_index@n1")).astype(int)
         nv = np.asarray(ds.get_node_model_values(device=dev, region=r, name="NodeVolume"))
         gen = np.asarray(ds.get_node_model_values(device=dev, region=r, name="ElectronGeneration"))
-        P = np.abs(gen) * nv
-        np.add.at(P, i0, np.abs(cur) * ec)
-        np.add.at(P, i1, np.abs(cur) * ec)
+        P = np.abs(gen * nv)
+        np.add.at(P, i0, np.abs(cur * ec))
+        np.add.at(P, i1, np.abs(cur * ec))
         scale[r] = P
     out = {}
     for val in ("0.0", "1.0"):
