@@ -20,18 +20,19 @@ is also the well-centredness test, measured on the weights the consumers actuall
 WHICH MESHES PASS. The library meshes: the 2-D rectilinear tensor mesh (LayeredDevsimBuilder,
 create_2d_mesh: right triangles, zero-couple hypotenuses) and the 3-D tensor/Kuhn mesh
 (devsim_3d.Stacked3DSpec(mesher='tensor'), kuhn_bar_mesh) -- both exact to round-off (MEASURED max
-|ratio - 1| = 6.7e-15 / 1.1e-14 on graded meshes, tests/test_devsim_element_geometry.py). The deprecated
-Stacked3DSpec(mesher='gmsh') path and general user meshes with obtuse triangles / non-well-centred tets
-FAIL and are refused with InexactElementGeometryError (MEASURED: the gmsh-tet noise bar 1.2249 x, 544 of
+|ratio - 1| = 6.7e-15 / 1.1e-14 on graded meshes, tests/test_devsim_element_geometry.py). Uncorrected
+unstructured meshes (raw-API gmsh / Delaunay meshes, Stacked3DSpec(mesher='gmsh', exact_geometry=False))
+with obtuse triangles / non-well-centred tets FAIL and are refused with InexactElementGeometryError (MEASURED: the gmsh-tet noise bar 1.2249 x, 544 of
 932 tets inexact, worst 3.81 x).
 
 THRESHOLD rtol = 1e-9 (unchanged from the 3-D impact-ionization check it replaces): the exact meshes sit
 at <= 1.1e-14 (k = 3 or 6 pieces per element at a few eps each), the defect starts at the percent level,
 so any value between ~1e-12 and ~1e-3 separates them; 1e-9 leaves >= 3 decades of headroom either side.
 
-A geometry correction that replaces DEVSIM's ElementNodeVolume values with the signed (exact) ones
-makes this check pass without any change here: it reads the region's ElementNodeVolume as DEVSIM
-reports it.
+The geometry correction (devsim_geometry.apply_exact_geometry -- applied AUTOMATICALLY by both builders
+since v0.14.0, exact_geometry=True) replaces DEVSIM's ElementNodeVolume values with the signed (exact) ones
+and makes this check pass without any change here: it reads the region's ElementNodeVolume as DEVSIM
+reports it. So this refusal now fires only on raw-API devices (or exact_geometry=False builds).
 """
 
 from __future__ import annotations
@@ -102,9 +103,12 @@ def check_element_geometry(device: str, region: str, *, caller: Optional[str] = 
             "are off by more than {:.0e} (worst ratio {:.4f}; 2 sum ElementNodeVolume = {:.4f} x the region "
             "volume). DEVSIM 2.11 sums the MAGNITUDES of the circumcentric dual pieces, exact only on "
             "well-centred elements (no obtuse triangle / no tetrahedron with its circumcentre or a face "
-            "circumcentre outside), so any element-based quantity here would be biased. Use an exact mesh: "
-            "the 2-D rectilinear tensor mesh (LayeredDevsimBuilder / create_2d_mesh) or the 3-D Kuhn tensor "
-            "mesh (Stacked3DSpec(mesher='tensor'), devsim_3d.kuhn_bar_mesh) -- "
+            "circumcentre outside), so any element-based quantity here would be biased. The DynaMeta builders "
+            "(LayeredDevsimBuilder, Devsim3DEquilibrium) correct this automatically (exact_geometry=True, the "
+            "default); on a device built with the raw DEVSIM API call "
+            "dynameta.carriers.devsim_geometry.apply_exact_geometry(device, region, negative='warn') right "
+            "after create_device, or use an exact mesh: the 2-D rectilinear tensor mesh (create_2d_mesh) or "
+            "the 3-D Kuhn tensor mesh (Stacked3DSpec(mesher='tensor'), devsim_3d.kuhn_bar_mesh) -- "
             "dynameta.carriers.element_geometry.".format(
                 caller or "check_element_geometry", region, "triangle" if dim == 2 else "tetrahedron",
                 out["n_inexact"], out["n_elements"], rtol, out["max_element_ratio"], out["volume_ratio"]),

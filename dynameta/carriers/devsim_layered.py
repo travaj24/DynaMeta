@@ -42,6 +42,7 @@ from dynameta.carriers import physics_traps as PT
 from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers import extended_precision as XP
+from dynameta.carriers import devsim_geometry as GEO
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
@@ -106,7 +107,8 @@ class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
-                  extended_precision: bool = False, on_chi_temperature: str = "refuse") -> None:
+                  extended_precision: bool = False, on_chi_temperature: str = "refuse",
+                  exact_geometry=True) -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
                              .format(heterointerface))
@@ -139,6 +141,13 @@ class LayeredDevsimBuilder:
         # residual, double factorization) -- carriers/extended_precision.py. Device-scoped (it never
         # reaches a later default device); False (default) leaves every solve byte-identical.
         self.extended_precision = bool(extended_precision)
+        # v0.14.0 (user decision 2026-11-06): DEVSIM's box-method geometry is corrected right after
+        # create_device (devsim_geometry.correct_device_geometry; True = negative policy 'warn', or
+        # 'raise' / 'clip' / False -- resolve_policy). This builder's rectilinear right-triangle mesh is
+        # exact already, so the correction only READS it (written=False) and the device is
+        # byte-identical; the option matters for designs whose mesh is not rectilinear.
+        GEO.resolve_policy(exact_geometry)                   # validate at construction
+        self.exact_geometry = exact_geometry
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -443,6 +452,7 @@ class LayeredDevsimBuilder:
 
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+        self.geometry_reports = GEO.correct_device_geometry(self.device, self.exact_geometry, stacklevel=3)
         if self.extended_precision:                 # BEFORE any model: DEVSIM types models at creation
             XP.enable(self.device)
 
