@@ -115,6 +115,42 @@ def test_dg_off_switch_and_dead_layer():
     assert 0.8e-9 < lq < 1.8e-9                           # the ~1 nm ITO dead-layer scale
 
 
+def test_gamma_wall_is_the_exact_free_gas_wall_gamma():
+    """GAMMA_WALL (user decision 2026-11-04; fails on 6595bde, where the name does not exist) =
+    (3 pi/4)/I^2, I = int_0^1 (1 - t^2)/sqrt(t^2 ln t^2 - t^2 + 1) dt (DG audit doc, GATE B).
+
+    Pinned two independent ways: (1) I by scipy quadrature here (not the mpmath value the literal was
+    rounded from; F(t) cancels near t = 1, so double-precision quad lands 4.0e-14 low -- MEASURED
+    1.1872068904949138 vs 1.18720689049496104 -- hence rel 1e-12 on gamma, not 1e-15), (2) the PHYSICS: dg_correct_density_1d's own BVP on a flat profile at
+    gamma = GAMMA_WALL must carry the exact Schrodinger free-gas deficit sqrt(pi)/(2 sqrt 2) c
+    hbar/sqrt(m kT), and at gamma = 1 the known 0.7734 of it. MEASURED 2026-11-04 (2001 nodes over
+    30 L_q, tol 1e-6): -2.1e-10 relative at GAMMA_WALL, ratio 0.773430 at gamma = 1; deficit/(c L_q)
+    = 1.1872068902 = I at both gammas (it is gamma-free by construction)."""
+    from scipy.integrate import quad
+    from dynameta.carriers.density_gradient import GAMMA_WALL
+    from dynameta.constants import KB, T_REF
+    i_quad = quad(lambda t: (1.0 - t * t) / np.sqrt(t * t * np.log(t * t) - t * t + 1.0), 0.0, 1.0,
+                  epsabs=1e-13, epsrel=1e-13, limit=400)[0]   # tighter -> quad's roundoff warning
+    assert i_quad == pytest.approx(1.187207, abs=5e-7)                  # the doc's I = 1.187207
+    assert GAMMA_WALL == pytest.approx((3.0 * np.pi / 4.0) / i_quad ** 2, rel=1e-12)
+    assert round(GAMMA_WALL, 4) == 1.6717                                 # the doc's quoted value
+    exact = np.sqrt(np.pi) / (2.0 * np.sqrt(2.0))                         # 0.626657 c hbar/sqrt(m kT)
+    c = 1e24
+    unit = c * HBAR / np.sqrt(MSTAR * KB * T_REF)
+    ratio = {}
+    for g in (1.0, GAMMA_WALL):
+        z = np.linspace(0.0, 30.0 * dg_length_m(MSTAR, gamma=g), 2001)
+        n = dg_correct_density_1d(z, np.full_like(z, c), MSTAR, gamma=g)
+        f = c - n
+        ratio[g] = float(np.sum(0.5 * (f[1:] + f[:-1]) * np.diff(z))) / unit / exact
+    assert abs(ratio[GAMMA_WALL] - 1.0) < 1e-8
+    assert ratio[1.0] == pytest.approx(0.7734, abs=1e-4)
+    # the in-Newton module re-exports the SAME object (one constant, two import homes)
+    pytest.importorskip("devsim")
+    from dynameta.carriers import physics_density_gradient as PDG
+    assert PDG.GAMMA_WALL is GAMMA_WALL and "GAMMA_WALL" in PDG.__all__
+
+
 def test_dg_guards():
     z = np.linspace(0.0, 10e-9, 301)
     with pytest.raises(ValueError):

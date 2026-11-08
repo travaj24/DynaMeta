@@ -37,9 +37,12 @@ from contextlib import contextmanager
 from typing import Sequence
 
 import numpy as np
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 from dynameta.carriers import eq_registry as R
+from dynameta.carriers import extended_precision as XP
 # audit C10-d: the Fermi-Dirac SOLUTION-level ceiling test. solve_dc is the one wrapper that owns a
 # CONVERGED state (both its methods return only after the solve succeeded), which is what the check
 # needs -- the doping-level test at contact setup runs before any solve and cannot see accumulation.
@@ -65,7 +68,7 @@ def solve_dc(device: str, *, method: str = "newton",
               semiconductor_regions: Sequence[str] = (),
               verbose: bool = False) -> None:
     if method == "newton":
-        ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+        XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                   relative_error=rel_tol, maximum_iterations=max_iter)
         warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d (converged state)
         return
@@ -80,7 +83,7 @@ def solve_dc(device: str, *, method: str = "newton",
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):
-            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+            XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                       relative_error=rel_tol, maximum_iterations=max_iter)
             warn_if_solution_exceeds_fd_ceiling(device)         # audit C10-d (converged state)
             return
@@ -194,11 +197,11 @@ def _gummel(device, abs_tol, rel_tol, inner_iter, outer_max, outer_tol,
                                                               list(semi_regions), device))
         # (1) Poisson sub-solve: freeze carriers
         with _frozen(device, CARRIER_EQS):
-            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+            XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                       relative_error=rel_tol, maximum_iterations=inner_iter)
         # (2) Continuity sub-solve: freeze Potential
         with _frozen(device, (POTENTIAL_EQ,)):
-            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+            XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                       relative_error=rel_tol, maximum_iterations=inner_iter)
 
         delta = _max_rel_change(_snapshot(device, semi_regions), before)

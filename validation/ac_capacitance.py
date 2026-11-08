@@ -29,9 +29,11 @@ import os
 import sys
 
 import numpy as np
-import devsim as ds
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
+
+ds = import_devsim()
 
 from dynameta.carriers import physics_equilibrium as EQ
 from dynameta.carriers import eq_registry as _R
@@ -75,18 +77,17 @@ def _quiet():
 def build_cap(d_m: float, eps_r: float) -> None:
     """1-D parallel-plate cap on dynameta's own equilibrium Poisson region: bottom plate grounded
     (setup_contact), top plate AC-driven (ac_analysis.setup_circuit_contact)."""
-    # Clear prior state WITHOUT reset_devsim(): reset would also drop the UMFPACK ("custom")
-    # direct-solver callback (the only solver in this build), breaking the next solve. Delete the
-    # device/mesh and the circuit individually instead -- the UMFPACK registration then survives
-    # across geometries, and delete_circuit() clears V1/vac so they can be re-added cleanly.
-    for dv in list(ds.get_device_list()):
-        ds.delete_device(device=dv)
-    for mh in list(ds.get_mesh_list()):
-        ds.delete_mesh(mesh=mh)
-    try:
-        ds.delete_circuit()                            # clears V1/vac node + stale ssac solutions
-    except Exception:
-        pass
+    # Clear ALL prior state (devices, meshes, the V1/vac circuit, stale ssac solutions) with one
+    # reset_devsim(). Up to devsim 2.10 this was unusable here: the reset also cleared the
+    # "direct_solver"/"solver_callback" parameters that devsim/umfpack/umfshim.py sets ONCE at
+    # import, so the next solve died with 'Unrecognized "direct_solver" parameter value "unknown"'
+    # and this function had to delete the device/mesh/circuit one by one instead. devsim 2.11.2
+    # (issue #169, the pyproject floor) wraps reset_devsim() to re-register UMFPACK on the same BLAS;
+    # MKL-PARDISO is built in and survives the reset either way. MEASURED (D0, 2026-11-03,
+    # docs/audit/2026-11-03-devsim-2.11-core.md): reset -> rebuild -> solve fails on 2.10.0 and
+    # passes on 2.11.2 under both solvers, and this validation's C/G arrays are bit-identical to
+    # the delete-one-by-one version (gated: tests/test_devsim_env.py::test_reset_devsim_*).
+    ds.reset_devsim()
     _R.clear(DEVICE)
 
     ds.create_1d_mesh(mesh=MESH)

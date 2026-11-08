@@ -23,6 +23,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
 from dynameta.carriers import transient as TR
 from validation.ac_diode import (build, staged_equilibrium_solve, ramp_to, depletion_cap,
@@ -35,14 +36,14 @@ SETTLE_RTOL = 1.0e-3
 
 
 def _terminal_current():
-    import devsim as ds
+    ds = import_devsim()
     return float(ds.get_circuit_node_value(node="V1.I", solution="dcop"))
 
 
 def _settle_test(v_from, v_to, label):
     """Ramp to v_from (DC), step to v_to (transient), then compare the settled transient current to
     the independent DC solve at v_to. Returns (settle_rel, t_s, I)."""
-    import devsim as ds
+    ds = import_devsim()
     ramp_to(v_from)
     _solve()
     # The reverse step is the stiff one, and it stalled MID-transient on nightly run 33347138729

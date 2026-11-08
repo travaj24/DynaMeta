@@ -25,12 +25,15 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
 import numpy as np
-import ngsolve as ng
 
+from dynameta.lazy_import import LazyModule
 from dynameta.carriers.electrostatics_fem import ElectrostaticLayer, solve_electrostatics_fem
 from dynameta.carriers.thermal_fem import (MESH_SCALE, ThermalLayer, ThermalResult,
                                            add_load_terms, build_thermal_forms, mean_T_per_layer)
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
+
+ng = LazyModule("ngsolve")   # lazy (v0.14, 2026-11-04): ngsolve's OpenBLAS commits ~4 GB at load
+
 
 SigmaSpec = Union[float, Callable[[float], float]]      # constant S/m, or sigma(T_K) -> S/m
 

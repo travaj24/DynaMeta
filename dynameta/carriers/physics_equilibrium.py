@@ -67,6 +67,48 @@ def F12_aymerich_humet_expr(eta_expr: str = "eta") -> str:
     return "(1.0 / ({} + {}))".format(A, B)
 
 
+# D0 (2026-11-03): PRECOMPUTED DEVSIM simplify() results, keyed by the exact input string.
+# setup_semiconductor_region's ONE expensive call is the Jacobian of the Aymerich-Humet electron
+# density, `simplify(diff(N_c * F_1/2[(Potential - Phi_c0)/V_t], Potential))`: symdiff's simplify()
+# of that expression took 152 s of the 152 s tests/test_devsim_smoke.py::test_devsim_equilibrium_smoke
+# (devsim 2.11.2; 253-273 s under load; ~375 s per region and 310-358 s for that test on 2.10), while
+# diff() alone takes < 1 ms. The result contains parameter NAMES only (N_c, Phi_c0, V_t), so it is a
+# constant: the string below is DEVSIM 2.11.2's own output for that input, and handing it to
+# node_model replays it in 0.5 ms. MEASURED bit-identical: on 4001 nodes spanning eta = -40..100 the
+# replayed model equals the live simplify(diff()) model bit for bit, and it agrees with the
+# UNSIMPLIFIED diff() to 9.3e-16 relative. A changed fit coefficient or eta string changes the key,
+# so the lookup misses and DEVSIM simplifies live (correct, only slow) -- a stale derivative can never
+# be reused. Gates: tests/test_equilibrium_simplify_cache.py (the @slow one re-runs the live
+# simplify and requires the identical string and bit-identical values).
+_SIMPLIFIED = {
+    ('simplify(diff(N_c * (1.0 / ((1.329340388179137 * pow((((Potential - Phi_c0) / V_t)*((Potenti'
+     'al - Phi_c0) / V_t)*((Potential - Phi_c0) / V_t)*((Potential - Phi_c0) / V_t) + 50.0 + 33.6 '
+     '* ((Potential - Phi_c0) / V_t) * (1.0 - 0.68 * exp(-0.17 * (((Potential - Phi_c0) / V_t) + 1'
+     '.0) * (((Potential - Phi_c0) / V_t) + 1.0)))), -0.375)) + exp(-((Potential - Phi_c0) / V_t))'
+     ')), Potential))'):
+    ('(-N_c * (-(4.985026455671764e-01 * ((3.360000000000000e+01 * (1 - (6.800000000000000e-01 * e'
+     'xp(((-1.700000000000000e-01) * pow((1 + ((-Phi_c0 + Potential) * pow(V_t,(-1)))),2))))) * po'
+     'w(V_t,(-1))) + (4 * pow((-Phi_c0 + Potential),3) * pow(V_t,(-4))) + (7.768320000000002e+00 *'
+     ' (-Phi_c0 + Potential) * (1 + ((-Phi_c0 + Potential) * pow(V_t,(-1)))) * exp(((-1.7000000000'
+     '00000e-01) * pow((1 + ((-Phi_c0 + Potential) * pow(V_t,(-1)))),2))) * pow(V_t,(-2)))) * pow('
+     '(50 + (3.360000000000000e+01 * (-Phi_c0 + Potential) * (1 - (6.800000000000000e-01 * exp(((-'
+     '1.700000000000000e-01) * pow((1 + ((-Phi_c0 + Potential) * pow(V_t,(-1)))),2))))) * pow(V_t,'
+     '(-1))) + (pow((-Phi_c0 + Potential),4) * pow(V_t,(-4)))),(-1.375000000000000e+00))) - (exp(('
+     '-(-Phi_c0 + Potential) * pow(V_t,(-1)))) * pow(V_t,(-1)))) * pow(((1.329340388179137e+00 * p'
+     'ow((50 + (3.360000000000000e+01 * (-Phi_c0 + Potential) * (1 - (6.800000000000000e-01 * exp('
+     '((-1.700000000000000e-01) * pow((1 + ((-Phi_c0 + Potential) * pow(V_t,(-1)))),2))))) * pow(V'
+     '_t,(-1))) + (pow((-Phi_c0 + Potential),4) * pow(V_t,(-4)))),(-3.750000000000000e-01))) + exp'
+     '((-(-Phi_c0 + Potential) * pow(V_t,(-1))))),(-2)))'),
+}
+
+
+def simplified(expr: str) -> str:
+    """The DEVSIM equation for a `simplify(...)` expression: its precomputed DEVSIM result when
+    `expr` is a key of _SIMPLIFIED (bit-identical, see above), else `expr` unchanged (DEVSIM
+    simplifies it live)."""
+    return _SIMPLIFIED.get(expr, expr)
+
+
 def effective_dos_m3(m_dos_kg, T_K: float = T_REF):
     """Effective band density of states N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS
     mass -- the N_c (or N_v) of n = N F_1/2(eta), the x = n/N_c of the generalized-Einstein factor.
@@ -173,8 +215,8 @@ def setup_semiconductor_region(device: str, region: str, *,
     eta = "(Potential - Phi_c0) / V_t"
     elec_eq = "N_c * " + F12_aymerich_humet_expr(eta)
     ds.node_model(device=device, region=region, name="Electrons", equation=elec_eq)
-    ds.node_model(device=device, region=region, name="Electrons:Potential",
-                    equation="simplify(diff({}, Potential))".format(elec_eq))
+    ds.node_model(device=device, region=region, name="Electrons:Potential",      # D0: precomputed
+                    equation=simplified("simplify(diff({}, Potential))".format(elec_eq)))
     net_eq = "ElectronCharge * (Electrons - N_D)"
     ds.node_model(device=device, region=region, name="PotentialNodeCharge", equation=net_eq)
     ds.node_model(device=device, region=region, name="PotentialNodeCharge:Potential",
@@ -197,14 +239,24 @@ def setup_interface(device: str, interface: str) -> None:
                               interface_model="continuousPotential", type="continuous")
 
 
-def setup_contact(device: str, contact: str) -> None:
-    """Dirichlet Potential = <contact>_bias, with UNIQUE per-contact node-model
-    name + edge_charge_model (closes the displacement flux at contact/interface
-    corner nodes -- the empty-row fix)."""
+def psi_offset_term(psi_offset_V: float) -> str:
+    """The contact-Dirichlet term for a heterostack frame shift s(r) (physics_heterojunction): an ohmic
+    contact on region r pins Potential = bias + s(r). Returns "" for s == 0 so every contact string of a
+    single-semiconductor / same-frame device is CHARACTER-FOR-CHARACTER what it was (v0.14.0, D1a)."""
+    v = float(psi_offset_V)
+    if v != v or v in (float("inf"), float("-inf")):
+        raise ValueError("psi_offset_V must be finite, got {!r}".format(psi_offset_V))
+    return "" if v == 0.0 else " - ({!r})".format(v)
+
+
+def setup_contact(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
+    """Dirichlet Potential = <contact>_bias (+ psi_offset_V, the heterostack frame shift of the contact's
+    region), with UNIQUE per-contact node-model name + edge_charge_model (closes the displacement flux
+    at contact/interface corner nodes -- the empty-row fix)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     cn = "{}_potential_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cn,
-                              equation="Potential - {}_bias".format(contact))
+                              equation="Potential - {}_bias".format(contact) + psi_offset_term(psi_offset_V))
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cn),
                               equation="1")
     _R.record_contact_equation(device, contact, name="PotentialEquation",

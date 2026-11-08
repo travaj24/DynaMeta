@@ -8,8 +8,10 @@ hangs DEVSIM's expr system, whether via a node-model reference or inlined).
 
   Poisson:  div(eps grad psi) = q (n - N_D)
   SG (Boltzmann):  with vdiff = (psi@n0 - psi@n1)/V_t (the library's edge sign convention),
-                   Jn = q mu EdgeInvLength V_t [n@n1 B(-vdiff) - n@n0 B(vdiff)] -- equivalently the
-                   kahan3 form below via the Bernoulli identity B(x)+x = B(-x).
+                   Jn = q mu EdgeInvLength V_t [n@n1 B(-vdiff) - n@n0 B(vdiff)], built by the ONE
+                   SG kernel (sg_flux, 2026-11-04): B(+-vdiff) both, sign-selected so the identity
+                   B(x) + x = B(-x) is only used for x >= 0 (the former kahan3 spelling used it for
+                   every x and cancelled for vdiff << 0: 1.9e-7 at -21, 100 % at -40).
   FD enhancement:  replace vdiff by vdiff/g and scale the current by g,
                    g(n) = generalized-Einstein ratio F_1/2(eta)/F_-1/2(eta).
   Continuity: div(Jn) = 0 (DC, no recombination).
@@ -57,11 +59,15 @@ import math
 import warnings
 from typing import Optional
 
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12)
+    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12,
+    psi_offset_term)
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_expr_devsim
@@ -131,8 +137,6 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                         "(Potential@n0 - Potential@n1)/V_t", ("Potential",))
     _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh",
                         ("Potential", "Electrons"))
-    _edge_with_derivs(device, region, "Bern_g", "B(vdiff_g)",
-                        ("Potential", "Electrons"))
 
     # Enhanced SG current. FIELD-DEPENDENT MOBILITY (R1): when field_mobility is on, the scalar mu_n is
     # replaced by a Caughey-Thomas velocity-saturated edge model mu_n_edge(|E_par|) (mu_n stays the
@@ -148,9 +152,14 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                                       e_smooth="E_smooth", beta=ct_beta)
         _edge_with_derivs(device, region, "mu_n_edge", mu_expr, ("Potential",))
         mu_sym = "mu_n_edge"
-    jn = ("ElectronCharge*" + mu_sym + "*EdgeInverseLength*V_t*g_enh*"
-           "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
-    _edge_with_derivs(device, region, "ElectronCurrent", jn, ("Electrons", "Potential"))
+    # Bern_g = B(vdiff_g), Bern_g_m = B(-vdiff_g): the ONE SG kernel (sg_flux; sign-selected two-
+    # Bernoulli bracket since 2026-11-04 -- the kahan3 B(v) + v spelling lost 1.9e-7 at v = -21 and
+    # 100 % at -40).
+    _SG.install_sg_current(device, region, carrier="electrons", density="Electrons",
+                           vdiff="vdiff_g", bern="Bern_g", bern_m="Bern_g_m",
+                           current="ElectronCurrent",
+                           prefactor="ElectronCharge*" + mu_sym + "*EdgeInverseLength*V_t*g_enh",
+                           wrt=("Potential", "Electrons"), current_wrt=("Electrons", "Potential"))
 
     # transient/AC charge: the d(q n)/dt time term (NCharge = -q n, the electron charge density).
     # Defined ALWAYS -- a steady-state DC solve ignores time_node_model, while a transient
@@ -164,13 +173,14 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                   time_node_model="NCharge", variable_update="positive")
 
 
-def setup_contact_ohmic_dd(device: str, contact: str) -> None:
-    """Ohmic contact: pin Potential = bias, Electrons = N_D (charge-neutral n-type)."""
+def setup_contact_ohmic_dd(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
+    """Ohmic contact: pin Potential = bias (+ psi_offset_V, the heterostack frame shift s(r) of the
+    contact's region -- physics_heterojunction), Electrons = N_D (charge-neutral n-type)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     bias = "{}_bias".format(contact)
     cp = "{}_potential_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cp,
-                              equation="Potential - {}".format(bias))
+                              equation="Potential - {}".format(bias) + psi_offset_term(psi_offset_V))
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
                               equation="1")
     _R.record_contact_equation(device, contact, name="PotentialEquation",
@@ -186,3 +196,41 @@ def setup_contact_ohmic_dd(device: str, contact: str) -> None:
     # but made the unipolar terminal current unreadable -- exposed by a 3D resistor test.
     _R.record_contact_equation(device, contact, name="ElectronContinuityEquation",
                             node_model=ce, edge_current_model="ElectronCurrent")
+
+
+def setup_contact_ohmic_dd_circuit(device: str, contact: str, *, node_name: str = "vac",
+                                   source_name: str = "V1", v_ac: float = 1.0,
+                                   drive: str = "voltage") -> tuple:
+    """Circuit-driven twin of setup_contact_ohmic_dd (v0.14.0, for ac_analysis / noise_analysis on a
+    UNIPOLAR DD device): Potential tied to circuit node `node_name` (no bias parameter), Electrons
+    pinned to N_D, and BOTH the displacement (PotentialEdgeFlux) and the electron current
+    (ElectronCurrent) coupled into that node, so the source current '<source_name>.I' is the total
+    small-signal terminal current. drive="voltage" (source 'V...') or "current" (source 'I...', the
+    open-circuit terminal for S_V); see physics_bipolar_dd.setup_contact_ohmic_bipolar_circuit.
+    setup_contact_ohmic_dd itself is unchanged. Returns (source_name, node_name)."""
+    from dynameta.carriers.physics_bipolar_dd import _check_drive
+    source_name = _check_drive(drive, source_name, "setup_contact_ohmic_dd_circuit")
+    if not (float(v_ac) > 0.0):
+        raise ValueError("setup_contact_ohmic_dd_circuit: v_ac must be > 0; got {!r}".format(v_ac))
+    ds.add_circuit_node(name=node_name, variable_update="default")
+    if drive == "current":                 # DEVSIM refuses an AC part on a current source
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0)
+    else:
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
+                           acreal=float(v_ac), acimag=0.0)
+    cp = "{}_potential_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=cp,
+                          equation="Potential - {}".format(node_name))
+    ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
+                          equation="1")
+    ds.contact_node_model(device=device, contact=contact, name="{}:{}".format(cp, node_name),
+                          equation="-1")
+    _R.record_contact_equation(device, contact, name="PotentialEquation", node_model=cp,
+                               edge_charge_model="PotentialEdgeFlux", circuit_node=node_name)
+    ce = "{}_electrons_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=ce, equation="Electrons - N_D")
+    ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="ElectronContinuityEquation", node_model=ce,
+                               edge_current_model="ElectronCurrent", circuit_node=node_name)
+    return source_name, node_name

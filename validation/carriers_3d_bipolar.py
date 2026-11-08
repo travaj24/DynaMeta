@@ -32,6 +32,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
 from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.carriers.devsim_3d import Stacked3DSpec, Devsim3DEquilibrium
@@ -53,7 +54,7 @@ def _solve(physics, extra, dev):
     prof = reg.grid_fields["electron_density_m3"].mean(axis=(0, 1))     # z-profile (mean over x,y)
     zax = np.asarray(reg.grid_axes_m["z"])
     areal = float(trapz(prof, zax))
-    import devsim as ds
+    ds = import_devsim()
     raw = {nm: np.asarray(ds.get_node_model_values(device=dev, region="semi", name=nm))
            for nm in ("z", "Electrons", "Holes")} if physics == "bipolar_dd" else None
     s.teardown()

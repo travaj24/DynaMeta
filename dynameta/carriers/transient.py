@@ -64,7 +64,11 @@ two classes be told apart here rather than guessed at.
 from __future__ import annotations
 
 import numpy as np
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
+
+from dynameta.carriers import extended_precision as _XP
 
 
 _FLOOR_MSG = (
@@ -152,7 +156,10 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
             "device's dielectric/RC time -- or lower dt_floor_s deliberately if you know "
             "the step is meaningful.".format(dt0, float(dt_floor_s)))
     # establish the transient initial condition at the current DC state
-    ds.solve(type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
+    # _XP.solve: transient_dc and every transient_bdf1 step MUST run the same Newton type -- DEVSIM
+    # keeps separate TimeData<double> / TimeData<float128> histories, so the switch is per device.
+    # `ds` is passed so this module's control-flow gates (which replace transient.ds) still bite.
+    _XP.solve(ds, type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
              maximum_iterations=maximum_iterations)
     ds.circuit_alter(name=source_name, value=float(v_to))            # the bias change
     src_i = "{}.I".format(source_name)
@@ -170,7 +177,7 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
         try:
             # info=True returns the per-equation errors and reports non-convergence as a RETURN
             # value; only hard solver errors (singular factorization, exp overflow) still raise.
-            info = ds.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
+            info = _XP.solve(ds, type="transient_bdf1", tdelta=dt, charge_error=charge_error,
                             absolute_error=absolute_error, relative_error=relative_error,
                             maximum_iterations=maximum_iterations, info=True)
             if isinstance(info, dict) and not info.get("converged", True):

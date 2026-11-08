@@ -20,9 +20,22 @@ Emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY: the native 3D-grid 
 assemble_eps places the (x,y,z) density with NO FieldLift synthesis (a lift applies to 2D
 fields only) -- the physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
 
-Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumulates/
--Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
-(DD: converges, sign-correct, reduces to the equilibrium accumulation to 0.8% at +1V).
+Validated: `validation/carriers_3d.py` (equilibrium: +Vg accumulates/-Vg depletes; on the D2c Kuhn-tensor
+mesh the box-method Gauss balance closes to 3.7e-6 = the Newton stop and lateral invariance is 3e-16 --
+the gmsh mesh gave 12 % / 1e-2); `validation/carriers_3d_dd.py` (DD: converges, sign-correct, reduces to
+the equilibrium accumulation at +1V); `validation/devsim_3d_mesh.py` (D2c: exact volumes, sheet charge,
+Gauss, 3-D == 1-D on the same z-lines).
+
+MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
+PATH (Kuhn) tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
+(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). It is the PATH structure that makes them
+exact, not right angles alone (correction 2026-11-04, doc section 10: the trirectangular corner tet is
+right-angled and DEVSIM gives it 2x its volume); tests/test_devsim_3d_mesh.py pins that every emitted tet
+is a path tet. The gmsh paths below survive as
+mesher="gmsh" and STAY (user decision 2026-11-06): the builder corrects DEVSIM's geometry on it right after
+create_device (Stacked3DSpec.exact_geometry, default True; devsim_geometry), which makes its volumes exact
+(MEASURED sum NodeVolume 1.196 / 1.293 x -> 1 + 2e-16). exact_geometry=False reproduces the pre-v0.14 gmsh
+numbers and warns (UnreliableResultWarning).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -42,11 +55,13 @@ accumulation forms) is emitted as the CarrierField. The bands are ALIGNED by the
 (Stacked3DSpec.band_alignment: Fermi level flat, vacuum level continuous, per-region electron affinity),
 so the junction carries the work-function-difference built-in potential (audit S1-9, 2026-11-02;
 before it, psi = 0 was the exact equilibrium of every stack). The gate electrode keeps the BODY
-semiconductor's work function (flat band of the body at Vg = 0). SCOPE / remaining: the
-multi-semiconductor path is EQUILIBRIUM-only (the semi-semi carrier-continuity / thermionic-emission
-interface for drift_diffusion/bipolar_dd is not yet wired -- design note
-docs/audit/2026-11-02-s1-9-heterojunction-built-in-potential.md); from_design orders only a
-gate-ABOVE contiguous run.
+semiconductor's work function (flat band of the body at Vg = 0). v0.14.0 (D1a): the heterostack also
+runs UNIPOLAR DRIFT-DIFFUSION -- every extra region solves electron continuity and each
+semiconductor/semiconductor interface carries thermionic emission or the continuous-quasi-Fermi-level
+model (carriers.physics_heterojunction; Stacked3DSpec.heterointerface). SCOPE / remaining: the BIPOLAR
+heterostack stays refused (extra_semiconductors carry no hole parameters -- n_i, N_v, hole mobility,
+band gap, doping sign); from_design orders only a gate-ABOVE contiguous run. Design notes:
+docs/audit/2026-11-02-s1-9-heterojunction-built-in-potential.md, docs/audit/2026-11-03-devsim-heterojunctions.md.
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -55,6 +70,8 @@ reads MSH 2.2.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -66,8 +83,10 @@ import numpy as np
 # lazy-import ceremony that could never be lazy, and a devsim-free install got a raw "No module named
 # 'devsim'" from inside a sibling module. Import it ONCE here, first, with devsim_layered's friendly
 # hint (gated: tests/test_audit_2026_07_17_wave7_carriers.py::test_s1_10_*).
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home
+
 try:
-    import devsim as ds
+    ds = import_devsim()
 except ImportError as _e:                                   # pragma: no cover - optional heavy solver
     raise ImportError("dynameta.carriers.devsim_3d requires the optional 'devsim' package "
                       "(pip install dynameta[solvers]); the pure-TMM / bring-your-own-solver paths "
@@ -80,11 +99,15 @@ from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
+from dynameta.carriers import extended_precision as XP
+from dynameta.carriers import devsim_geometry as GEO
+from dynameta.carriers import physics_traps as PT
+from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
-from dynameta.warning_types import AdvisoryWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
 @dataclass
@@ -122,9 +145,15 @@ class Stacked3DSpec:
     n_i_m3:          Optional[float] = None    # intrinsic carrier density (required for bipolar_dd)
     mobility_p_m2Vs: float = 0.001             # hole mobility (m^2/V/s; bipolar only)
     tau_srh_s:       float = 1.0e-7            # shared SRH lifetime (s; bipolar only); large -> suppress
+    srh_trap_energy_eV: float = 0.0            # E_t - E_i of that SRH channel [eV] (0 = legacy midgap; D1c)
+    srh_traps:       tuple = ()                # extra physics_traps.TrapLevel levels (bipolar only; D1c)
+    interface_traps: Optional[object] = None   # physics_traps.InterfaceTraps (or a list) on every
+                                               # semi/dielectric interface (bipolar only; D1c)
     dos_mass_p_kg:   Optional[float] = None    # VALENCE DOS mass -> N_v (bipolar FD g-factor); None -> N_c
     acceptor:        bool = False              # True -> uniform p-type (NetDoping = -n_bg); False -> n-type
     net_doping_expr: Optional[str] = None      # position-dependent junction (a DEVSIM node expression)
+    bipolar_options: Optional[object] = None   # audit R26/R27: carriers.bipolar_options.BipolarOptions
+                                               # (Auger/radiative/BGN/ionization/T_K/G); None -> SRH only
     body_net_doping_m3: Optional[float] = None # SIGNED net doping AT THE BODY CONTACT when
                                                # net_doping_expr is set (audit C2-1): phi_bi must be
                                                # derived from the doping the body contact actually
@@ -138,6 +167,17 @@ class Stacked3DSpec:
                                           # topology the 2D+symmetrization path approximates).
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
+    # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
+    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (PATH) tetrahedra:
+    # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
+    # every circumcentric piece >= 0 -- a property of path tets, not of right-angled tets in general).
+    # "gmsh" = the unstructured gmsh mesh. DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual
+    # pieces, so on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x
+    # oxide on the D1c gate-G2 cap; integrated charge ~20 % wrong, docs/audit/2026-11-03-devsim-3d-mesh.md)
+    # -- which exact_geometry (below, default True) now corrects, so the gmsh mesher STAYS (user decision
+    # 2026-11-06, superseding the 2026-11-04 "removed in v0.15"; docs/audit/2026-11-06-devsim-geometry-
+    # workaround.md). The tensor mesh remains the default: exact without any correction, fewer nodes.
+    mesher:          str = "tensor"
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
     field_region_name: str = "semi"      # emitted CarrierField region key (match the optics
                                           # alignment source_region for run_pipeline integration)
@@ -159,8 +199,10 @@ class Stacked3DSpec:
     # diel... | gate], each semiconductor a DISTINCT region with Potential-continuity interfaces; the
     # gate-adjacent (LAST) semiconductor is where accumulation forms and is emitted as the CarrierField.
     # SCOPE: multi-semiconductor is supported for the EQUILIBRIUM solve (Potential continuity suffices
-    # for the local n(psi) closure); for physics in {drift_diffusion, bipolar_dd} the semiconductor-
-    # semiconductor carrier-continuity interface is not yet wired, so extra_semiconductors raises there.
+    # for the local n(psi) closure) and, since v0.14.0, for UNIPOLAR drift_diffusion (each extra region
+    # solves electron continuity with the primary's mobility; the semiconductor-semiconductor interfaces
+    # carry the `heterointerface` carrier model). bipolar_dd + extra_semiconductors still raises (the
+    # entries carry no hole parameters).
     # An entry may carry two OPTIONAL trailing fields, (..., n_bg_m3, chi_eV, dos_mass_kg): the region's
     # electron affinity [eV] and DOS mass [kg] (None/absent -> chi: same-material rule below; mass: the
     # primary's dos_mass_kg, the legacy behaviour). See band_alignment() for the equilibrium physics.
@@ -169,9 +211,30 @@ class Stacked3DSpec:
     # semiconductor is a DIFFERENT material (Anderson-rule band offset Delta E_c = chi_semi - chi_r);
     # None is fine for a same-material stack (zero offset by definition).
     chi_semi_eV:     Optional[float] = None
+    # v0.14.0 (D1a): the carrier model on each semiconductor/semiconductor interface of a DRIFT-DIFFUSION
+    # heterostack (carriers.physics_heterojunction): "thermionic", "continuous" (continuous quasi-Fermi
+    # level), or "auto" -- thermionic where the interface has a band offset, continuous where it does not.
+    heterointerface: str = "auto"
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
+    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams ->
+    # local Kane/Hurkx band-to-band generation in the 'semi' bipolar region (physics='bipolar_dd' only),
+    # coupled in the Newton with the ISOTROPIC element field. oxide_tunneling: a
+    # carriers.tunneling.OxideTunnelingParams -> every solve adds CarrierField.extras["oxide_tunneling"]
+    # (the gate-oxide tunneling current through 'oxide', post-processed from the converged field).
+    btbt: Optional[object] = None
+    oxide_tunneling: Optional[object] = None
+    # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
+    # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
+    extended_precision: bool = False
+    # v0.14.0 (user decision 2026-11-06): correct DEVSIM's box-method geometry right after create_device
+    # (devsim_geometry.correct_device_geometry). True (default) = negative policy 'warn' (exact volumes;
+    # the few negative assembled couples of a gmsh mesh are kept and warned -- MEASURED best: capacitor
+    # exact, MOS-cap Gauss residual 1.3e-5); 'raise' refuses such a mesh; 'clip' clips them to 0
+    # (M-matrix kept, measured cost); False = DEVSIM's uncorrected geometry (pre-v0.14 gmsh numbers). The
+    # tensor (Kuhn) mesh is exact already and is only READ (byte-identical whatever the value).
+    exact_geometry: object = True
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -235,19 +298,18 @@ class Stacked3DSpec:
         phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg)
         out = {"semi": (phi0_semi, 0.0)}
         for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
-            if chi is not None and self.chi_semi_eV is not None:
-                d_chi = float(self.chi_semi_eV) - float(chi)
-            elif mat == self.semi_material:
-                d_chi = 0.0                                   # same material: no band offset
-            else:
-                raise ValueError(
-                    "Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
-                    "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
-                    "needs BOTH electron affinities (chi_semi_eV and the entry's 6th field chi_eV) -- there "
-                    "is no neutral default for a heterojunction band offset (audit S1-9).".format(
-                        nm, mat, self.semi_material))
-            phi_c = phi0_semi + d_chi
-            out[nm] = (phi_c, phi_c - _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm)))
+            # the ONE Anderson-rule implementation, same-material rule included (v0.14.0; same operation
+            # order -> bit-identical: a same-material region gets d_chi = 0.0 exactly as the {0.0, 0.0}
+            # this method used to pass)
+            out[nm] = HJ.anderson_alignment(
+                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))},
+                {"semi": self.chi_semi_eV, nm: chi}, "semi",
+                materials={"semi": self.semi_material, nm: mat},
+                hint="Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
+                     "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
+                     "needs BOTH electron affinities -- set chi_semi_eV and the entry's 6th field chi_eV (from "
+                     "a Design: TransportModel.chi_eV of both materials, which defaults to None since v0.14) "
+                     "(audit S1-9).".format(nm, mat, self.semi_material))[nm]
         return out
 
     def __post_init__(self):
@@ -260,9 +322,18 @@ class Stacked3DSpec:
                               "permittivity); got {}".format(self.eps_oxide))
         if not (self.eps_semi >= 1.0):
             raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
+        if self.mesher not in ("tensor", "gmsh"):
+            raise ValueError("Stacked3DSpec.mesher must be 'tensor' or 'gmsh'; got {!r}".format(self.mesher))
+        GEO.resolve_policy(self.exact_geometry)              # True / False / 'warn' / 'raise' / 'clip'
+        if not (0.0 < self.mesh_min_nm <= self.mesh_max_nm):
+            raise ValueError("Stacked3DSpec needs 0 < mesh_min_nm <= mesh_max_nm; got {} / {}".format(
+                self.mesh_min_nm, self.mesh_max_nm))
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
                               "'bipolar_dd'; got {!r}".format(self.physics))
+        if self.btbt is not None and self.physics != "bipolar_dd":
+            raise ValueError("Stacked3DSpec.btbt (band-to-band tunneling generation) needs "
+                             "physics='bipolar_dd'; got {!r}".format(self.physics))
         if self.physics == "bipolar_dd":
             # holes + recombination need an intrinsic density and positive lifetimes (the SRH
             # denominator is 0/0 at tau=0). Fail at construction, not deep in the Newton solve.
@@ -273,6 +344,17 @@ class Stacked3DSpec:
                                   "suppress recombination)")
             if not (self.mobility_p_m2Vs > 0.0):
                 raise ValueError("bipolar_dd 3D spec requires mobility_p_m2Vs > 0 (hole mobility)")
+        elif self.srh_traps or self.srh_trap_energy_eV or self.interface_traps is not None:
+            raise ValueError("Stacked3DSpec: srh_traps / srh_trap_energy_eV / interface_traps need "
+                             "physics='bipolar_dd' (the trap occupancy uses n AND p); got physics={!r}"
+                             .format(self.physics))
+        if self.bipolar_options is not None:
+            from dynameta.carriers.bipolar_options import BipolarOptions
+            if not isinstance(self.bipolar_options, BipolarOptions):
+                raise TypeError("Stacked3DSpec.bipolar_options must be a BipolarOptions, got {!r}"
+                                .format(type(self.bipolar_options).__name__))
+            if self.physics != "bipolar_dd":
+                raise ValueError("Stacked3DSpec.bipolar_options applies only to physics='bipolar_dd'")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -294,15 +376,20 @@ class Stacked3DSpec:
                 if not (thk > 0.0) or not (eps >= 1.0) or not (nbg > 0.0):
                     raise ValueError("extra_semiconductors entry '{}' needs thickness>0, eps>=1, "
                                       "n_bg>0; got thk={}, eps={}, n_bg={}".format(nm, thk, eps, nbg))
-            if self.physics != "equilibrium":
-                # the semiconductor-semiconductor carrier-continuity interface is not yet wired for the
-                # DD/bipolar continuity equations (PE.setup_interface enforces only Potential continuity,
-                # which is exact for the equilibrium n(psi) closure). Fail loudly rather than silently
-                # drop carrier flux across the internal junction.
+            if self.physics == "bipolar_dd":
+                # v0.14.0: the semiconductor/semiconductor carrier interface exists (physics_heterojunction;
+                # drift_diffusion heterostacks use it), but a BIPOLAR heterostack also needs every extra
+                # region's hole statistics and doping, which the extra_semiconductors tuple does not carry.
                 raise ValueError(
-                    "extra_semiconductors (a multi-semiconductor heterostack) is supported only for "
-                    "physics='equilibrium'; got physics={!r}. The semi-semi carrier-continuity "
-                    "interface for drift_diffusion/bipolar_dd is not yet implemented.".format(self.physics))
+                    "extra_semiconductors (a multi-semiconductor heterostack) supports physics='equilibrium' "
+                    "and 'drift_diffusion'; got 'bipolar_dd'. Missing for a bipolar heterostack: per-region "
+                    "n_i, valence DOS mass, hole mobility, band gap and doping sign in extra_semiconductors "
+                    "(and the gate phi_bi frame across materials). Use the 2-D LayeredDevsimBuilder, which "
+                    "reads them from each layer's TransportModel.")
+        if self.heterointerface not in ("auto",) + HJ.HETERO_MODELS:
+            raise ValueError("Stacked3DSpec.heterointerface must be 'auto', 'thermionic' or 'continuous'; "
+                             "got {!r}".format(self.heterointerface))
+        if self.extra_semiconductors:
             self.band_alignment()        # audit S1-9: a heterojunction without affinities fails HERE, loudly
 
     def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
@@ -323,7 +410,10 @@ class Stacked3DSpec:
 
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
-                     mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
+                     mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
+                     interface_traps=None, extended_precision: bool = False,
+                     mesher: str = "tensor", on_chi_temperature: str = "refuse",
+                     exact_geometry=True) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -337,7 +427,12 @@ class Stacked3DSpec:
         patch); the semiconductor layer itself must be laterally uniform. Stack.features and tapered
         inclusions are REFUSED (2026-11-02): a via came back as the via-free spec (measured), and a tapered
         gate patch touches the oxide with its BOTTOM (narrower) section, which the electrode-footprint
-        gate_patch_frac does not see."""
+        gate_patch_frac does not see.
+
+        on_chi_temperature (v0.14 row 3.2-10): a 3-D heterostack runs at T_REF (bipolar_dd, the only
+        physics with a T_K, refuses extra semiconductors), so the check fires only when a material states
+        TransportModel.chi_reference_T_K != T_REF. Same three settings as LayeredDevsimBuilder
+        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature)."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
@@ -421,12 +516,22 @@ class Stacked3DSpec:
                     Li.background_material))
             # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
             # the bands by the work-function difference (Stacked3DSpec.band_alignment)
+            # v0.14 (user decision 2026-11-04): chi_eV defaults to None -- carried through as None so
+            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
-                                float(tri.eps_static), float(tri.n_bg_m3), float(tri.chi_eV),
+                                float(tri.eps_static), float(tri.n_bg_m3),
+                                (float(tri.chi_eV) if tri.chi_eV is not None else None),
                                 float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
+        _htr = {layers[i].background_material: design.materials.get(layers[i].background_material).transport
+                for i in semi_idxs}
+        if extra_semis and len({(t.chi_eV, t.band_gap_eV) for t in _htr.values()}) > 1:
+            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10)
+            HJ.check_affinity_temperature(
+                {m: getattr(t, "chi_reference_T_K", None) for m, t in _htr.items()},
+                PE.T_REF, mode=on_chi_temperature, owner="Stacked3DSpec.from_design")
         eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
         if eps_ox is None:
             raise ValueError("gate dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
@@ -468,7 +573,11 @@ class Stacked3DSpec:
                 tau_srh_s=float(tr.tau_srh_s),
                 dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
                 acceptor=bool(tr.acceptor),
-                net_doping_expr=tr.net_doping_expr)
+                net_doping_expr=tr.net_doping_expr,
+                bipolar_options=getattr(tr, "bipolar_options", None),
+                srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
+                srh_traps=tuple(getattr(tr, "srh_traps", ())),
+                btbt=getattr(tr, "btbt", None))
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -477,9 +586,144 @@ class Stacked3DSpec:
                     physics=tr.physics, gate_patch_frac=float(frac),
                     field_region_name=layers[gate_adj_idx].name,   # the gate-adjacent (accumulation) layer
                     gate_name=gate_name, body_name=body_name,
-                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
+                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None), **bip)
+                    chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
+                    interface_traps=interface_traps,
+                    extended_precision=bool(extended_precision), exact_geometry=exact_geometry, **bip)
+
+
+# ---- D2c: tensor-product Kuhn mesh (the default 3-D mesh; see Devsim3DEquilibrium._build_mesh_tensor) ----
+_KUHN_PERMS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def _graded_axis(breaks, refine, h_min, h_max, dist_min=1.0, dist_max=6.0) -> np.ndarray:
+    """A 1-D node axis through every breakpoint, sized like gmsh's Threshold field: h = h_min within
+    dist_min of a refinement coordinate, linear to h_max at dist_max, h_max beyond (h_max everywhere when
+    `refine` is empty). Each span between breakpoints gets ceil(int ds/h) cells placed at equal steps of
+    int ds/h -- a smooth grading that hits the breakpoints exactly. Coordinates in NANOMETRES (breakpoints
+    are de-duplicated at 1e-9 nm)."""
+    b = np.unique(np.round(np.asarray(breaks, dtype=float), 9))
+    out = [float(b[0])]
+    for a0, a1 in zip(b[:-1], b[1:]):
+        sg = np.linspace(a0, a1, 2001)
+        if len(refine):
+            d = np.min(np.abs(sg[:, None] - np.asarray(refine, dtype=float)[None, :]), axis=1)
+            h = np.clip(h_min + (h_max - h_min) * (d - dist_min) / (dist_max - dist_min), h_min, h_max)
+        else:
+            h = np.full_like(sg, h_max)
+        w = np.concatenate([[0.0], np.cumsum(0.5 * (1.0 / h[1:] + 1.0 / h[:-1]) * np.diff(sg))])
+        n = max(1, int(np.ceil(w[-1] - 1e-9)))
+        out.extend(np.interp(np.linspace(0.0, w[-1], n + 1), w, sg)[1:-1].tolist())
+        out.append(float(a1))
+    return np.asarray(out)
+
+
+def _kuhn_tets(xs, ys, zs):
+    """Node coordinates (C order over (x, y, z)) and the 6 Kuhn tetrahedra of every box cell: for each
+    axis permutation (p0, p1, p2) the path c -> c+e_p0 -> c+e_p0+e_p1 -> c+(1,1,1). Every cell face is
+    split along its min-corner -> max-corner diagonal, so neighbouring cells are conforming. Returns
+    (P [n, 3], T [6 m, 4], the cell index of each tet)."""
+    nx, ny, nz = len(xs), len(ys), len(zs)
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+    P = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+    I, J, K = (g.ravel() for g in np.meshgrid(np.arange(nx - 1), np.arange(ny - 1), np.arange(nz - 1),
+                                               indexing="ij"))
+    tets = []
+    for perm in _KUHN_PERMS:
+        c = np.zeros((len(I), 3), dtype=int)
+        vs = [(I * ny + J) * nz + K]
+        for a in perm:
+            c[:, a] += 1
+            vs.append(((I + c[:, 0]) * ny + (J + c[:, 1])) * nz + (K + c[:, 2]))
+        tets.append(np.stack(vs, axis=1))
+    return P, np.stack(tets, axis=1).reshape(-1, 4), np.repeat(np.arange(len(I)), 6)
+
+
+def _cell_faces(rid, axis, side, region):
+    """(i, j, k) index arrays of the cells of region id `region` on the bottom / top domain face normal
+    to `axis`."""
+    idx = np.indices(rid.shape)
+    sel = (idx[axis] == (0 if side == "bottom" else rid.shape[axis] - 1)) & (rid == region)
+    return tuple(idx[d][sel] for d in range(3))
+
+
+def _face_triangles(ax, axis, cells, plus):
+    """The two triangles of each cell face normal to `axis` (the + side face when plus, else the - side),
+    split along the face's min -> max diagonal exactly as the Kuhn tets split it."""
+    ny, nz = len(ax[1]), len(ax[2])
+    base = np.stack([np.asarray(c, dtype=int) for c in cells], axis=1)
+    if plus:
+        base[:, axis] += 1
+    u, v = [d for d in range(3) if d != axis]
+    eu, ev = np.eye(3, dtype=int)[u], np.eye(3, dtype=int)[v]
+
+    def node(off):
+        q = base + off[None, :]
+        return (q[:, 0] * ny + q[:, 1]) * nz + q[:, 2]
+    n0, nu, nv, nm = node(0 * eu), node(eu), node(ev), node(eu + ev)
+    return np.concatenate([np.stack([n0, nu, nm], 1), np.stack([n0, nv, nm], 1)])
+
+
+def _write_msh22(path, P, groups3, groups2) -> None:
+    """MSH 2.2 ASCII: nodes (1-based, metres), tetrahedra per 3-D physical group, triangles per 2-D group."""
+    names = [(2, n) for n in groups2] + [(3, n) for n in groups3]
+    tag = {n: i + 1 for i, (_d, n) in enumerate(names)}
+    lines = ["$MeshFormat", "2.2 0 8", "$EndMeshFormat", "$PhysicalNames", str(len(names))]
+    lines += ['{} {} "{}"'.format(d, tag[n], n) for (d, n) in names]
+    lines += ["$EndPhysicalNames", "$Nodes", str(len(P))]
+    lines += ["{} {!r} {!r} {!r}".format(i + 1, float(p[0]), float(p[1]), float(p[2])) for i, p in enumerate(P)]
+    lines += ["$EndNodes", "$Elements"]
+    body = []
+    for typ, groups in ((2, groups2), (4, groups3)):
+        for n, conn in groups.items():
+            t = tag[n]
+            body += ["{} {} 2 {} {} {}".format(len(body) + 1 + r, typ, t, t, " ".join(str(int(v) + 1) for v in row))
+                     for r, row in enumerate(np.asarray(conn, dtype=int))]
+    lines += [str(len(body))] + body + ["$EndElements", ""]
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(lines))
+
+
+def _gmsh_lists(P, groups3, groups2):
+    """The SAME mesh as _write_msh22, as DEVSIM's in-memory create_gmsh_mesh arguments (coordinates: flat
+    x, y, z; elements: flat [type (2 triangle, 3 tetrahedron), physical index, node indices...] in the
+    file's order -- triangles per 2-D group, then tets per 3-D group; physical_names in the file's tag
+    order). Coordinates pass as the same doubles the file writes with repr (exact round-trip), so the
+    device is bit-identical to the file route (tests/test_devsim_3d_mesh.py gate)."""
+    names = list(groups2) + list(groups3)
+    idx = {n: i for i, n in enumerate(names)}
+    coords = [float(v) for v in np.asarray(P, dtype=np.float64).reshape(-1)]
+    elements = []
+    for typ, groups in ((2, groups2), (3, groups3)):
+        for n, conn in groups.items():
+            for row in np.asarray(conn, dtype=int):
+                elements += [typ, idx[n]] + [int(v) for v in row]
+    return coords, elements, names
+
+
+def create_mesh_in_memory(mesh: str, P_m, groups3, groups2) -> None:
+    """ds.create_gmsh_mesh for (P [m], {region: tets}, {surface: triangles}) WITHOUT a file -- the route
+    the builder's default takes (no shared path to race on, and nothing for DEVSIM to keep open: on
+    Windows DEVSIM 2.11.2 never closes a gmsh FILE it read). For hand-built fixtures (tests,
+    validation) that use the Kuhn helpers below; region / contact / interface calls follow as usual."""
+    coords, elements, names = _gmsh_lists(P_m, groups3, groups2)
+    ds.create_gmsh_mesh(mesh=mesh, coordinates=coords, elements=elements, physical_names=names)
+
+
+def kuhn_bar_mesh(mesh: str, lengths_nm, h_nm: float, *, region: str = "semi",
+                  contacts=("left", "right")) -> None:
+    """A uniform LX x LY x LZ [nm] bar on the exact Kuhn-tensor mesh (cells of side <= h_nm, 6 path tets
+    each), metre coordinates, with the two x-end faces as gmsh surface groups contacts[0] (x = 0) and
+    contacts[1] (x = LX); loaded in memory (create_mesh_in_memory). The caller adds the region / contacts
+    / finalize_mesh. Shared by the 3-D resistor-type fixtures (validation/carriers_3d_resistor.py,
+    dd_field_mobility.py, devsim_noise.py) so none of them meshes with gmsh or writes a fixed file."""
+    ax = tuple(_graded_axis([0.0, float(ln)], [], float(h_nm), float(h_nm)) for ln in lengths_nm)
+    P, T, _cell = _kuhn_tets(*ax)
+    rid = np.zeros(tuple(len(a) - 1 for a in ax), dtype=int)
+    tri = {contacts[0]: _face_triangles(ax, 0, _cell_faces(rid, 0, "bottom", 0), plus=False),
+           contacts[1]: _face_triangles(ax, 0, _cell_faces(rid, 0, "top", 0), plus=True)}
+    create_mesh_in_memory(mesh, P * 1e-9, {region: T}, tri)
 
 
 class Devsim3DEquilibrium:
@@ -495,8 +739,23 @@ class Devsim3DEquilibrium:
         self.spec = spec
         self.mesh_name = mesh_name
         self.device = device_name
-        self.msh_path = msh_path or os.path.join(
-            os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
+        # msh_path (user decision 2026-11-04; docs/audit/2026-11-04-v0.14-user-decisions.md, task 7). It
+        # defaulted to ONE FIXED file, ~/.dynameta/_devsim3d.msh, shared by every process and every build.
+        # MEASURED 2026-11-04 (Windows, DEVSIM 2.11.2), two processes building different 3-D devices
+        # with the default, 100 builds each: one build came back with the OTHER process's mesh (wrong node
+        # count) and 199 of 200 died with "DEVSIM FATAL"; sequential builds in one process were fine.
+        # Also measured: create_gmsh_mesh(file=) never closes the file -- it cannot be deleted after
+        # finalize_mesh, delete_device or delete_mesh (WinError 32; pure-devsim repro in the doc), so a
+        # per-build temporary FILE could not be cleaned up in-process on Windows.
+        # Now: an explicit msh_path is written, read and kept exactly as before; the default (None)
+        # hands the tensor mesh to DEVSIM IN MEMORY (create_gmsh_mesh(coordinates=, elements=,
+        # physical_names=) -- no file at all; bit-identical to the file route, gated) and gives the legacy
+        # gmsh mesher a fresh tempfile.mkdtemp directory per build (removed after the read where the OS
+        # allows it; on Windows DEVSIM's open handle keeps it until the process exits).
+        self.msh_path = msh_path
+        self._last_msh_path: Optional[str] = None     # the file the last build wrote (diagnostics)
+        self._msh_file: Optional[str] = msh_path      # the file the _build_mesh* writers write (a direct
+                                                      # _build_mesh() call needs an explicit msh_path)
         self._built = False
         s = spec
         # the emitted CarrierField region is the GATE-ADJACENT semiconductor (where accumulation forms):
@@ -519,20 +778,48 @@ class Devsim3DEquilibrium:
                             bbox_m=(0.0, s.lateral_m, 0.0, s.lateral_m, *self._z_semi),
                             ndim=3)]
 
-    def build_device(self) -> None:
-        self._build_mesh()                                      # sets _mesh_regions, _iface_pairs, _top_diel
-        ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
-        s = self.spec
-        for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
-            ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
-                              name="gate", material="metal")     # gate on the topmost (stack) dielectric
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
-                              name="body", material="metal")
-        for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
-            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
-        ds.finalize_mesh(mesh=self.mesh_name)
+    def _create_mesh_device(self) -> None:
+        """Build the mesh, hand it to DEVSIM (regions, contacts, interfaces) and create the device.
+        msh_path given: the file is written there, read, and kept (unchanged behaviour). msh_path None
+        (default): the tensor mesh goes to DEVSIM in memory (no file); the legacy gmsh mesher writes a
+        per-build tempfile.mkdtemp file, removed afterwards where the OS allows (__init__ comment)."""
+        tmpdir = None
+        path = self.msh_path
+        in_memory = path is None and self.spec.mesher == "tensor"
+        if path is None and not in_memory:
+            tmpdir = tempfile.mkdtemp(prefix="dynameta_devsim3d_{}_".format(os.getpid()))
+            path = os.path.join(tmpdir, "mesh.msh")
+        self._last_msh_path = path                              # None for the in-memory route
+        self._msh_file = path                                   # what the _build_mesh* writers write
+        try:
+            self._build_mesh()                                  # sets _mesh_regions, _iface_pairs, _top_diel
+            if in_memory:
+                coords, elements, names = _gmsh_lists(*self._mesh_data)
+                ds.create_gmsh_mesh(mesh=self.mesh_name, coordinates=coords, elements=elements,
+                                    physical_names=names)
+            else:
+                ds.create_gmsh_mesh(mesh=self.mesh_name, file=path)
+            for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
+                ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
+                                  name="gate", material="metal")     # gate on the topmost (stack) dielectric
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
+                                  name="body", material="metal")
+            for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
+                ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
+            ds.finalize_mesh(mesh=self.mesh_name)
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+        # v0.14.0: exact box-method geometry (Stacked3DSpec.exact_geometry). The tensor mesh is only read.
+        self.geometry_reports = GEO.correct_device_geometry(self.device, self.spec.exact_geometry, stacklevel=4)
+
+    def build_device(self) -> None:
+        self._create_mesh_device()
+        s = self.spec
+        if s.extended_precision:                    # BEFORE any model: DEVSIM types models at creation
+            XP.enable(self.device)
         self._dd = (s.physics == "drift_diffusion")
         self._bipolar = (s.physics == "bipolar_dd")
         if self._bipolar:
@@ -554,11 +841,17 @@ class Devsim3DEquilibrium:
             if role == "dielectric":
                 PE.setup_dielectric_region(self.device, name, eps)
             elif role == "semiconductor":
-                # an EXTRA gate-ward semiconductor (heterostack); equilibrium n(psi) physics with its
-                # OWN background density (the spec's extra_semiconductors n_bg). Multi-semiconductor is
-                # equilibrium-only (the post_init guard rejects DD/bipolar + extra_semiconductors).
-                PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
-                                               eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
+                # an EXTRA gate-ward semiconductor (heterostack) with its OWN background density and DOS
+                # mass (the spec's extra_semiconductors). Equilibrium n(psi) physics, or (v0.14.0) unipolar
+                # drift-diffusion with the primary's mobility (the post_init guard rejects bipolar).
+                if self._dd:
+                    DD.setup_semiconductor_region_dd(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
+                                                     eps_static=eps,
+                                                     dos_mass_kg=s.semiconductor_dos_mass_kg(name),
+                                                     mobility_m2Vs=s.mobility_m2Vs)
+                else:
+                    PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
+                                                   eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
             # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
         if s.extra_semiconductors:
             # audit S1-9 (wave-7, 2026-11-02): ALIGN THE BANDS. setup_semiconductor_region calibrates each
@@ -577,6 +870,16 @@ class Devsim3DEquilibrium:
                                    values=[float(psi_n)] * nn)
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
+        if s.interface_traps is not None:
+            # D1c: D_it on every semi/dielectric interface (the gate oxide, and the sidewalls of any
+            # dielectric inclusion touching the semiconductor)
+            diel = {name for (name, _m, role, _e) in self._mesh_regions if role == "dielectric"}
+            for (ifn, r0, r1) in self._iface_pairs:
+                if "semi" in (r0, r1) and (r0 in diel or r1 in diel):
+                    PT.install_interface_traps(self.device, ifn, s.interface_traps)
+        self._hetero_ifaces = {}
+        if s.extra_semiconductors and self._dd:
+            self._wire_heterointerfaces()
         for c in ds.get_contact_list(device=self.device):
             # the "body" contact is on the semiconductor; for unipolar DD it must also pin the
             # electron density (Electrons = N_D), for bipolar it pins Electrons AND Holes to their
@@ -588,6 +891,30 @@ class Devsim3DEquilibrium:
             else:
                 PE.setup_contact(self.device, c)
         self._built = True
+
+    def _wire_heterointerfaces(self) -> None:
+        """v0.14.0 (D1a): the electron-continuity coupling of every semiconductor/semiconductor interface
+        of a drift-diffusion heterostack (physics_heterojunction). Offsets from band_alignment (Anderson
+        rule; only Phi_c DIFFERENCES enter, i.e. the affinity steps), Richardson constants from each
+        region's DOS mass, the FD log-activity on both sides (the bulk is FD-enhanced SG)."""
+        s = self.spec
+        ba = s.band_alignment()
+        semis = set(ba)
+        for (ifn, r0, r1) in self._iface_pairs:
+            if r0 not in semis or r1 not in semis:
+                continue
+            sides = [HJ.HeteroSide(r, ba[r][0], "N_c",
+                                   HJ.richardson_constant_Am2K2(s.semiconductor_dos_mass_kg(r)), fd=True)
+                     for r in list(ds.get_region_list(device=self.device, interface=ifn))]
+            model = s.heterointerface
+            if model == "auto":
+                model = ("thermionic" if abs(sides[0].phi_c_V - sides[1].phi_c_V) > 1e-9 else "continuous")
+            HJ.setup_heterointerface_carriers(self.device, ifn, sides[0], sides[1], model=model)
+            self._hetero_ifaces[ifn] = model
+
+    def heterointerfaces(self) -> Dict[str, str]:
+        """{interface: carrier model} wired on the semiconductor/semiconductor interfaces (DD only)."""
+        return dict(getattr(self, "_hetero_ifaces", {}))
 
     def _setup_bipolar_semi(self, region: str, n_bg_m3: float, eps_static: float) -> None:
         """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a 3D semiconductor
@@ -602,17 +929,37 @@ class Devsim3DEquilibrium:
             nd = (-1.0 if s.acceptor else 1.0) * float(n_bg_m3)
             ds.node_model(device=self.device, region=region, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = PE.effective_dos_m3(s.dos_mass_kg)
-        Nv = PE.effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
+        # band DOS at the region's temperature (BipolarOptions.T_K, else T_REF): the ONE helper the 2-D
+        # builder uses. v0.14 row 3.2-7: this evaluated the masses at T_REF under T_K (N_c 1.31x high at
+        # 250 K), so the FD normalisation and the degenerate-body built-in potential were wrong.
+        from dynameta.carriers.bipolar_options import band_dos_at_T
+        Nc, Nv = band_dos_at_T(s.dos_mass_kg, s.dos_mass_p_kg, s.bipolar_options)
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
-            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
+            btbt=s.btbt,                                         # D1d: None -> no BTBT (byte-identical)
+            srh_trap_energy_eV=float(s.srh_trap_energy_eV), traps=tuple(s.srh_traps) or None)
         BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
         if not self._built:
             self.build_device()
+        # v0.14.0 (2026-11-04): this builder drives its two contacts ONLY through the gate_bias /
+        # body_bias parameters. A contact repointed circuit-driven (ac_analysis.setup_circuit_contact
+        # on self.device) no longer reads them, so the ramp below would be a no-op and solve() would
+        # return the previous operating point (the defect measured on the 2-D builder, whose
+        # set_ssac_gate now drives the source). There is no 3-D set_ssac_gate, and the bipolar gate
+        # carries a phi_bi offset a plain circuit node would not -- refuse rather than go stale.
+        from dynameta.carriers import eq_registry as _R
+        _circ = sorted(_R.circuit_driven_contacts(self.device))
+        if _circ:
+            raise RuntimeError(
+                "Devsim3DEquilibrium.solve: contact(s) {} are circuit-driven, so the gate_bias/body_bias "
+                "ramp cannot move them and solve() would return a stale operating point. Set the bias "
+                "with ds.circuit_alter + a direct DC solve, or solve() before repointing the contact."
+                .format(_circ))
         gn, bn = self.spec.gate_name, self.spec.body_name
         # Map the Design electrode names (BiasPoint keys) to the internal gate/body
         # contacts. The stacked builder drives ONLY these two, so warn on (a) a bias that
@@ -677,10 +1024,15 @@ class Devsim3DEquilibrium:
             # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
             # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
             # same correction (FDContactShift is the node model the contact installed).
-            _Nc = PE.effective_dos_m3(self.spec.dos_mass_kg)
-            _Nv = (PE.effective_dos_m3(float(self.spec.dos_mass_p_kg))
-                   if self.spec.dos_mass_p_kg else _Nc)
-            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
+            # N_c, N_v at the region's T (the same helper as the body region; row 3.2-7)
+            from dynameta.carriers.bipolar_options import band_dos_at_T
+            _Nc, _Nv = band_dos_at_T(self.spec.dos_mass_kg, self.spec.dos_mass_p_kg,
+                                     self.spec.bipolar_options)
+            # audit R26/R27: with BGN / incomplete ionization / T_K on, the body contact pins the
+            # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
+            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
+                                                options=self.spec.bipolar_options,
+                                                traps=self.spec.srh_traps)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
             # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
             # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.
@@ -713,18 +1065,19 @@ class Devsim3DEquilibrium:
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
             # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
             # gate in 0.25 V steps (coupled Newton at each step).
-            abs_tol = max(1e10, self.spec.n_bg_m3 * 1e-12)
+            semis = ["semi"] + [e[0] for e in self.spec.extra_semiconductor_entries()]
+            abs_tol = max(1e10, max(self.spec.semiconductor_nbg(r) for r in semis) * 1e-12)
             ds.set_parameter(device=self.device, name="gate_bias", value=0.0)
             solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
-                      max_iter=100, semiconductor_regions=["semi"])
+                      max_iter=100, semiconductor_regions=semis)
             n_steps = max(1, int(abs(vg) / 0.25 + 0.5))
             for k in range(1, n_steps + 1):
                 ds.set_parameter(device=self.device, name="gate_bias", value=vg * k / n_steps)
                 solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
-                          max_iter=100, semiconductor_regions=["semi"])
+                          max_iter=100, semiconductor_regions=semis)
         else:
             ds.set_parameter(device=self.device, name="gate_bias", value=vg)
-            ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
+            XP.solve(type="dc", solver_type="direct", absolute_error=1e10,
                       relative_error=1e-5, maximum_iterations=80)
         # emit the GATE-ADJACENT semiconductor (where accumulation forms) -- 'semi' for a single
         # semiconductor, the last extra semiconductor for a heterostack.
@@ -757,9 +1110,19 @@ class Devsim3DEquilibrium:
             # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
             warnings.warn("contact-current extraction unavailable: {}".format(_e),
                           AdvisoryWarning, stacklevel=2)
+        if self.spec.oxide_tunneling is not None:            # D1d: opt-in; None adds no key
+            from dynameta.carriers.tunneling import oxide_tunneling_current
+            res = oxide_tunneling_current(self.device, "oxide", fdr, self.spec.oxide_tunneling)
+            k = int(np.argmax(np.abs(res["J_A_m2"])))
+            extras["oxide_tunneling"] = {"oxide": {
+                "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
+                "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
+                "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
+        # the temperature the emitted region was solved at: its V_t (BipolarOptions.T_K on the bipolar
+        # path; exactly T_REF otherwise). v0.14 row 3.2-7: this always reported T_REF.
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
-            temperature_K=PE.T_REF, regions={rname: reg},
+            temperature_K=HJ.temperature_of_V_t(HJ.region_V_t(self.device, fdr)), regions={rname: reg},
             n_bg_by_region={rname: self.spec.semiconductor_nbg(fdr)},
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m), extras=extras)
 
@@ -774,12 +1137,22 @@ class Devsim3DEquilibrium:
 
     # ---- gmsh mesh (nm geometry -> metre mesh) ----
     def _build_mesh(self) -> None:
+        if self.spec.mesher == "tensor":                        # D2c default: exact box-method geometry
+            return self._build_mesh_tensor()
+        if GEO.resolve_policy(self.spec.exact_geometry) is None:
+            warnings.warn(
+                "Stacked3DSpec(mesher='gmsh', exact_geometry=False): the unstructured gmsh mesh has "
+                "non-well-centred tetrahedra, on which DEVSIM 2.11's UNCORRECTED 3-D node volumes over-count "
+                "(MEASURED sum NodeVolume 1.20-1.52 x the region volume) and integrated charge is ~20 % wrong "
+                "-- the pre-v0.14 numbers. Leave exact_geometry=True (the default) to correct the geometry, "
+                "or use mesher='tensor' (docs/audit/2026-11-06-devsim-geometry-workaround.md).",
+                UnreliableResultWarning, stacklevel=3)
         if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
             return self._build_mesh_incl()
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -858,8 +1231,118 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)     # nm -> metre
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()
+
+    def _build_mesh_tensor(self) -> None:
+        """D2c (v0.14.0): the DEFAULT 3-D mesh -- a graded tensor-product grid split into Kuhn tetrahedra,
+        kept as arrays (_mesh_data, handed to DEVSIM in memory) and written as MSH 2.2 (metres) only for an
+        explicit msh_path. Same region / contact / interface names and the
+        same build_device hand-off (_mesh_regions, _iface_pairs, _top_diel) as the gmsh builders.
+
+        WHY (MEASURED, docs/audit/2026-11-03-devsim-3d-mesh.md): DEVSIM 2.11's 3-D ElementEdgeCouple is
+        0.5 (|v0 x v1| + |v0 x v2|) per tet edge (TetrahedronEdgeCouple.cc: v0 = circumcentre - edge
+        midpoint, v1/v2 = face circumcentres - circumcentre), the MAGNITUDES of the circumcentric dual
+        pieces, and ElementNodeVolume = couple * EdgeLength / 6 feeds EdgeNodeVolume and NodeVolume. On a
+        tet that is not (closed) well-centred some signed pieces are negative and partly cancel, but the
+        magnitudes add, so the volumes over-count. That includes tets whose circumcentre is INSIDE them but
+        that have an obtuse face (one over-counts 4.53x; correction 2026-11-04, doc section 10), not only
+        tets with the circumcentre outside. DEVSIM 2-D has the same construction (TriangleEdgeCouple.cc:74:
+        one obtuse triangle gives 11x); the 2-D builder is unaffected (rectilinear right triangles). The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
+        oxide volume on the G2 cap); a Delaunay mesh does NOT help (gmsh Optimize=0: 0 of 17814 oxide faces
+        non-Delaunay, still 1.289 x), and element assembly does not either (it uses the same couples).
+        Every Kuhn (path) tet of a box cell has ALL FOUR faces right triangles and its circumcentre (the
+        cell centre) at the midpoint of its main-diagonal edge, so every face circumcentre (a hypotenuse
+        midpoint) and the tet circumcentre lie on the tet boundary: each piece is >= 0, magnitude == signed
+        (right angles alone do NOT suffice: the trirectangular corner tet has an equilateral face and its
+        circumcentre outside -- DEVSIM: exactly 2x), and the volumes /
+        couples are the exact box-method ones (sum NodeVolume / region volume - 1 <= 1e-14; the axis
+        edges carry the rectilinear dual areas, the face/body diagonals carry 0). A laterally uniform
+        stack is then laterally invariant to round-off and reduces to the 1-D discretization on the same
+        z-lines.
+
+        Grading: each axis passes through every geometric boundary (layer interfaces; patch and inclusion
+        edges laterally) and follows the gmsh Threshold rule it replaces -- size mesh_min_nm within 1 nm of
+        a refinement plane, linear to mesh_max_nm at 6 nm. z refines at the (last) semiconductor/dielectric
+        interface (as before); x/y refine at patch and inclusion edges and are otherwise uniform at
+        <= mesh_max_nm (a full-gate stack needs no lateral resolution)."""
+        s = self.spec
+        Lnm = s.lateral_m * 1e9
+        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
+        frac = float(s.gate_patch_frac)
+        patterned = frac < 1.0 - 1e-9
+        ph = Lnm * frac / 2.0
+        z_of = {nm: (zlo, zhi) for (nm, _m, _r, zlo, zhi, _e) in stack}
+        xb, yb, xr, yr = [0.0, Lnm], [0.0, Lnm], [], []
+        if patterned:
+            for v in (Lnm / 2 - ph, Lnm / 2 + ph):
+                xb.append(v); yb.append(v); xr.append(v); yr.append(v)
+        inc_geo = []
+        for inc in s.inclusions:
+            if inc.in_layer not in z_of:
+                raise ValueError("Inclusion3D.in_layer '{}' is not a stack region {}".format(
+                    inc.in_layer, sorted(z_of)))
+            wx, wy = inc.x_frac * Lnm, inc.y_frac * Lnm
+            x0, y0 = Lnm / 2 - wx / 2, Lnm / 2 - wy / 2
+            inc_geo.append((inc, x0, x0 + wx, y0, y0 + wy) + tuple(z_of[inc.in_layer]))
+            xb += [x0, x0 + wx]; yb += [y0, y0 + wy]; xr += [x0, x0 + wx]; yr += [y0, y0 + wy]
+        zb = [0.0] + [L[4] for L in stack]
+        zr = [stack[k][3] for k in range(1, len(stack))
+              if stack[k - 1][2] == "semiconductor" and stack[k][2] == "dielectric"][-1:]
+        ax = [_graded_axis(b, r, s.mesh_min_nm, s.mesh_max_nm) for b, r in ((xb, xr), (yb, yr), (zb, zr))]
+        # the region of every box cell, by its centre (an inclusion footprint first, else the layer)
+        cx, cy, cz = [0.5 * (a[1:] + a[:-1]) for a in ax]
+        names = [L[0] for L in stack] + [inc.name for inc in s.inclusions]
+        CX, CY, CZ = np.meshgrid(cx, cy, cz, indexing="ij")
+        rid = np.full(CX.shape, -1, dtype=int)
+        for k, (_n, _m, _r, zlo, zhi, _e) in enumerate(stack):
+            rid[(CZ > zlo) & (CZ < zhi)] = k
+        for k, (_inc, x0, x1, y0, y1, zlo, zhi) in enumerate(inc_geo):
+            rid[(CX > x0) & (CX < x1) & (CY > y0) & (CY < y1) & (CZ > zlo) & (CZ < zhi)] = len(stack) + k
+        P, T, cell_of_tet = _kuhn_tets(*ax)
+        tet_rid = rid.ravel()[cell_of_tet]
+        groups3 = {names[k]: T[tet_rid == k] for k in range(len(names)) if np.any(tet_rid == k)}
+        tri = {}
+        # contacts: the domain top / bottom faces of the contact's OWN region (gate: the topmost dielectric,
+        # body: 'semi'); an inclusion reaching the top / bottom face is not contacted (DEVSIM refuses
+        # contact nodes off the contact region)
+        gate_f = _cell_faces(rid, axis=2, side="top", region=len(stack) - 1)
+        if patterned:                                           # the patch = top faces inside the footprint
+            fx, fy = cx[gate_f[0]], cy[gate_f[1]]
+            keep = (fx > Lnm / 2 - ph) & (fx < Lnm / 2 + ph) & (fy > Lnm / 2 - ph) & (fy < Lnm / 2 + ph)
+            gate_f = tuple(a[keep] for a in gate_f)
+        tri["gate"] = _face_triangles(ax, 2, gate_f, plus=True)
+        tri["body"] = _face_triangles(ax, 2, _cell_faces(rid, axis=2, side="bottom", region=0), plus=False)
+        pair_faces = {}                                         # {(r0, r1) sorted: {axis: [(i,j,k) of the - cell]}}
+        for a in range(3):
+            lo, hi = [slice(None)] * 3, [slice(None)] * 3
+            lo[a], hi[a] = slice(0, -1), slice(1, None)
+            r0, r1 = rid[tuple(lo)], rid[tuple(hi)]
+            for (i, j, k) in zip(*np.nonzero(r0 != r1)):
+                key = tuple(sorted((names[r0[i, j, k]], names[r1[i, j, k]])))
+                pair_faces.setdefault(key, {0: [], 1: [], 2: []})[a].append((i, j, k))
+
+        def _pair_tris(d):
+            return np.concatenate([_face_triangles(ax, a, tuple(np.asarray(v).T), plus=True)
+                                   for a, v in d.items() if v])
+        iface_pairs = []
+        if not s.inclusions:                                    # the stacked naming: if_k = stack[k-1] | stack[k]
+            for k in range(1, len(stack)):
+                tri["if_{}".format(k)] = _pair_tris(pair_faces[tuple(sorted((stack[k - 1][0], stack[k][0])))])
+                iface_pairs.append(("if_{}".format(k), stack[k - 1][0], stack[k][0]))
+        else:                                                   # the adjacency naming of _build_mesh_incl
+            for i, key in enumerate(sorted(pair_faces)):
+                tri["if_{}".format(i)] = _pair_tris(pair_faces[key])
+                iface_pairs.append(("if_{}".format(i), key[0], key[1]))
+        self._mesh_regions = [(nm, mt, rl, ep) for (nm, mt, rl, _zl, _zh, ep) in stack] + \
+                             [(inc.name, inc.material, inc.role, inc.eps) for inc in s.inclusions]
+        self._iface_pairs = iface_pairs
+        self._top_diel = stack[-1][0]
+        self._mesh_axes_m = tuple(a * 1e-9 for a in ax)        # diagnostics / tests
+        self._mesh_data = (P * 1e-9, groups3, tri)             # the in-memory route (_create_mesh_device)
+        if self._msh_file is not None:                          # an explicit msh_path: the file, as before
+            os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
+            _write_msh22(self._msh_file, P * 1e-9, groups3, tri)
 
     def _build_mesh_incl(self) -> None:
         """Adjacency-based 3D OCC build supporting lateral material INCLUSIONS (centered pillars in a
@@ -872,7 +1355,7 @@ class Devsim3DEquilibrium:
         from collections import defaultdict
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -975,5 +1458,5 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()
