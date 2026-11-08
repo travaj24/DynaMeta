@@ -437,8 +437,10 @@ def test_dg_bipolar_inversion_equilibrium_is_exact_with_fd():
     (= the body contact's 0) and L_n + L_p = ln(n_i^2/(N_c N_v)) + (Lambda_n + Lambda_p)/V_t node by node --
     GATE E's identity with the transport's FD activity L in place of ln(c/N). Budget GATE E's own: 1e-11 V
     and 1e-10 (its 1e-6 relative solve floor; the quantum-SRH detailed balance is exact by construction).
-    MEASURED: QFL_FD_DEFAULT. SHOWN FAILING under statistics='legacy' (the edge-averaged g, its O(h^2)
-    battery across the wall's degenerate... and the Boltzmann-product SRH): QFL_LEGACY."""
+    MEASURED (extended-precision Newton, as GATE E): max |phi_n| 7.8e-16 V, |phi_p| 1.1e-16 V, detailed balance
+    2.1e-14 (delta_max 6.1e-3). SHOWN FAILING under statistics='legacy' (the pre-v0.15.0 default: the
+    edge-averaged g and the Boltzmann-product SRH and contacts): |phi_n| 1.6e-4 V, |phi_p| 1.0e-7 V, detailed
+    balance 6.1e-3 (= delta_max: the Boltzmann product)."""
     r = C.run_child("dg_fd")
     assert r["max_phi_n"] <= 1e-11 and r["max_phi_p"] <= 1e-11, r
     assert r["db"] <= 1e-10, r
@@ -447,10 +449,13 @@ def test_dg_bipolar_inversion_equilibrium_is_exact_with_fd():
 
 
 def test_dg_bipolar_jacobian_with_fd():
-    """GATE DG-FD-J. The same device (DG variables QSqrtN/QLambda/QSqrtP/QLambdaP among the columns), electrons
-    kicked x1.2 off the solved state, the 4 nodes next to the wall: DEVSIM's matrix vs central differences of
-    its residual (gate J's criterion). MEASURED: DGJ. Knocked-out FD derivatives: DGKO (fails)."""
-    r = C.run_child("dg_fd", jac=1, knockout=1)
-    assert any(v.startswith("Q") for v in r["variables"]), r["variables"]
+    """GATE DG-FD-J. The same device in DOUBLE precision (a perturbation does not reach the residual of a
+    128-bit device: every central difference read exactly 0, MEASURED), every equation variable (Potential,
+    Electrons, Holes, QSqrtN, QLambda, QSqrtP, QLambdaP) at the 4 nodes next to the wall, QSqrtN kicked x1.1
+    off the solved state: DEVSIM's matrix vs central differences of its residual (gate J's criterion).
+    MEASURED 5.3e-5. (A knock-out of the FD derivatives does not move it -- the inversion layer is barely
+    degenerate, delta_max 6.1e-3, so those entries sit below the criterion; the knock-out is gated on the
+    degenerate devices of gate J.)"""
+    r = C.run_child("dg_fd", jac=1)
+    assert any(v.startswith("Q") for v in r["variables"]) and "Electrons" in r["variables"], r["variables"]
     assert r["jac_worst"] <= 1.0, r["jac_where"]
-    assert r["ko_worst"] > 1.0
