@@ -76,7 +76,7 @@ def test_d0_refusals_fire_before_any_registration():
     spec = NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12)
     _wipe()
     try:
-        # 2-D: refused (decision 21)
+        # 2-D (since the 2-D walker): a region without the continuity equations is refused
         ds.create_2d_mesh(mesh="nl2d_m")
         for pos in (0.0, 1e-8):
             ds.add_2d_mesh_line(mesh="nl2d_m", dir="x", pos=pos, ps=5e-9)
@@ -84,7 +84,7 @@ def test_d0_refusals_fire_before_any_registration():
         ds.add_2d_region(mesh="nl2d_m", material="Si", region="r")
         ds.finalize_mesh(mesh="nl2d_m")
         ds.create_device(mesh="nl2d_m", device="nl2d")
-        with pytest.raises(NotImplementedError, match="decision 21"):
+        with pytest.raises(ValueError, match="no ElectronContinuityEquation"):
             NL.setup_btbt_nonlocal("nl2d", "r", spec)
         with pytest.raises(TypeError):
             NL.setup_btbt_nonlocal("nl2d", "r", SILICON_HURKX)
@@ -108,6 +108,9 @@ def test_d0_refusals_fire_before_any_registration():
             return dev
         with pytest.raises(ValueError, match="no ElectronContinuityEquation"):
             NL.setup_btbt_nonlocal(oned("nl_plain", bipolar=False), "s", spec)
+        with pytest.raises(ValueError, match="frozen direction is a 2-D option"):
+            NL.setup_btbt_nonlocal("nl_plain", "s", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12,
+                                                                    direction=(1.0, 0.0)))
         with pytest.raises(BTBTDoubleCountError, match="LOCAL BTBT"):
             NL.setup_btbt_nonlocal(oned("nl_loc", btbt=SILICON_HURKX), "s", spec)
         with pytest.raises(NotImplementedError, match="bandgap narrowing"):
