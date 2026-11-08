@@ -229,6 +229,7 @@ def sc_zener(opts):
     vrs = [float(v) for v in opts.get("vr", [0.3, 0.6, 0.9, 1.2])]
     hj = float(opts.get("h", 0.2e-9))
     geo = {"xj": float(opts.get("xj", ZXJ)), "length": float(opts.get("length", ZL))}
+    geo.update(fd=bool(opts.get("fd", False)), statistics=opts.get("statistics"))
     dev = build_zener("znl", h_junction=hj, **geo)
     term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
     its0 = solve()
@@ -480,11 +481,13 @@ def _zener_at_T(spec, T_K):
 # =====================================================================================================
 
 def build_2d(dev, xlines, ylines, doping, *, n_i, tau, mu=(0.135, 0.048), circuit=False, local=None,
-             contacts=None, presolve=True, ae=1e12):
+             contacts=None, presolve=True, ae=1e12, fd=False, statistics=None, n_dos=2.8e25):
     """A 2-D bipolar device on a DEVSIM tensor mesh (right triangles: well centred). xlines / ylines:
     [(pos, ps)]; doping: a NetDoping expression in x, y. contacts: [(name, xl, xh, yl, yh)] boxes on the
     boundary (default: 'lo' at x = xmin, 'hi' at x = xmax). 'lo' is ohmic (bias parameter lo_bias), 'hi'
-    ohmic or (circuit=True) circuit-driven by source V1 on node vhi."""
+    ohmic or (circuit=True) circuit-driven by source V1 on node vhi. fd=False: Boltzmann; fd=True: the FD g-factor
+    transport with `statistics` (unset = the package default, 'fermi_dirac' since v0.15.0; 'legacy' = v0.14);
+    n_dos: N_c = N_v [m^-3]."""
     ds = _ds()
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -512,9 +515,10 @@ def build_2d(dev, xlines, ylines, doping, *, n_i, tau, mu=(0.135, 0.048), circui
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
         ds.node_model(device=dev, region="b", name="NetDoping", equation=doping)
-        BP.setup_bipolar_region(dev, "b", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=n_i,
+        BP.setup_bipolar_region(dev, "b", eps_static=11.7, n_dos_m3=n_dos, n_i_m3=n_i,
                                 mobility_n_m2Vs=mu[0], mobility_p_m2Vs=mu[1], tau_n_s=tau, tau_p_s=tau,
-                                fd_enhancement=False, btbt=local)
+                                fd_enhancement=fd, btbt=local,
+                                **({"statistics": statistics} if (fd and statistics) else {}))
         BP.setup_equilibrium_seed_models(dev, "b")
         for name, *_ in contacts:
             if circuit and name == "hi":
@@ -562,7 +566,8 @@ def sc_lat2d(opts):
     vr = float(opts.get("vr", 0.9))
     out = {}
     dop = "ifelse(x < {}, {}, {})".format(ZXJ, -ZN, ZN)
-    dev = build_2d("z2", ZENER2D_X, ZENER2D_Y, dop, n_i=ZNI, tau=1e-3)
+    fdk = {"fd": bool(opts.get("fd", False)), "statistics": opts.get("statistics")}
+    dev = build_2d("z2", ZENER2D_X, ZENER2D_Y, dop, n_i=ZNI, tau=1e-3, **fdk)
     term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
     out["its_eq"] = solve()
     ds.set_parameter(device=dev, name="lo_bias", value=-vr)
@@ -608,7 +613,7 @@ def sc_lat2d(opts):
     psirow = psi[np.flatnonzero(xy[:, 1] == rows[0])][np.argsort(xy[xy[:, 1] == rows[0], 0])]
     ds.delete_device(device=dev)
     # the 1-D Zener at the same bias
-    d1 = build_zener("z1")
+    d1 = build_zener("z1", **fdk)
     t1 = NL.setup_btbt_nonlocal(d1, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
     solve()
     ds.set_parameter(device=d1, name="pc_bias", value=-vr)
@@ -622,7 +627,7 @@ def sc_lat2d(opts):
     del t1
     ds.delete_device(device=d1)
     # local twin in 2-D: Newton iterations
-    dl = build_2d("z2l", ZENER2D_X, ZENER2D_Y, dop, n_i=ZNI, tau=1e-3, local=SILICON_HURKX)
+    dl = build_2d("z2l", ZENER2D_X, ZENER2D_Y, dop, n_i=ZNI, tau=1e-3, local=SILICON_HURKX, **fdk)
     out["its_eq_local"] = solve()
     ds.set_parameter(device=dl, name="lo_bias", value=-vr)
     out["its_local"] = solve()
@@ -633,9 +638,10 @@ def sc_lat2d(opts):
 SLANT_N, SLANT_NI = 1e22, 1e19
 SLANT_LX, SLANT_LY, SLANT_XJ = 1.2e-6, 0.24e-6, 0.6e-6
 SLANT_A, SLANT_B, SLANT_EG, SLANT_LMAX = 1e19, 1e7, 0.25, 3e-7
+SLANTFD_NDOS = 2e21                 # N_c = N_v of the DEGENERATE (FD) slanted diode: N / N_c = 5, eta ~ 3.3
 
 
-def build_slant(theta_deg=30.0, circuit=True):
+def build_slant(theta_deg=30.0, circuit=True, fd=False, statistics=None, n_dos=2.8e25):
     """A 2-D FDT-type diode (n_i = 1e19, 1e22 m^-3: ssac and noise are trustworthy, tests/_btbt_nonlocal_child
     header) whose junction is SLANTED by theta against the tensor mesh: paths cross triangles obliquely and
     turn with the field (the dynamic direction)."""
@@ -645,7 +651,8 @@ def build_slant(theta_deg=30.0, circuit=True):
     yl = [(0.0, 10e-9), (SLANT_LY, 10e-9)]
     dop = "ifelse(x - (y - {yc})*{t} < {xj}, {n}, {mn})".format(yc=SLANT_LY / 2, t=repr(tan), xj=SLANT_XJ,
                                                                 n=SLANT_N, mn=-SLANT_N)
-    dev = build_2d("sl", xl, yl, dop, n_i=SLANT_NI, tau=1e-6, circuit=circuit, ae=1e8)
+    dev = build_2d("sl", xl, yl, dop, n_i=SLANT_NI, tau=1e-6, circuit=circuit, ae=1e8, fd=fd,
+                   statistics=statistics, n_dos=n_dos)
     if circuit:
         _CIRCUIT["made"] = True
     del ds
@@ -669,7 +676,11 @@ def _drop_rotation(NL):
 def sc_slant(opts):
     """Slanted FDT diode (2-D): detailed balance at 0 V, FDT with the two-point source (and the same-node
     prove-out), ssac vs DC dI/dV at 0 V and at -0.2 V, and the term's Jacobian vs central differences of
-    DEVSIM's residual at -0.2 V (dynamic direction: the rotation terms included)."""
+    DEVSIM's residual at -0.2 V (dynamic direction: the rotation terms included). opts: part ("eq": the 0 V
+    block only; "rev_ssac" / "rev_jac" / "rev": the -0.2 V ssac and / or Jacobian only), fd / statistics /
+    n_dos (the FD transport, its statistics, N_c = N_v), A (the Kane A), carriers (Jacobian columns of the
+    carrier variables too), boltz_dL (perturbation: the occupancies' carrier derivatives with g = 1),
+    drop_rotation (refutation), same_node (prove-out)."""
     import validation.devsim_noise as V
     import _custom_terms_child as CC
     from dynameta.carriers import btbt_nonlocal as NL
@@ -677,15 +688,28 @@ def sc_slant(opts):
     from dynameta.carriers.tunneling import BTBTParams
     ds = _ds()
     t0 = time.time()
-    dev = build_slant(opts.get("theta", 30.0))
-    term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(BTBTParams(SLANT_A, SLANT_B, 2.5), Eg_tun_eV=SLANT_EG,
-                                                              max_length_m=SLANT_LMAX))
+    dev = build_slant(opts.get("theta", 30.0), fd=bool(opts.get("fd", False)), statistics=opts.get("statistics"),
+                      n_dos=float(opts.get("n_dos", 2.8e25)))
+    term = NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(BTBTParams(float(opts.get("A", SLANT_A)), SLANT_B, 2.5),
+                                                              Eg_tun_eV=SLANT_EG, max_length_m=SLANT_LMAX))
+    if opts.get("boltz_dL"):            # perturbation: the occupancies' carrier derivatives with g = 1 (Boltzmann)
+        real_state = term.state
+
+        def boltz_state(device, real_state=real_state):
+            st_ = real_state(device)
+            for k, v in (("dLn", "Electrons"), ("dLp", "Holes")):
+                st_[k] = 1.0 / np.asarray(ds.get_node_model_values(device=device, region="b", name=v))[st_["perm"]]
+            return st_
+        term.state = boltz_state
     V._solve(1e8, 1e-8)
     out = {"build_s": time.time() - t0, "stats": dict(term.last_stats),
            "nodes": len(ds.get_node_model_values(device=dev, region="b", name="x"))}
     st, res = term.evaluate(dev)
     one_way = 0.5 * res["R_pre"] * res["pair"]
     out["db_ratio"] = float(np.max(np.abs(res["R"]) / one_way))
+    out["eta_max"] = float(max(np.max(st["Ln"]), np.max(st["Lp"])))      # the degeneracy reached (L = eta)
+    out["J0"] = float(sum(ds.get_contact_current(device=dev, contact="lo", equation=e)
+                          for e in ("ElectronContinuityEquation", "HoleContinuityEquation")))
     ff = [1.0, 1e5, 1e7]
     if opts.get("part", "").startswith("rev"):                   # skip the equilibrium noise block
         Y = sn = None
@@ -737,6 +761,9 @@ def sc_slant(opts):
     rows = np.concatenate([CT.node_rows(dev, "b", "HoleContinuityEquation", [i]),
                            CT.node_rows(dev, "b", "ElectronContinuityEquation", e_nodes)])
     out["recs"] = CC.fd_columns(dev, "b", "Potential", cols, rows, lambda x: 1e-6, term)
+    if opts.get("carriers"):            # the occupancies' columns: holes at the start, electrons at the end triangle
+        out["recs_n"] = CC.fd_columns(dev, "b", "Electrons", e_nodes, rows, lambda x: 1e-6 * abs(x), term)
+        out["recs_p"] = CC.fd_columns(dev, "b", "Holes", [i], rows, lambda x: 1e-6 * abs(x), term)
     out["dR_dtheta"] = float(res["dR_dtheta"][k]) if "dR_dtheta" in res else None
     out["R_k"] = float(res["R"][k])
     out["total_s"] = time.time() - t0
@@ -772,6 +799,7 @@ def sc_corner(opts):
     for kind in ("nonlocal", "local"):
         t0 = time.time()
         dev = build_2d("cn" + kind[0] + out["geom"][0], xl, xl, dop, n_i=ZNI, tau=1e-3, contacts=contacts,
+                       fd=bool(opts.get("fd", False)), statistics=opts.get("statistics"),
                        local=SILICON_HURKX if kind == "local" else None)
         term = (NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
                 if kind == "nonlocal" else None)
