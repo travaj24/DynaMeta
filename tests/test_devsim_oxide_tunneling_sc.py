@@ -666,10 +666,27 @@ def test_o7_newton_quality(newton):
         term, and every step converges quadratically (log e_(k+1) / log e_k >= 1.8 over the tail above
         1e-12; MEASURED 2.45-3.19).
     (b) The O4 deep-depletion sweep (p-Si, 0.1 -> 3 V), where the sink IS the interface node's electron
-        balance: <= the no-tunnelling count + 3 at every step. The no-term body is solved with tau 1e-12:
-        its DC state does not depend on tau, and that is the only tau at which it converges. MEASURED max
-        +3 (range -31..+3). REFUTE: the n_s column of the term's Jacobian halved (residual unchanged): the
-        Newton fails to converge at the 4th step (80 iterations)."""
+        balance. That makes the DC Jacobian near-singular: the inversion-layer electrons (x > 1450 nm) are
+        pinned only by the weak SRH generation and the tunnel sink (equilibrated sigma_min/sigma_max <= 4.4e-16
+        at 0.3 / 1.0 / 3.0 V, MEASURED with well_posedness), so the Newton tail is LINEAR -- each step leaves
+        a fraction ~kappa u of the error along that mode -- with a rate set by the rounding of the
+        factorisation (CPU-dispatched OpenBLAS kernel, libm): MEASURED 0.070 .. 0.081 per iteration below 1e-2
+        on Windows and on WSL's Haswell / Sandybridge / Nehalem kernels, deterministic per kernel (OpenBLAS
+        1/2/4 threads give the same counts). The tail's iteration COUNT therefore moves with the platform
+        (0.3 V: 14 / 15 / 16 / 17 iterations), and so does the no-term reference's (tau 1e-12, the only tau
+        at which the no-term body converges; it is near-singular too at 1.0-3.0 V: 0.6 V took 12 / 12 / 26 /
+        49). The plan's per-step "<= the no-term count + 3" compared those two rounding-set counts: MEASURED
+        max +3 on Windows (zero margin), +4 on WSL-Haswell (2026-11-08: the WSL failure), +2 / +3 on
+        Sandybridge / Nehalem. The gate therefore asserts what the per-step count stood for, on quantities
+        that do not depend on the rounding: (i) every step of both sweeps converges; (ii) the sweep with the
+        term needs no more Newton iterations in TOTAL than without it (MEASURED 0.65 .. 0.72 of it); (iii) at
+        every step the relative error contracts monotonically from 1e-2 to convergence by <= 0.2 per
+        iteration (2.5x the worst measured 0.081 -- the near-singular mode's linear rate; a quadratic step is
+        far below it). A Jacobian error delta along the converging direction shows up as a linear rate
+        ~delta, which (iii) bounds.
+        REFUTE: the n_s column of the term's Jacobian halved (residual unchanged): at 0.3 V the error
+        contracts by only 0.32 .. 0.46 per iteration (34 iterations: fails (iii)), and the Newton fails to
+        converge at the 4th step (80 iterations)."""
     a_on, a_off = newton["acc_on"], newton["acc_off"]
     assert len(a_on) == len(a_off) == 14 and all(p["converged"] for p in a_on)
     for p, q in zip(a_on, a_off):
@@ -678,11 +695,20 @@ def test_o7_newton_quality(newton):
         for e0, e1 in zip(e[:-1], e[1:]):
             if e1 > 1e-12:
                 assert math.log(e1) / math.log(e0) >= 1.8, (p["V"], e)
+
+    def contraction(rel):
+        """Per-iteration ratios e_(k+1)/e_k from the first relative error below 1e-2 to the end."""
+        k = next(i for i, x in enumerate(rel) if x < 1e-2)
+        return [e1 / e0 for e0, e1 in zip(rel[k:-1], rel[k + 1:])]
+
     i_on, i_off = newton["inv_on"], newton["inv_off"]
     assert len(i_on) == len(i_off) == 30 and all(p["converged"] for p in i_on + i_off)
-    assert all(p["n_it"] <= q["n_it"] + 3 for p, q in zip(i_on, i_off))
+    assert sum(p["n_it"] for p in i_on) <= sum(q["n_it"] for q in i_off)
+    for p in i_on:
+        assert max(contraction(p["rel"])) <= 0.2, (p["V"], p["rel"])
     w = newton["inv_wrong"]
     assert not w[-1]["converged"] and len(w) < 30
+    assert w[-2]["converged"] and max(contraction(w[-2]["rel"])) > 0.2     # 0.3 V: converged, but slowly
 
 
 @pytest.fixture(scope="module")
