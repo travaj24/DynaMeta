@@ -44,6 +44,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers import extended_precision as XP
 from dynameta.carriers import devsim_geometry as GEO
 from dynameta.carriers import noise_analysis as NA
+from dynameta.carriers import junction_mesh as JM
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
@@ -144,13 +145,31 @@ class LayeredDevsimBuilder:
                Delta E_c per 100 K for Al0.3Ga0.7As/GaAs, more for Si/SiGe) -- exploratory T sweeps.
       "off"    : build silently -- for affinities you have validated at the device T.
     Only materials whose (chi_eV, band_gap_eV) differ count as a heterostack (a p/n homojunction is two
-    material names of one semiconductor); single-material devices and the 300 K default are never affected."""
+    material names of one semiconductor); single-material devices and the 300 K default are never affected.
+
+    junction_band (v0.15.1, opt-in; carriers.junction_mesh, audit docs/audit/2026-11-08-v0.15-junction-mesh-band.md):
+    None / False (default) keeps the graded mesh, byte-identical. True (= junction_mesh.JunctionBand()) or a
+    JunctionBand(half_width_m=, spacing_m=) puts a UNIFORM band of mesh lines around every p-n junction of the
+    bipolar_dd regions: the sign changes of an in-region net_doping_expr (found by probing the expression with
+    DEVSIM on a throw-away mesh, along x and z) and the z-stacked interfaces whose two bipolar sides are doped
+    oppositely (homo- or hetero-junction). Defaults: half-width = the zero-bias depletion width W_0, spacing =
+    min(V_t / E_0, the BTBT h <= 0.35/k rule, the spacing of a line already on the junction) -- ~4 V_bi / V_t
+    lines per band. The x band runs through every layer (the 2-D mesh is a tensor grid).
+    builder.junction_band_report lists each junction found with its estimate. USE IT (measured, audit note) for
+    a BTBT current or a forward SRH current at an IN-REGION (lateral) junction, and for a depletion capacitance:
+    DEVSIM's line grading otherwise leaves one irregular "remainder" edge ending on the junction line (0.77 nm
+    next to a 1 nm line on the extended-precision GaN-like diode: +4.9e-3 on its current; with the band -6.1e-4;
+    a Ge Zener's BTBT current +2.3e-2 graded at the same 0.32 nm nominal spacing, +3.1e-3 banded), and on the
+    band the error converges cleanly at second order (Richardson works). It costs 2-6x the nodes. It does NOT
+    help a diffusion-limited forward current, a node-sampled peak rate, z-stacked layer junctions (their
+    interface lines already resolve them; the band is neutral there) or devices without a p-n junction (it
+    then warns and changes nothing). Measured comparison and recommendation: the audit note above."""
 
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
                   extended_precision: Optional[bool] = None, on_chi_temperature: str = "refuse",
-                  exact_geometry=True) -> None:
+                  exact_geometry=True, junction_band=None) -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
                              .format(heterointerface))
@@ -199,6 +218,10 @@ class LayeredDevsimBuilder:
         # byte-identical; the option matters for designs whose mesh is not rectilinear.
         GEO.resolve_policy(exact_geometry)                   # validate at construction
         self.exact_geometry = exact_geometry
+        # v0.15.1 (user decision 2026-11-08, opt-in): a UNIFORM mesh band around every p-n junction
+        # (carriers.junction_mesh; class docstring). None / False (default) = the graded mesh, byte-identical.
+        self.junction_band = JM.resolve_junction_band(junction_band)
+        self.junction_band_report: List[dict] = []           # one entry per junction found (filled at build)
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -386,32 +409,189 @@ class LayeredDevsimBuilder:
         raise ValueError("gate layer '{}' has no meshed non-metal neighbour"
                           .format(layer_name))
 
+    # ---- opt-in junction band (v0.15.1, carriers.junction_mesh) ----
+    _JB_SAMPLES = 2001          # coarse probe samples along a line (the region length / 2000 per step)
+    _JB_ROWS = 5                # probe lines across the region (a junction need not be straight)
+    _JB_REFINE = (101, 3)       # bracket refinement: samples per round, rounds (-> coarse step / 1e6)
+
+    def _probe_doping(self, s, xs, zs) -> np.ndarray:
+        """NetDoping of region spec `s` (its material's net_doping_expr, evaluated by DEVSIM itself so the
+        probe and the device read the same expression) at the tensor points xs x zs: array [len(zs), len(xs)].
+        A throw-away mesh / device, deleted before returning."""
+        tr = self.design.materials.get(s.material).transport
+        if not tr.net_doping_expr:
+            nd = (-1.0 if tr.acceptor else 1.0) * float(tr.n_bg_m3)
+            return np.full((len(zs), len(xs)), nd)
+        mesh, dev = self.mesh_name + "__jprobe", self.device + "__jprobe"
+        big = 2.0 * max(xs[-1] - xs[0], zs[-1] - zs[0])     # ps beyond every gap: no node between lines
+        ds.create_2d_mesh(mesh=mesh)
+        try:
+            for x in xs:
+                ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=float(x), ns=big, ps=big)
+            for z in zs:
+                ds.add_2d_mesh_line(mesh=mesh, dir="y", pos=float(z), ns=big, ps=big)
+            ds.add_2d_region(mesh=mesh, region="p", material=s.material, xl=float(xs[0]), xh=float(xs[-1]),
+                             yl=float(zs[0]), yh=float(zs[-1]), bloat=1e-12)
+            ds.finalize_mesh(mesh=mesh)
+            ds.create_device(mesh=mesh, device=dev)
+            try:
+                ds.node_model(device=dev, region="p", name="NetDoping", equation=tr.net_doping_expr)
+                gx, gz, v = (np.asarray(ds.get_node_model_values(device=dev, region="p", name=nm))
+                             for nm in ("x", "y", "NetDoping"))
+            finally:
+                ds.delete_device(device=dev)
+        finally:
+            ds.delete_mesh(mesh=mesh)
+        out = np.empty((len(zs), len(xs)))
+        ix = np.searchsorted(xs, gx - 1e-6 * (xs[1] - xs[0]))
+        iz = np.searchsorted(zs, gz - 1e-6 * (zs[1] - zs[0]))
+        out[iz, ix] = v
+        return out
+
+    def _region_junctions(self, s, axis: str):
+        """In-region sign changes of NetDoping along `axis` ('x' or 'z') on _JB_ROWS lines across region s:
+        [(position, left_sign, N_left, N_right)], each bracket refined by repeated probes to ~1e-6 of the
+        coarse step and placed at its midpoint (the centre of an undoped sliver, if any)."""
+        lo, hi = (s.x_lo, s.x_hi) if axis == "x" else (s.z_lo, s.z_hi)
+        olo, ohi = (s.z_lo, s.z_hi) if axis == "x" else (s.x_lo, s.x_hi)
+        rows = olo + (ohi - olo) * (np.arange(self._JB_ROWS) + 0.5) / self._JB_ROWS
+        line = np.linspace(lo, hi, self._JB_SAMPLES)
+
+        def probe(along, across):                           # -> [len(across), len(along)]
+            return (self._probe_doping(s, along, across) if axis == "x"
+                    else self._probe_doping(s, across, along).T)
+        coarse = probe(line, rows)
+        found = []
+        for r, row in zip(rows, coarse):
+            for a, b, sgn, n_l, n_r in JM.sign_changes(line, row):
+                n, rounds = self._JB_REFINE
+                pair = np.array([r, r + 1e-3 * (ohi - olo)])
+                for _ in range(rounds):
+                    pts = np.linspace(a, b, n)
+                    vals = probe(pts, pair)[0]
+                    a = max([p for p, v in zip(pts, vals) if v * sgn > 0.0] or [a])
+                    b = min([p for p, v in zip(pts, vals) if v * sgn < 0.0 and p > a] or [b])
+                found.append((0.5 * (a + b), sgn, n_l, n_r))
+        return found
+
+    def _end_doping(self, s, side: str):
+        """(sign, median |N| over the end span) of region s at its z face `side` ('lo' / 'hi'), from a z probe
+        (a constant-doping region: its own sign and n_bg)."""
+        tr = self.design.materials.get(s.material).transport
+        if not tr.net_doping_expr:
+            return (-1.0 if tr.acceptor else 1.0), float(tr.n_bg_m3)
+        zs = np.linspace(s.z_lo, s.z_hi, self._JB_SAMPLES)
+        xs = s.x_lo + (s.x_hi - s.x_lo) * (np.arange(self._JB_ROWS) + 0.5) / self._JB_ROWS
+        col = self._probe_doping(s, xs, zs)[:, self._JB_ROWS // 2]
+        nz = [v for v in (col if side == "lo" else col[::-1]) if v != 0.0]
+        k = next((i for i, v in enumerate(nz) if (v > 0.0) != (nz[0] > 0.0)), len(nz))
+        a = sorted(abs(v) for v in nz[:k])
+        return (1.0 if nz[0] > 0.0 else -1.0), 0.5 * (a[(len(a) - 1) // 2] + a[len(a) // 2])
+
+    def _band_entry(self, axis, regions, pos, sgn_left, n_left, n_right, tr_left, tr_right) -> dict:
+        """One junction's band: the zero-bias abrupt-junction scales (junction_mesh.abrupt_junction_scales) on
+        the doping either side, and the half-width / spacing the band uses (an explicit JunctionBand field
+        wins over the physical default)."""
+        (na, tr_p), (nd, tr_n) = (((n_left, tr_left), (n_right, tr_right)) if sgn_left < 0
+                                  else ((n_right, tr_right), (n_left, tr_left)))
+        B = []
+        for tr in (tr_p, tr_n):
+            bt = _btbt_for_material(getattr(tr, "btbt", None), tr)
+            if bt is not None:
+                from dynameta.carriers import tunneling as _TN
+                B += [p.B_V_per_m for p in _TN._btbt_sets(bt, "junction_band")[0]]
+        sc = JM.abrupt_junction_scales(
+            na, nd, eps_r_p=float(tr_p.eps_static), eps_r_n=float(tr_n.eps_static),
+            n_i_p=float(band_data_at_T(tr_p, transport_temperature_K(tr_p)).n_i_m3),
+            n_i_n=float(band_data_at_T(tr_n, transport_temperature_K(tr_n)).n_i_m3),
+            T_K=transport_temperature_K(tr_p), btbt_B_V_per_m=max(B) if B else None)
+        jb = self.junction_band
+        return dict(axis=axis, regions=tuple(regions), position_m=float(pos), N_A_m3=na, N_D_m3=nd,
+                    V_bi=sc.V_bi, W0_m=sc.W0, E0_V_per_m=sc.E0, peak_width_m=sc.peak_width,
+                    btbt_width_m=sc.btbt_width,
+                    half_width_m=jb.half_width_m if jb.half_width_m is not None else sc.W0,
+                    spacing_m=jb.spacing_m if jb.spacing_m is not None else sc.spacing)
+
+    def _junction_band_lines(self, x_calls, x_fixed, y_calls, y_fixed):
+        """The opt-in junction band (junction_band set): find every p-n junction of the bipolar regions -- the
+        sign changes of an in-region net_doping_expr along x and z, and the z-stacked interfaces whose two
+        bipolar sides have opposite doping (homo- or hetero-junction; an isotype heterointerface gets no band)
+        -- and replace the x / y mesh lines around each by the uniform band of junction_mesh.band_lines.
+        Fills self.junction_band_report; warns (AdvisoryWarning) when the design has no junction."""
+        d = self.design
+        bip = [s for s in self._specs if s.role == "semiconductor"
+               and getattr(d.materials.get(s.material).transport, "physics", None) == "bipolar_dd"]
+        rep = []
+        for s in bip:
+            tr = d.materials.get(s.material).transport
+            if tr.net_doping_expr:
+                for axis in ("x", "z"):
+                    for pos, sgn, n_l, n_r in self._region_junctions(s, axis):
+                        rep.append(self._band_entry(axis, (s.name,), pos, sgn, n_l, n_r, tr, tr))
+        for a in bip:
+            for b in bip:
+                if abs(a.z_hi - b.z_lo) < 1e-15 and min(a.x_hi, b.x_hi) > max(a.x_lo, b.x_lo):
+                    (sa, na), (sb, nb) = self._end_doping(a, "hi"), self._end_doping(b, "lo")
+                    if sa != sb:
+                        tra, trb = (d.materials.get(r.material).transport for r in (a, b))
+                        rep.append(self._band_entry("z", (a.name, b.name), a.z_hi, sa, na, nb, tra, trb))
+        uniq = []                                            # a straight junction is seen on every probe row
+        for e in rep:
+            if not any(u["axis"] == e["axis"] and abs(u["position_m"] - e["position_m"]) <= 1e-3 * e["spacing_m"]
+                       for u in uniq):
+                uniq.append(e)
+        self.junction_band_report = rep = uniq
+        if not rep:
+            warnings.warn("LayeredDevsimBuilder(junction_band=...): no p-n junction found (no sign change of "
+                          "NetDoping in a bipolar_dd region, none across a z-stacked bipolar interface) -- the "
+                          "mesh is the graded one, unchanged.", AdvisoryWarning, stacklevel=3)
+            return x_calls, y_calls
+        out = []
+        for calls, fixed, axis in ((x_calls, x_fixed, "x"), (y_calls, y_fixed, "z")):
+            lines = {}
+            for pos, ns, ps in calls:                        # a repeated line keeps its finer spacing
+                o = lines.get(pos)
+                lines[pos] = (ns, ps) if o is None else (min(o[0], ns), min(o[1], ps))
+            for e in (e for e in rep if e["axis"] == axis):
+                # the default spacing never COARSENS a line the mesh already has ON the junction (the cell mid
+                # line, a layer interface): h = min(physical, that line's ns / ps)
+                hit = [(q, min(v)) for q, v in lines.items() if abs(q - e["position_m"]) <= 1e-3 * e["spacing_m"]]
+                e["line_spacing_m"] = hit[0][1] if hit else None
+                if hit:
+                    e["position_m"] = hit[0][0]                  # band_lines snaps onto that line too
+                    if self.junction_band.spacing_m is None:
+                        e["spacing_m"] = min(e["spacing_m"], hit[0][1])
+            js = [(e["position_m"], e["half_width_m"], e["spacing_m"]) for e in rep if e["axis"] == axis]
+            new = JM.band_lines(lines, fixed, js)
+            out.append([(p,) + tuple(new[p]) for p in sorted(new)])
+        return out[0], out[1]
+
     # ---- mesh build ----
     def build_device(self) -> None:
         d = self.design
         spec = d.mesh_2d
         P = d.unit_cell.period_x_m
         z_iv = d.z_intervals()
-        ds.create_2d_mesh(mesh=self.mesh_name)
-
         # x mesh lines: cell edges + inclusion feature edges + cell midline
         x_lines = {0.0: spec.x_spacing_edge_m, P: spec.x_spacing_edge_m,
                     P / 2.0: spec.x_spacing_feature_mid_m}
+        x_fixed = {0.0, P}                                   # region boundaries (the mid line is not one)
         for L in d.stack.layers:
             for inc in L.inclusions:
                 xlo, xhi, _, _ = inc.shape.bbox_m()
                 x_lines[xlo] = spec.x_spacing_feature_edge_m
                 x_lines[xhi] = spec.x_spacing_feature_edge_m
+                x_fixed |= {xlo, xhi}
         # edge-metal interface line(s) for full-edge contacts (DD grounds + bipolar) -- strip boundaries
         if self._metal_material() is not None:
             for _ln, _sides in self._full_edge_strips().items():
                 if "x_lo" in _sides:
                     x_lines[_EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
+                    x_fixed.add(_EDGE_METAL_W_M)
                 if "x_hi" in _sides:
                     x_lines[P - _EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
-        for pos in sorted(x_lines):
-            ds.add_2d_mesh_line(mesh=self.mesh_name, dir="x", pos=pos,
-                                  ns=x_lines[pos], ps=x_lines[pos])
+                    x_fixed.add(P - _EDGE_METAL_W_M)
+        x_calls = [(pos, x_lines[pos], x_lines[pos]) for pos in sorted(x_lines)]
 
         # y mesh lines: interface-zone refinement over meshed layers
         izone = spec.interface_zone_m
@@ -419,23 +599,28 @@ class LayeredDevsimBuilder:
         # ("<layer>_egnd") shares its layer's z-range (already covered), so drop names not in z_iv.
         meshed_layer_names = sorted({nm for nm in (s.name.split("__incl")[0] for s in self._specs)
                                      if nm in z_iv}, key=lambda nm: z_iv[nm][0])
+        y_calls = []                                         # (pos, ns, ps) in the order they are added
         for nm in meshed_layer_names:
             zlo, zhi = z_iv[nm]
             thk = zhi - zlo
-            ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=zlo,
-                                  ns=spec.interface_ps_m, ps=spec.interface_ps_m)
+            y_calls.append((zlo, spec.interface_ps_m, spec.interface_ps_m))
             zone = min(izone, 0.45 * thk)
             if zone > 0:
-                ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=zlo + zone,
-                                      ns=spec.coarse_ps_m, ps=spec.coarse_ps_m)
-                ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=zhi - zone,
-                                      ns=spec.coarse_ps_m, ps=spec.coarse_ps_m)
+                y_calls.append((zlo + zone, spec.coarse_ps_m, spec.coarse_ps_m))
+                y_calls.append((zhi - zone, spec.coarse_ps_m, spec.coarse_ps_m))
             if thk > 4 * izone:
-                ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=0.5 * (zlo + zhi),
-                                      ns=spec.coarse_ps_m, ps=spec.coarse_ps_m)
+                y_calls.append((0.5 * (zlo + zhi), spec.coarse_ps_m, spec.coarse_ps_m))
         top_z = max(z_iv[nm][1] for nm in meshed_layer_names)
-        ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=top_z,
-                              ns=spec.interface_ps_m, ps=spec.interface_ps_m)
+        y_calls.append((top_z, spec.interface_ps_m, spec.interface_ps_m))
+        if self.junction_band is not None:                   # opt-in; off = the calls above, unchanged
+            y_fixed = {z for nm in meshed_layer_names for z in z_iv[nm]}
+            x_calls, y_calls = self._junction_band_lines(x_calls, x_fixed, y_calls, y_fixed)
+
+        ds.create_2d_mesh(mesh=self.mesh_name)
+        for pos, ns, ps in x_calls:
+            ds.add_2d_mesh_line(mesh=self.mesh_name, dir="x", pos=pos, ns=ns, ps=ps)
+        for pos, ns, ps in y_calls:
+            ds.add_2d_mesh_line(mesh=self.mesh_name, dir="y", pos=pos, ns=ns, ps=ps)
 
         # regions
         for s in self._specs:
