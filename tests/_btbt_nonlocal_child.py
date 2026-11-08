@@ -296,8 +296,8 @@ def sc_jacobian(opts):
 
         def no_dt(*a, **k):
             r = real_rates(*a, **k)
-            if "jac" in r:
-                r["jac"]["dt"] = 0.0 * r["jac"]["dt"]
+            if "jac_t" in r:                                 # the end-point (t) derivative the assembly reads
+                r["jac_t"] = 0.0 * r["jac_t"]
             return r
         NL.path_rates_1d = no_dt
     real = term.assemble

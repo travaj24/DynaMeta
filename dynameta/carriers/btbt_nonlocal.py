@@ -667,40 +667,153 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
 
     x (sorted ascending) [m], psi [V], Ln = (E_Fn - E_C)/kT and Lp = (E_V - E_Fp)/kT at the nodes,
     delta = ln(N_c N_v/n_i^2) - E_g,tun/kT (the statistics-frame offset of f_n), start_ok / end_ok masks.
-    Returns {"paths": Paths, "R": net hole recombination rate density at each path's start [m^-3 s^-1]
-    (< 0 = generation), "R_pre": |grad E_V| C exp(-2 Int kappa) w(l) (>= 0), "pair": f_n (1-f_p) +
-    f_p (1-f_n), "t": end fraction, "length": l}; with derivatives=True also
-    "jac": {"pe", "node", "dR", "dt"} -- dR/dpsi and dt/dpsi at (path pe, node), duplicates to be summed
-    by the caller -- and "dR_dLn_a", "dR_dLn_b", "dR_dLp" per path."""
+    Returns {"paths": Paths (the 1-D walker's), "pathset": the same as a PathSet, "R": net hole
+    recombination rate density at each path's start [m^-3 s^-1] (< 0 = generation), "R_pre":
+    |grad E_V| C exp(-2 Int kappa) w(l) (>= 0), "pair": f_n (1-f_p) + f_p (1-f_n), "t": end fraction,
+    "length": l, and the _rates_core keys (e_nodes, e_w, e_dw)}; with derivatives=True also "jac_R",
+    "jac_t", "dR_dLn", "dR_dLp" (_rates_core) and, for 1-D callers, "jac": {"pe", "node", "dR", "dt"}
+    (the COO union of jac_R and jac_t) and "dR_dLn_a", "dR_dLn_b"."""
     x, psi = np.asarray(x, float), np.asarray(psi, float)
-    Ln, Lp = np.asarray(Ln, float), np.asarray(Lp, float)
     Eg_V = phys.Eg_J / Q_E
     vstar = phys.v_star if phys.process == "phonon" else None
     paths = trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=vstar)
-    P = paths.start.size
-    out = {"paths": paths, "R": np.zeros(P), "R_pre": np.zeros(P), "pair": np.zeros(P),
-           "t": np.zeros(P), "length": np.zeros(P)}
+    ps = _pathset_from_1d(paths)
+    g = nodal_gradient_1d(x, psi)[0]
+    out = _rates_core(ps, psi, g[:, None], _gradient_ops_1d(x), Ln, Lp, phys, delta, max_length_m,
+                      derivatives)
+    out["pathset"] = ps
+    out["paths"] = paths
+    if derivatives:
+        jr, jt = out["jac_R"].tocoo(), out["jac_t"].tocoo()
+        out["jac"] = {"pe": np.concatenate([jr.row, jt.row]).astype(np.int64),
+                      "node": np.concatenate([jr.col, jt.col]).astype(np.int64),
+                      "dR": np.concatenate([jr.data, np.zeros(jt.nnz)]),
+                      "dt": np.concatenate([np.zeros(jr.nnz), jt.data])}
+        s_n = np.asarray(out["dR_dLn"].sum(axis=1)).ravel()
+        tt = out["t"]
+        out["dR_dLn_a"], out["dR_dLn_b"] = s_n * (1.0 - tt), s_n * tt
+    return out
+
+
+@dataclass
+class PathSet:
+    """Generic paths of any dimension, as POINTS joined by straight segments (module doc, section 3).
+    A point is a node or a point on a mesh edge: value = (1 - mu) X[n1] + mu X[n2] of any nodal field X
+    (mu = 0, n2 = n1 at a node). Per path p: its start node, its tunnelling direction (unit, (P, dim)), and
+    end_a / end_b, the global indices of the two points that bracket the path end (v = 1 lies between
+    them, on one straight segment inside one element). Points of a path are contiguous and in path order,
+    the first being the start node (pt_first). Segment s joins point seg_lo[s] to seg_lo[s] + 1, of length
+    seg_L[s]; flags first / end and the phonon phase as in Paths. dsdth / dmudth (2-D, optional): the
+    derivative of each point's path coordinate s and edge coordinate mu with respect to the direction
+    angle (0 at nodes)."""
+    start: np.ndarray
+    direction: np.ndarray
+    end_a: np.ndarray
+    end_b: np.ndarray
+    pt_path: np.ndarray
+    pt_n1: np.ndarray
+    pt_n2: np.ndarray
+    pt_mu: np.ndarray
+    pt_first: np.ndarray
+    seg_path: np.ndarray
+    seg_lo: np.ndarray
+    seg_L: np.ndarray
+    seg_first: np.ndarray
+    seg_end: np.ndarray
+    seg_phase: np.ndarray
+    stats: Dict[str, int] = field(default_factory=dict)
+    pt_s: Optional[np.ndarray] = None
+    pt_dsdth: Optional[np.ndarray] = None
+    pt_dmudth: Optional[np.ndarray] = None
+
+    @property
+    def a(self) -> np.ndarray:
+        return self.pt_n1[self.end_a]
+
+    @property
+    def b(self) -> np.ndarray:
+        return self.pt_n1[self.end_b]
+
+
+def _pathset_from_1d(p: "Paths") -> PathSet:
+    """The 1-D walker's Paths as a PathSet: every point is a node (mu = 0)."""
+    P = p.start.size
+    if P == 0:
+        e, f = np.zeros(0, np.int64), np.zeros(0)
+        return PathSet(e, np.zeros((0, 1)), e, e, e, e, e, f, e.astype(bool), e, e, f, e.astype(bool),
+                       e.astype(bool), e, dict(p.stats))
+    nseg = np.bincount(p.seg_path, minlength=P)
+    npt = nseg + 1
+    off = np.concatenate(([0], np.cumsum(npt)[:-1])) if P else np.zeros(0, np.int64)
+    pt_path = np.repeat(np.arange(P), npt)
+    pt_n = np.empty(int(npt.sum()), np.int64)
+    pt_n[off] = p.start
+    # segment s of path q (local j) has upper point off[q] + j + 1 = node seg_kb[s]
+    j = np.arange(p.seg_path.size) - np.repeat(np.concatenate(([0], np.cumsum(nseg)[:-1])), nseg)
+    hi = np.repeat(off, nseg) + j + 1
+    pt_n[hi] = p.seg_kb
+    first = np.zeros(pt_n.size, bool)
+    first[off] = True
+    end_b = off + npt - 1
+    return PathSet(p.start, p.direction.astype(float)[:, None], end_b - 1, end_b, pt_path, pt_n, pt_n.copy(),
+                   np.zeros(pt_n.size), first, p.seg_path, hi - 1, p.seg_L, p.seg_first, p.seg_end,
+                   p.seg_phase, dict(p.stats))
+
+
+def _gradient_ops_1d(x):
+    """The 1-D nodal gradient (nodal_gradient_1d) as a linear operator: one CSR matrix (N x N)."""
+    import scipy.sparse as sp
+    n = len(x)
+    _, wm, w0, wp = nodal_gradient_1d(x, np.zeros(n))
+    rows = np.concatenate([np.arange(n)] * 3)
+    cols = np.concatenate([np.arange(n) - 1, np.arange(n), np.arange(n) + 1])
+    vals = np.concatenate([wm, w0, wp])
+    keep = (cols >= 0) & (cols < n) & (vals != 0.0)
+    return [sp.csr_matrix((vals[keep], (rows[keep], cols[keep])), shape=(n, n))]
+
+
+def _rates_core(ps: PathSet, psi, gvec, gops, Ln, Lp, phys: NonlocalPhysical, delta: float,
+                max_length_m: float, derivatives: bool) -> dict:
+    """The rate of every path of a PathSet (module doc, sections 2-5), dimension-free. psi, Ln, Lp:
+    nodal arrays; gvec (N, dim): the nodal gradient of psi, gops: its linear operators (one sparse N x N
+    per component, gvec[:, c] = gops[c] @ psi). Returns R, R_pre, pair, t, length, the electron
+    deposition (e_nodes, e_w: (P, 4) -- the end point's weights on the nodes of the two bracketing
+    points) and e_dw (d e_w / dt); with derivatives=True, "jac_R" / "jac_t" (P x N sparse: dR/dpsi,
+    dt/dpsi at fixed direction) and "dR_dLn" (P x N sparse), "dR_dLp" (P,)."""
+    import scipy.sparse as sp
+    psi, Ln, Lp = np.asarray(psi, float), np.asarray(Ln, float), np.asarray(Lp, float)
+    N = psi.size
+    Eg_V = phys.Eg_J / Q_E
+    P = ps.start.size
+    out = {"paths": ps, "R": np.zeros(P), "R_pre": np.zeros(P), "pair": np.zeros(P), "t": np.zeros(P),
+           "length": np.zeros(P), "e_nodes": np.zeros((P, 4), np.int64), "e_w": np.zeros((P, 4)),
+           "e_dw": np.zeros((P, 4))}
     if P == 0:
         if derivatives:
-            e = np.zeros(0)
-            out.update(jac={"pe": e.astype(np.int64), "node": e.astype(np.int64), "dR": e, "dt": e},
-                       dR_dLn_a=e, dR_dLn_b=e, dR_dLp=e)
+            z = sp.csr_matrix((0, N))
+            out.update(jac_R=z, jac_t=z, dR_dLn=z, dR_dLp=np.zeros(0))
         return out
-    sp, i = paths.seg_path, paths.start
-    i_s = i[sp]
-    va = (psi[paths.seg_ka] - psi[i_s]) / Eg_V
-    vb = (psi[paths.seg_kb] - psi[i_s]) / Eg_V
-    va[paths.seg_first] = 0.0                                  # identically (not a variable there)
-    g, wm, w0, wp = nodal_gradient_1d(x, psi)
-    dirs = paths.direction[sp]
-    ra = Eg_V / (dirs * g[paths.seg_ka])                       # ds/dv at the nodes (> 0: walker)
-    rb = Eg_V / (dirs * g[paths.seg_kb])
-    args = (paths.seg_L, paths.seg_end, paths.seg_phase)
+    i, sp_ = ps.start, ps.seg_path
+    n1, n2, mu = ps.pt_n1, ps.pt_n2, ps.pt_mu
+    w1 = 1.0 - mu
+    v_pt = (w1 * psi[n1] + mu * psi[n2] - psi[i[ps.pt_path]]) / Eg_V
+    v_pt[ps.pt_first] = 0.0                                      # identically (not a variable there)
+    gvec = np.asarray(gvec, float)
+    dim = gvec.shape[1]
+    d_pt = ps.direction[ps.pt_path]
+    g_pt = w1[:, None] * gvec[n1] + mu[:, None] * gvec[n2]
+    gd = g_pt[:, 0] * d_pt[:, 0] if dim == 1 else np.sum(g_pt * d_pt, axis=1)
+    r_pt = Eg_V / gd                                             # ds/dv at the points (> 0: walker)
+    lo = ps.seg_lo
+    hi = lo + 1
+    va, vb, ra, rb = v_pt[lo], v_pt[hi], r_pt[lo], r_pt[hi]
+    args = (ps.seg_L, ps.seg_end, ps.seg_phase)
     acc = _segment_accumulators(phys, va, vb, ra, rb, *args)
-    tot = {k: np.bincount(sp, weights=v, minlength=P) for k, v in acc.items() if k != "t"}
-    t = acc["t"][paths.seg_end]                                # one end segment per path, in path order
+    tot = {k: np.bincount(sp_, weights=v, minlength=P) for k, v in acc.items() if k != "t"}
+    t = acc["t"][ps.seg_end]                                     # one end segment per path, in path order
     length = tot["len"]
-    G = np.abs(g[i])
+    gi = gvec[i]
+    G = np.abs(gi[:, 0]) if dim == 1 else np.hypot(gi[:, 0], gi[:, 1])
     if phys.process == "direct":
         K0 = phys.K0
         Q = Q_E * G * phys.Cd0 * K0 / tot["I0"] * np.exp(-2.0 * K0 * tot["I1"])
@@ -713,21 +826,27 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
                 "JC": np.full(P, -2.0 * KC), "len": 0.5 / length}
     w, dw = _taper(length, max_length_m)
     R_pre = Q * w
-    za = Ln[paths.a] * (1.0 - t) + Ln[paths.b] * t + delta    # f_n(l) = sigma(za)
-    zb = -Lp[i]                                                # f_p(0) = sigma(zb)
+    a, b = ps.end_a, ps.end_b
+    Ln_pt = w1 * Ln[n1] + mu * Ln[n2]
+    za = Ln_pt[a] * (1.0 - t) + Ln_pt[b] * t + delta            # f_n(l) = sigma(za)
+    zb = -Lp[i]                                                  # f_p(0) = sigma(zb)
     dfo = np.sinh(0.5 * (za - zb)) / (2.0 * np.cosh(0.5 * za) * np.cosh(0.5 * zb))
     sa, sb = _sigmoid(za), _sigmoid(zb)
     sa_, sb_ = _sigmoid(-za), _sigmoid(-zb)
-    out.update(R=R_pre * dfo, R_pre=R_pre, pair=sa * sb_ + sb * sa_, t=t, length=length)
+    e_nodes = np.stack([n1[a], n2[a], n1[b], n2[b]], axis=1)
+    e_c = np.stack([-w1[a], -mu[a], w1[b], mu[b]], axis=1)       # d e_w / dt
+    e_w = np.stack([(1.0 - t) * w1[a], (1.0 - t) * mu[a], t * w1[b], t * mu[b]], axis=1)
+    out.update(R=R_pre * dfo, R_pre=R_pre, pair=sa * sb_ + sb * sa_, t=t, length=length, e_nodes=e_nodes,
+               e_w=e_w, e_dw=e_c)
     if not derivatives:
         return out
     # --- d/d(accumulator) of R ---
     dR_dacc = {k: dfo * (R_pre * dlnQ[k] + (Q * dw if k == "len" else 0.0)) for k in dlnQ}
-    dR_dacc["t"] = R_pre * sa * sa_ * (Ln[paths.b] - Ln[paths.a])
+    dR_dacc["t"] = R_pre * sa * sa_ * (Ln_pt[b] - Ln_pt[a])
     # --- complex step through every segment closed form (section 4) ---
     h = _CS_H
     dv_a, dv_b, dr_a, dr_b = {}, {}, {}, {}
-    vac = va + 1j * h * (~paths.seg_first)
+    vac = va + 1j * h * (~ps.seg_first)
     z = 0j
     for k, v in _segment_accumulators(phys, vac, vb + z, ra + z, rb + z, *args).items():
         dv_a[k] = v.imag / h
@@ -738,43 +857,41 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
     for k, v in _segment_accumulators(phys, va + z, vb + z, ra + z, rb + 1j * h, *args).items():
         dr_b[k] = v.imag / h
 
-    def contract(dd, keys):
-        return sum(dR_dacc[k][sp] * dd[k] for k in keys)
-    keys = list(dR_dacc)
-    dRa, dRb = contract(dv_a, keys), contract(dv_b, keys)
-    dRra, dRrb = contract(dr_a, keys), contract(dr_b, keys)
-    dTa, dTb = dv_a["t"], dv_b["t"]
-
-    def per_node(sa_seg, sb_seg):
-        """d/d(value) at each segment's upper node (the path nodes k_1..k_m): its b-derivative plus the
-        a-derivative of the next segment of the same path."""
-        o = sb_seg.copy()
-        o[:-1] += np.where(paths.seg_first[1:], 0.0, sa_seg[1:])
-        return o
-    dvR, dvT = per_node(dRa, dRb), per_node(dTa, dTb)
-    drR = per_node(dRra, dRrb)                                 # dR/dr at path nodes k_1..k_m
-    drR0 = dRra[paths.seg_first]                               # dR/dr at the start node (per path)
-    dRdG = dfo * (R_pre / G)                                   # R is proportional to |grad E_V|
-    sg = np.sign(g[i])
-    # r_k = Eg_V/(d g_k): dr_k/dpsi_j = -r_k^2 d (dg_k/dpsi_j)/Eg_V, g_k linear in psi_{k-1}, psi_k, psi_{k+1}
-    kk = np.concatenate([paths.seg_kb, i])
-    rk = np.concatenate([rb, Eg_V / (paths.direction * g[i])])
-    dk = np.concatenate([dirs, paths.direction])
-    cr = np.concatenate([drR, drR0]) * (-rk * rk * dk / Eg_V)
-    pk = np.concatenate([sp, np.arange(P)])
-    pe = np.concatenate([sp, np.arange(P), np.arange(P), np.arange(P), pk, pk, pk])
-    node = np.concatenate([paths.seg_kb, i, i - 1, i + 1, kk - 1, kk, kk + 1])
-    dR = np.concatenate([dvR / Eg_V,
-                         -np.bincount(sp, weights=dvR, minlength=P) / Eg_V + dRdG * sg * w0[i],
-                         dRdG * sg * wm[i], dRdG * sg * wp[i],
-                         cr * wm[kk], cr * w0[kk], cr * wp[kk]])
-    dt = np.concatenate([dvT / Eg_V, -np.bincount(sp, weights=dvT, minlength=P) / Eg_V,
-                         np.zeros(P), np.zeros(P), np.zeros(3 * kk.size)])
-    keep = (node >= 0) & (node < x.size)                       # one-sided ends have a zero weight outside
-    pe, node, dR, dt = pe[keep], node[keep], dR[keep], dt[keep]
+    def contract(dd):
+        return sum(dR_dacc[k][sp_] * dd[k] for k in dR_dacc)
+    M = mu.size
+    dv_pt, dt_pt, dr_pt = np.zeros(M), np.zeros(M), np.zeros(M)
+    np.add.at(dv_pt, lo, contract(dv_a))
+    np.add.at(dv_pt, hi, contract(dv_b))
+    np.add.at(dt_pt, lo, dv_a["t"])
+    np.add.at(dt_pt, hi, dv_b["t"])
+    np.add.at(dr_pt, lo, contract(dr_a))
+    np.add.at(dr_pt, hi, contract(dr_b))
+    dv_pt[ps.pt_first] = 0.0
+    dt_pt[ps.pt_first] = 0.0
+    # point -> node weights W (M x N) and point -> its path's start node E (M x N)
+    rows = np.concatenate([np.arange(M), np.arange(M)])
+    W = sp.csr_matrix((np.concatenate([w1, mu]), (rows, np.concatenate([n1, n2]))), shape=(M, N))
+    E = sp.csr_matrix((np.ones(M), (np.arange(M), i[ps.pt_path])), shape=(M, N))
+    dV = (W - E) / Eg_V                                          # dv_pt/dpsi
+    Spt = sp.csr_matrix((np.ones(M), (ps.pt_path, np.arange(M))), shape=(P, M))   # path <- points
+    # r_pt = Eg/(g_pt . d): dr = -(r^2/Eg) d . W dg,  dg_c = gops[c] dpsi
+    cr = -dr_pt * r_pt * r_pt / Eg_V
+    B = None
+    for c in range(dim):
+        term = sp.diags(cr * d_pt[:, c]) @ W @ gops[c]
+        B = term if B is None else B + term
+    jac_R = Spt @ (sp.diags(dv_pt) @ dV + B)
+    # |grad E_V(0)| = q |g_i|: dG = (g_i/|g_i|) . dg_i
+    Ei = sp.csr_matrix((np.ones(P), (np.arange(P), i)), shape=(P, N))
+    dRdG = dfo * (R_pre / G)
+    for c in range(dim):
+        jac_R = jac_R + sp.diags(dRdG * gi[:, c] / G) @ Ei @ gops[c]
+    jac_t = Spt @ (sp.diags(dt_pt) @ dV)
     s_n = R_pre * sa * sa_
-    out.update(jac={"pe": pe, "node": node, "dR": dR, "dt": dt},
-               dR_dLn_a=s_n * (1.0 - t), dR_dLn_b=s_n * t, dR_dLp=R_pre * sb * sb_)
+    ln_rows = np.repeat(np.arange(P), 4)
+    dR_dLn = sp.csr_matrix(((s_n[:, None] * e_w).ravel(), (ln_rows, e_nodes.ravel())), shape=(P, N))
+    out.update(jac_R=jac_R.tocsr(), jac_t=jac_t.tocsr(), dR_dLn=dR_dLn, dR_dLp=R_pre * sb * sb_)
     return out
 
 
@@ -785,6 +902,63 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
 def _ct():
     from dynameta.carriers import custom_terms
     return custom_terms
+
+
+def _assemble_entries(device: str, region: str, st: dict, res: dict, need_j: bool):
+    """The custom-equation entries (rcv, rv) of one evaluated term (module doc, section 3): +q R V at the
+    start node's hole row, -q R V e_w at the end point's electron rows; the Jacobian from _rates_core's
+    sparse derivatives (dpsi through R and t, the occupancies through dL/dn, dL/dp), duplicates summed
+    before they are handed to DEVSIM."""
+    import scipy.sparse as sp
+    CT = _ct()
+    ps = res["pathset"]
+    P = ps.start.size
+    if P == 0:
+        return [], []
+    perm = st["perm"]
+    i, R, ew, en = ps.start, res["R"], res["e_w"], res["e_nodes"]
+    qv = Q_E * st["vol"][i]
+    rp = CT.node_rows(device, region, _EQ_P, perm[i])
+    re_ = CT.node_rows(device, region, _EQ_N, perm[en.ravel()]).reshape(P, 4)
+    rv_rows = np.concatenate([rp, re_.ravel()])
+    rv_vals = np.concatenate([qv * R, ((-qv * R)[:, None] * ew).ravel()])
+    rv = [x_ for pair in zip(rv_rows.tolist(), rv_vals.tolist()) for x_ in pair]
+    if not need_j:
+        return [], rv
+    cpsi = CT.node_columns(device, region, "Potential", perm)
+    cn = CT.node_columns(device, region, "Electrons", perm)
+    cp = CT.node_columns(device, region, "Holes", perm)
+    R_, C_, V_ = [], [], []
+
+    def emit(pe, cols, dvals, ewfac):
+        """hole row qv dval, electron rows -qv ewfac[:, k] dval (pe: path of each entry)."""
+        R_.append(rp[pe])
+        C_.append(cols)
+        V_.append(qv[pe] * dvals)
+        for k in range(4):
+            R_.append(re_[pe, k])
+            C_.append(cols)
+            V_.append(-qv[pe] * ewfac[pe, k] * dvals)
+    jr = res["jac_R"].tocoo()
+    emit(jr.row, cpsi[jr.col], jr.data, ew)
+    jt = res["jac_t"].tocoo()                                   # d e_w = e_dw dt: -qv R e_dw dt
+    for k in range(4):
+        R_.append(re_[jt.row, k])
+        C_.append(cpsi[jt.col])
+        V_.append(-qv[jt.row] * R[jt.row] * res["e_dw"][jt.row, k] * jt.data)
+    jn = res["dR_dLn"].tocoo()
+    emit(jn.row, cn[jn.col], jn.data * st["dLn"][jn.col], ew)
+    allp = np.arange(P)
+    emit(allp, cp[i], res["dR_dLp"] * st["dLp"][i], ew)
+    rr, cc, vv = np.concatenate(R_), np.concatenate(C_), np.concatenate(V_)
+    n = int(max(rr.max(), cc.max())) + 1
+    m = sp.coo_matrix((vv, (rr, cc)), shape=(n, n)).tocsr()
+    m.sum_duplicates()
+    m = m.tocoo()
+    keep = m.data != 0.0
+    rcv = [x_ for trip in zip(m.row[keep].tolist(), m.col[keep].tolist(), m.data[keep].tolist())
+           for x_ in trip]
+    return rcv, rv
 
 
 _TERM_CLASS = None
@@ -840,11 +1014,12 @@ def _term_class():
                     "vol": nv("NodeVolume")[perm], "delta": delta, "start_ok": start_ok, "end_ok": end_ok}
 
         def evaluate(self, device: str, derivatives: bool = False):
+            """(state, result): result["pathset"] is the PathSet (indices in the state's node order)."""
             st = self.state(device)
             res = path_rates_1d(st["x"], st["psi"], st["Ln"], st["Lp"], self.phys, st["delta"],
                                 self.spec.max_length_m, st["start_ok"], st["end_ok"],
                                 derivatives=derivatives)
-            self.last_stats = dict(res["paths"].stats)
+            self.last_stats = dict(res["pathset"].stats)
             return st, res
 
         def assemble(self, device, what, timemode):
@@ -852,51 +1027,19 @@ def _term_class():
                 return [], []                                  # static term: no charge part
             need_j = what in ("MATRIXONLY", "MATRIXANDRHS")
             st, res = self.evaluate(device, derivatives=need_j)
-            p = res["paths"]
-            if p.start.size == 0:
-                return [], []
-            perm, reg = st["perm"], self.region
-            i, a, b, t, R = p.start, p.a, p.b, res["t"], res["R"]
-            qv = Q_E * st["vol"][i]
-            rp = CT.node_rows(device, reg, _EQ_P, perm[i])
-            ra = CT.node_rows(device, reg, _EQ_N, perm[a])
-            rb = CT.node_rows(device, reg, _EQ_N, perm[b])
-            rv = []
-            for r_, v_ in ((rp, qv * R), (ra, -qv * (1.0 - t) * R), (rb, -qv * t * R)):
-                rv += [x_ for pair in zip(r_.tolist(), v_.tolist()) for x_ in pair]
-            if not need_j:
-                return [], rv
-            jac = res["jac"]
-            pe, nd, dR, dt = jac["pe"], jac["node"], jac["dR"], jac["dt"]
-            cpsi = CT.node_columns(device, reg, "Potential", perm[nd])
-            blocks = [(rp[pe], cpsi, qv[pe] * dR),
-                      (ra[pe], cpsi, -qv[pe] * ((1.0 - t[pe]) * dR - R[pe] * dt)),
-                      (rb[pe], cpsi, -qv[pe] * (t[pe] * dR + R[pe] * dt))]
-            cna = CT.node_columns(device, reg, "Electrons", perm[a])
-            cnb = CT.node_columns(device, reg, "Electrons", perm[b])
-            cph = CT.node_columns(device, reg, "Holes", perm[i])
-            for col, dval in ((cna, res["dR_dLn_a"] * st["dLn"][a]),
-                              (cnb, res["dR_dLn_b"] * st["dLn"][b]),
-                              (cph, res["dR_dLp"] * st["dLp"][i])):
-                blocks += [(rp, col, qv * dval), (ra, col, -qv * (1.0 - t) * dval),
-                           (rb, col, -qv * t * dval)]
-            rcv = []
-            for r_, c_, v_ in blocks:
-                rcv += [x_ for trip in zip(r_.tolist(), c_.tolist(), v_.tolist()) for x_ in trip]
-            return rcv, rv
+            return _assemble_entries(device, self.region, st, res, need_j)
 
         def noise_sources(self, device):
             """One TwoPointSource over every path (module doc, section 5)."""
             from dynameta.carriers.noise_analysis import SourceRow, TwoPointSource
             st, res = self.evaluate(device, derivatives=False)
-            p = res["paths"]
-            perm, reg, t = st["perm"], self.region, res["t"]
-            rate = st["vol"][p.start] * res["R_pre"] * res["pair"]
-            ni, na_, nb_ = perm[p.start], perm[p.a], perm[p.b]
-            return [TwoPointSource(MECHANISM, reg, rate,
-                                   (SourceRow(reg, _EQ_P, np.ones(t.size), ni),
-                                    SourceRow(reg, _EQ_N, -(1.0 - t), na_),
-                                    SourceRow(reg, _EQ_N, -t, nb_)), ni)]
+            ps = res["pathset"]
+            perm, reg = st["perm"], self.region
+            rate = st["vol"][ps.start] * res["R_pre"] * res["pair"]
+            ni = perm[ps.start]
+            rows = [SourceRow(reg, _EQ_P, np.ones(ni.size), ni)]
+            rows += [SourceRow(reg, _EQ_N, -res["e_w"][:, k], perm[res["e_nodes"][:, k]]) for k in range(4)]
+            return [TwoPointSource(MECHANISM, reg, rate, tuple(rows), ni)]
 
     _TERM_CLASS = NonlocalBTBTTerm
     return _TERM_CLASS
@@ -981,12 +1124,12 @@ def btbt_nonlocal_generation(device: str, region: str, name: str = MECHANISM) ->
         raise ValueError("btbt_nonlocal_generation: no live nonlocal BTBT term {!r} on {!r}/{!r}".format(
             name, device, region))
     st, res = term.evaluate(device, derivatives=False)
-    p, perm = res["paths"], st["perm"]
+    p, perm = res["pathset"], st["perm"]
     amt = -res["R"] * st["vol"][p.start]
     Gp = np.zeros(perm.size)
     Gn = np.zeros(perm.size)
     np.add.at(Gp, perm[p.start], amt)
-    np.add.at(Gn, perm[p.a], (1.0 - res["t"]) * amt)
-    np.add.at(Gn, perm[p.b], res["t"] * amt)
+    for k in range(4):
+        np.add.at(Gn, perm[res["e_nodes"][:, k]], res["e_w"][:, k] * amt)
     return {"G_p": Gp, "G_n": Gn, "I_p": Q_E * float(np.sum(Gp)), "I_n": Q_E * float(np.sum(Gn)),
             "R": res["R"], "stats": dict(p.stats), "paths": p}
