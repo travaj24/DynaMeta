@@ -16,6 +16,13 @@ below fails at its setup call (MEASURED by running this file against an export o
       Re Y(1 Hz) == the DC dI/dV at 0 V and at -0.2 V; the term's share of DEVSIM's Jacobian == central
       differences of DEVSIM's residual at -0.2 V, the start's gradient-patch columns included (they carry the
       rotation of the path). Refutation: the Jacobian without the rotation terms fails it.
+  F2  the FD transport under the DEFAULT statistics ('fermi_dirac', v0.15.0) on a DEGENERATE slanted diode (the
+      S2 device with N_c = N_v = 2e21 m^-3: N / N_c = 5, eta up to 3.3): zero current at equilibrium (paths and
+      terminal) to round-off, FDT with the two-point source (same-node prove-out), ssac == DC dI/dV at 0 V and
+      -0.2 V, the Jacobian vs DEVSIM's residual INCLUDING the carrier columns (the FD occupancy derivatives
+      g/n, g/p). Shown failing (@slow): statistics='legacy' (Boltzmann detailed balance on FD transport: the
+      v0.14 zero-bias battery) breaks equilibrium and FDT; Boltzmann occupancy derivatives (g = 1) break the
+      carrier columns and the reverse-bias ssac. L2 runs under the FD default too (fixture param).
   D2  refusals: no numba -> ImportError before anything is registered.
   CORNER (@slow, ~15 min) a MEASUREMENT of the local model's 2-D error on an n+ quadrant corner, with the
       independent check that the far arms reproduce the 1-D planar Zener's local / nonlocal ratio.
@@ -38,9 +45,12 @@ VT = 1.380649e-23 * 300.0 / Q
 EG = 1.12
 
 
-@pytest.fixture(scope="module")
-def lat2d():
-    return C.run_child("lat2d", vr=0.9)
+@pytest.fixture(scope="module", params=[False, True], ids=["boltzmann", "fd_default"])
+def lat2d(request):
+    """Boltzmann, and the FD transport under the DEFAULT statistics ('fermi_dirac' since v0.15.0; the 1-D twin
+    and the local twin built the same way): the L2 gates hold for both. MEASURED (FD): per path 6.2e-13,
+    I/W vs 1-D 7e-15, J - I 1.7e-3 A/m^2 against the 9.9e-3 floor, iterations 17 == 17."""
+    return C.run_child("lat2d", vr=0.9, fd=request.param)
 
 
 def test_l2a_each_2d_path_equals_the_1d_model_on_its_row(lat2d):
@@ -162,6 +172,99 @@ def test_s2_refute_jacobian_without_rotation_terms():
     assert ratio > 10.0
 
 
+# =====================================================================================================
+# F2: the FD default statistics on a DEGENERATE slanted diode
+# =====================================================================================================
+
+def _contact_floor():
+    """Round-off floor of the slanted diode's terminal current [A/m]: 32 ulps of its majority SG flux
+    q mu V_t N / h (h = the 40 nm contact spacing) over the 0.24 um contact (the Z3 pattern)."""
+    return 32.0 * EPS * Q * 0.135 * VT * C.SLANT_N / 40e-9 * C.SLANT_LY
+
+
+@pytest.fixture(scope="module")
+def slantfd_eq():
+    return C.run_child("slant", part="eq", fd=True, n_dos=C.SLANTFD_NDOS, same_node=True)
+
+
+@pytest.fixture(scope="module")
+def slantfd_rev():
+    return C.run_child("slant", part="rev", fd=True, n_dos=C.SLANTFD_NDOS, carriers=True)
+
+
+def test_f2_fd_degenerate_equilibrium_and_fdt(slantfd_eq):
+    """Degenerate (max L = eta >= 2). Paths: 64 eps x 60 (the 1-D N3 budget). Terminal current at 0 V: the
+    contact round-off floor (2.4e-13 A/m). FDT: 1e-4, BTBT >= 50 % of S. MEASURED (FD default): eta 3.3, 760
+    paths, 7.1e-15, J(0) 2.3e-15 A/m, FDT <= 9.9e-11 with BTBT 90 % of S. Legacy: 5.2e-3, -1.9e-4 A/m,
+    2.7e-3 (test_f2_refute_legacy_statistics)."""
+    r = slantfd_eq
+    S, Y = np.array(r["S"]), np.array(r["ReY"])
+    dev = S / (KT4 * Y) - 1.0
+    print("FD slant: eta", r["eta_max"], r["stats"], "db", r["db_ratio"], "J0", r["J0"], "share", r["share_btbt"],
+          "FDT", dev)
+    assert r["eta_max"] >= 2.0 and r["stats"]["paths"] > 300
+    assert r["db_ratio"] <= 64 * EPS * 60
+    assert abs(r["J0"]) <= _contact_floor()
+    assert r["share_btbt"] >= 0.5
+    assert np.max(np.abs(dev)) <= 1e-4
+
+
+def test_f2_fd_proveout_same_node_source_fails_fdt(slantfd_eq):
+    """MEASURED -2.1e-2 (legacy: -1.8e-2): the separated placement is what the FDT needs."""
+    dev = np.array(slantfd_eq["S_same"]) / (KT4 * np.array(slantfd_eq["ReY"])) - 1.0
+    assert abs(dev[0]) > 1e-4
+
+
+def test_f2_fd_ssac_equals_dc_conductance_at_0v(slantfd_eq):
+    """The N8 budget. MEASURED 9.4e-9 (budget 2.3e-6)."""
+    r = slantfd_eq
+    assert abs(r["ReY"][0] / r["G0"] - 1.0) <= _ssac_tol(r, "0")
+
+
+def test_f2_fd_ssac_equals_dc_conductance_at_reverse_bias(slantfd_rev):
+    """MEASURED 1.4e-6 (budget 9.7e-6); with Boltzmann occupancy derivatives -3.5e-3 (@slow refutation)."""
+    r = slantfd_rev
+    assert r["Ip_r"] > 0 and abs(r["In_r"] - r["Ip_r"]) <= 1e-13 * r["Ip_r"]
+    assert abs(r["Yr"][0] / r["Gr"] - 1.0) <= _ssac_tol(r, "r")
+
+
+def test_f2_fd_jacobian_matches_fd_of_devsim_residual_incl_carriers(slantfd_rev):
+    """The S2 columns (potential: start, mid-path, gradient patch, end triangle) plus the carrier columns the
+    FD occupancies enter through: holes at the start, electrons at the end-triangle nodes (relative step
+    1e-6). Budget as S2. MEASURED ratio 9.2e-5 / 1.1e-3 / 3.0e-3 (potential / electrons / holes), relative
+    9e-11 / 1.1e-9 / 3.0e-9; Boltzmann derivatives: 5.4e4 / 6.3e4 (@slow refutation)."""
+    r = slantfd_rev
+    for key in ("recs", "recs_n", "recs_p"):
+        ratio, rel = _jac_ratio(r[key])
+        print("FD slant Jacobian", key, "ratio", ratio, "rel", rel)
+        assert ratio <= 1.0
+    assert abs(r["dR_dtheta"]) > 1e-3 * abs(r["R_k"])
+
+
+@pytest.mark.slow
+def test_f2_refute_legacy_statistics():
+    """~45 s. statistics='legacy' (v0.14: FD transport, Boltzmann detailed balance) on the same degenerate
+    diode: the zero-bias state is not an equilibrium of the FD transport. MEASURED: paths 5.2e-3, terminal
+    -1.9e-4 A/m (8e8 x the floor), FDT 2.7e-3 -- each fails the gate above."""
+    r = C.run_child("slant", part="eq", fd=True, statistics="legacy", n_dos=C.SLANTFD_NDOS)
+    dev = np.array(r["S"]) / (KT4 * np.array(r["ReY"])) - 1.0
+    print("legacy: db", r["db_ratio"], "J0", r["J0"], "FDT", dev)
+    assert r["db_ratio"] > 1e3 * 64 * EPS * 60
+    assert abs(r["J0"]) > 1e3 * _contact_floor()
+    assert np.max(np.abs(dev)) > 1e-3
+
+
+@pytest.mark.slow
+def test_f2_refute_boltzmann_occupancy_derivatives():
+    """~90 s. The term's carrier derivatives with g = 1 (dL/dn = 1/n, the Boltzmann form) on the degenerate
+    diode: the carrier columns and the reverse-bias ssac fail, the potential columns still pass (control).
+    MEASURED: ratios 5.4e4 (electrons) / 6.3e4 (holes), relative 5.4e-2 / 6.3e-2; ssac -3.5e-3."""
+    r = C.run_child("slant", part="rev", fd=True, n_dos=C.SLANTFD_NDOS, carriers=True, boltz_dL=True)
+    assert _jac_ratio(r["recs"])[0] <= 1.0
+    assert _jac_ratio(r["recs_n"])[0] > 10.0 and _jac_ratio(r["recs_p"])[0] > 10.0
+    assert abs(r["Yr"][0] / r["Gr"] - 1.0) > 10.0 * _ssac_tol(r, "r")
+
+
 def test_d2_numba_missing_refuses_before_registration(monkeypatch):
     import dynameta.numba_env as NE
     from dynameta.carriers import btbt_nonlocal as NL
@@ -220,7 +323,8 @@ def _bands(r):
 
 
 @pytest.mark.slow
-def test_corner_local_vs_nonlocal_measurement():
+@pytest.mark.parametrize("fd", [False, True], ids=["boltzmann", "fd_default"])
+def test_corner_local_vs_nonlocal_measurement(fd):
     """MEASUREMENT, ~15 min (890 s on the loaded dev box: two graded-mesh 2-D devices, 12769 nodes, x two
     models, 18 Newton solves each). An n+ quadrant in a p+ square (5e24 / 5e24 m^-3, Si Hurkx A, B in both
     models, 0.5 nm at the junction lines): the local / nonlocal generation ratio next to the corner and on
@@ -233,9 +337,12 @@ def test_corner_local_vs_nonlocal_measurement():
     influence left in the far window, bounded by the change of the ratio from the [c+25, c+35) window to the
     far one (it decays away from the corner), plus 0.5 % for the 1-D ratio's own mesh error at 0.5 nm (it
     moves by <= 0.6 % from 0.5 to 0.1 nm, measured). MEASURED: -0.9 / -0.3 / +1.8 % against budgets
-    3.7 / 4.1 / 9.9 %. The flank window [c+5, c+25) fails the same budget (+9.3 / +7.7 / +20 %)."""
-    r = C.run_child("corner", h=0.5e-9, vr=[0.9, 1.5, 2.5])
-    p = C.run_child("zener", h=0.5e-9, vr=[0.9, 1.5, 2.5], xj=C.CORNER_C, length=C.CORNER_L, check=False)
+    3.7 / 4.1 / 9.9 %. The flank window [c+5, c+25) fails the same budget (+9.3 / +7.7 / +20 %).
+    fd_default (the FD transport, default statistics, both devices and the 1-D reference; ~13 min, the FD
+    nonlocal device's equilibrium from the seed takes 186 Newton steps): MEASURED -1.0 / -0.3 / +1.8 % against
+    3.7 / 4.1 / 9.9 %; every ratio within 0.7 % of the Boltzmann run (audit note section 10)."""
+    r = C.run_child("corner", h=0.5e-9, vr=[0.9, 1.5, 2.5], fd=fd, timeout=3600)
+    p = C.run_child("zener", h=0.5e-9, vr=[0.9, 1.5, 2.5], xj=C.CORNER_C, length=C.CORNER_L, check=False, fd=fd)
     m = _bands(r)
     nl = [q for q in r["rows"] if q["kind"] == "nonlocal"]
     lo = [q for q in r["rows"] if q["kind"] == "local"]
