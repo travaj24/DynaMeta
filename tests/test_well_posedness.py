@@ -297,7 +297,23 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
     moved ONE step earlier, to 0.78 V (MEASURED; the last converged step is 0.76 V). The gate walks the 20 mV
     ladder to the FIRST stall and requires it in [0.70, 0.90] V -- the double-precision floor of this
     inversion layer, not a statistics effect -- then checks the same diagnosis there and the jump refutation
-    from the last converged step."""
+    from the last converged step.
+    REVISED 2026-11-08 (Linux CI; docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). Both the stall's walk and
+    the reported ratio are round-off at this floor, so neither may be pinned to one platform's value:
+    (i) WHERE the stalled walk ends is chance (the update along the near-null mode is round-off x 1/sigma_min):
+    Windows stalls at 0.78 V wandering 3e-10..4e-7; Linux (OpenBLAS 0.3.26) converges 0.78 V, stalls at 0.80 V,
+    reaches 4.7e-5 at iteration 13, escapes to 1e3 and ends at 6.5e-2 -- the old last-iterate stall rule gave
+    no diagnosis there. dc_solve._stalled now asks whether ANY iterate came within 1e-2 (MEASURED best 2.7e-10
+    / 4.7e-5). The jump refutation runs 10 iterations (MEASURED >= 1e3 on both platforms: unambiguously far;
+    over 40 its best was 1.9e-2 / 4.5e-2, within 2-5x of the 1e-2 rule). (ii) The true equilibrated ratio is
+    below double resolution (MEASURED 1.6e-17 / 1.9e-17 by gesdd without vectors, 1.6e-17 / 3.7e-17 by inverse
+    iteration on a sparse LU), so the dense SVD returns ITS round-off: 4.4e-16 (2 eps) on Windows, 3.6e-15
+    (16 eps) in WSL and 1.4e-15 on the CI runner (another process history) for the same fixture. A priori: LAPACK's SVD is backward stable, the computed
+    sigma are the exact ones of J_eq + E with ||E||_2 <= p(n) u ||J_eq||_2 (LAPACK Users' Guide 3rd ed. 4.9;
+    p 'a modestly growing function', taken linear: p(n) = 2n), and by Weyl sigma_min(computed)/sigma_max
+    <= ratio_true + p(n) u = n eps (1.8e-13 for the 804 unknowns): that is the gate (was 1e-15, MEASURED
+    0.002 / 0.02 of the new bound). It still sits 5.6x below NEAR_SINGULAR (1e-12) and 130x below the 0.30 V
+    ratio; picking s[-2] (an off-by-one: 6.0e-7) or a well-conditioned block fails it."""
     from dynameta.carriers import dc_solve as DC
     from dynameta.carriers import well_posedness as WP
     dev = "wp_mos"
@@ -317,10 +333,11 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
             if k == 15:
                 d30 = WP.diagnose_singular(dev)
         assert e is not None and 0.70 <= v_stall <= 0.90, v_stall
+        n_dof = WP._assemble()[0].shape[0]                 # the unknowns of the diagnosed Jacobian (804)
         bend(1.2)                                           # DEVSIM restored the last converged state
         with pytest.raises(devsim.error) as e_jump:
             with W.quiet():
-                DC.solve_dc(dev, rel_tol=1e-7, max_iter=40)
+                DC.solve_dc(dev, rel_tol=1e-7, max_iter=10)
     finally:
         W.drop(dev)
     assert str(e_jump.value).startswith("Convergence failure!") and "sigma_min" not in str(e_jump.value)
@@ -329,7 +346,7 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
     assert "mode in Electrons" in msg
     assert "physics_bipolar_dd.setup_quasi_equilibrium_carrier" in msg     # the remedy is named (v0.15 4.4.3)
     ratio = float(msg.split("sigma_min/sigma_max = ")[1].split(")")[0])
-    assert ratio <= 1e-15
+    assert ratio <= n_dof * EPS, (ratio, n_dof)          # the SVD's backward-error floor (docstring (ii))
     assert "near-singular" not in d30 and "mode in Electrons" in d30
 
 

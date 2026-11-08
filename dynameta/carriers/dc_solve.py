@@ -170,8 +170,16 @@ def solve_dc(device: str, *, method: str = "newton",
     well_posedness.ensure_dc_well_posed (cached per equation-set fingerprint), which raises
     IllPosedDCError (a ValueError) for an EXACTLY singular DC problem -- a floating body, a pure-Neumann
     potential -- instead of letting round-off pick the answer. A Newton failure that STALLED (ran out of
-    iterations close to a solution) is re-raised as devsim.error with the conditioning diagnosis
-    (well_posedness.diagnose_singular: "near-singular DC Jacobian ... mode in Electrons ...") appended."""
+    iterations after some iterate came within 1e-2 of a solution) is re-raised as devsim.error with the conditioning diagnosis
+    (well_posedness.diagnose_singular: "near-singular DC Jacobian ... mode in Electrons ...") appended.
+
+    A RELATIVE TEST ON A ZERO UNKNOWN (v0.15, 2026-11-08). DEVSIM's relative update is |dx| / (|x| + 1e-10),
+    so for an unknown that is ~0 -- a circuit source current at an equilibrium bias, a potential that is 0
+    at a node by symmetry -- it is the absolute test |dx| < rel_tol x 1e-10, which the round-off of a
+    converged update may never meet; whether the solve exits then depends on the last bits (BLAS build,
+    CPU). The failure message lists every unmet test INCLUDING the circuit, tags such entries with the
+    bound |x| <= ... (_unmet_tests), and, when they are all of that kind, explains it (ZERO_UNKNOWN_NOTE)
+    instead of running the conditioning diagnosis."""
     if method == "newton":
         if abs_tol is None:
             abs_tol = default_abs_tol()
@@ -240,9 +248,15 @@ def solve_dc(device: str, *, method: str = "newton",
     raise ValueError("unknown dc solve method: {!r}".format(method))
 
 
-# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and ended
-# close to a solution -- the near-floating signature: the relative update wanders at 1e-6..1e-2
-# (MOS inversion at 0.80 V, tests/test_well_posedness.py) -- not when it diverged or aborted early.
+# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and CAME
+# close to a solution (some iterate's relative update < _STALL_REL) -- the near-floating signature -- not
+# when it diverged or aborted early. The BEST iterate, not the last: along a near-null mode the update is
+# round-off amplified by 1/sigma_min (u / 1.7e-17 ~ 6 for the MOS inversion layer at 0.78-0.80 V,
+# tests/test_well_posedness.py), so where the walk ends is chance -- MEASURED 2026-11-08 on the same
+# fixture: Windows wanders 3e-10..4e-7 to the end; Linux (OpenBLAS 0.3.26 / glibc) reaches 4.7e-5 at
+# iteration 13, then escapes to 1e3 and ends at 6.5e-2, which the old last-iterate rule called "not a
+# stall" (no diagnosis). A run that never got within 1e-2 (a 0.76 -> 1.2 V jump: best 1.9e-2 / 4.5e-2
+# over 40 iterations, >= 1e3 over its first 10) is not one.
 _STALL_REL = 1e-2
 
 
@@ -250,14 +264,16 @@ def _stalled(info, max_iter) -> bool:
     its = info.get("iterations") or ()
     if len(its) < max_iter:
         return False
-    last = [d.get("relative_error", np.inf) for d in its[-1].get("devices", ())]
-    return bool(last) and max(last) < _STALL_REL
+    best = [max((d.get("relative_error", np.inf) for d in it.get("devices", ())), default=np.inf)
+            for it in its]
+    return min(best) < _STALL_REL
 
 
 def _newton(device, abs_tol, rel_tol, max_iter):
     """The coupled DC Newton: the well-posedness check, then DEVSIM's solve with info=True (it then
     REPORTS non-convergence instead of raising; the device state is restored either way), re-raised
-    as devsim.error -- with the near-singular diagnosis appended when the failure is a stall."""
+    as devsim.error -- with the near-singular diagnosis appended when the failure is a stall, or the
+    zero-unknown explanation (ZERO_UNKNOWN_NOTE) when every unmet test is a relative test on a ~0 unknown."""
     WP.ensure_dc_well_posed()
     from dynameta.carriers.physics_traps import kinetic_dc_form
     with kinetic_dc_form():                 # v0.15: kinetic trap rows in their linear DC form (no-op without)
@@ -266,24 +282,72 @@ def _newton(device, abs_tol, rel_tol, max_iter):
     if isinstance(info, dict) and not info.get("converged", True):
         msg = ("Convergence failure! (solve_dc: {} Newton iterations, absolute_error={:.4g}, "
                "relative_error={:.4g})".format(len(info.get("iterations") or ()), abs_tol, rel_tol))
+        bad = _unmet_tests(info, abs_tol, rel_tol)
         msg += _unconverged(info, abs_tol, rel_tol)
-        if _stalled(info, max_iter):
+        if bad and all(b[3] is not None for b in bad):
+            # not a conditioning problem: the dense SVD would only blame whatever weakly pinned mode the
+            # device happens to have (2026-11-08: "mode in Holes" for a circuit-current floor)
+            msg += "\n" + ZERO_UNKNOWN_NOTE
+        elif _stalled(info, max_iter):
             msg += "\n" + WP.diagnose_singular()
         raise ds.error(msg)
 
 
-def _unconverged(info, abs_tol, rel_tol) -> str:
-    """'; unconverged at the last iteration: dev/region/eq (abs a, rel r), ...' -- names what holds
-    the joint Newton back (it may be ANOTHER live device: DEVSIM solves them all together)."""
+# DEVSIM's relative update is |dx| / (|x| + 1e-10) (module comment above), so for an unknown with |x| <~ 1e-10
+# the "relative" test is the ABSOLUTE test |dx| < relative_error * 1e-10, which round-off need not ever meet.
+DEVSIM_REL_REGULARIZER = 1e-10
+ZERO_UNKNOWN_NOTE = (
+    "Every unmet test is DEVSIM's RELATIVE test |dx| / (|x| + 1e-10) on an unknown that is ~0 (|x| <= 1e-10 at "
+    "its worst node, bounded from the reported errors), where it is the absolute test |dx| < relative_error x "
+    "1e-10 and the round-off of the converged update may never meet it -- Newton then wanders at that floor "
+    "and the exit is decided by the last bits of the arithmetic (it differs between BLAS builds / CPUs). "
+    "Typical: a circuit source current at an equilibrium (zero-current) bias; a potential that is 0 at a node "
+    "by symmetry. Every other test is met. Remedies: solve at a bias / reference away from the zero; or pass "
+    "a relative_error above the reported floor and check the OTHER tests at the accepted iteration yourself "
+    "(devsim.solve(info=True); validation/devsim_noise.solve_zero_current does this for a circuit at zero "
+    "current); or, for a circuit current, park the branch with a parallel DC current source.")
+
+
+def _unmet_tests(info, abs_tol, rel_tol) -> list:
+    """[(label, abs, rel, zero_bound)] for every test unmet at the last iteration of a failed DEVSIM
+    solve: each device equation, and the CIRCUIT (DEVSIM tests it too and it can be the only one left).
+    zero_bound is set when the entry is a relative test on a ~0 unknown -- its absolute test met, its
+    relative one not, and |x| at its worst-relative node provably <= DEVSIM_REL_REGULARIZER: since
+    rel = |dx_r| / (|x_r| + 1e-10) with |dx_r| <= abs, |x_r| <= abs / rel - 1e-10 -- else None."""
     its = info.get("iterations") or ()
-    bad = []
-    for dv in (its[-1].get("devices", ()) if its else ()):
+    if not its:
+        return []
+    entries = []
+    for dv in its[-1].get("devices", ()):
         for rg in dv.get("regions", ()):
             for eq in rg.get("equations", ()):
-                a, r = eq.get("absolute_error", 0.0), eq.get("relative_error", 0.0)
-                if not (a < abs_tol and r < rel_tol):
-                    bad.append("{}/{}/{} (abs {:.3g}, rel {:.3g})".format(
-                        dv.get("name"), rg.get("name"), eq.get("name"), a, r))
+                entries.append(("{}/{}/{}".format(dv.get("name"), rg.get("name"), eq.get("name")),
+                                eq.get("absolute_error", 0.0), eq.get("relative_error", 0.0)))
+    cir = its[-1].get("circuit")
+    if cir:
+        entries.append(("circuit", cir.get("absolute_error", 0.0), cir.get("relative_error", 0.0)))
+    bad = []
+    for label, a, r in entries:
+        if a < abs_tol and r < rel_tol:
+            continue
+        bound = None
+        if a < abs_tol and r > 0.0:
+            b = max(a / r - DEVSIM_REL_REGULARIZER, 0.0)
+            if b <= DEVSIM_REL_REGULARIZER:
+                bound = b
+        bad.append((label, a, r, bound))
+    return bad
+
+
+def _unconverged(info, abs_tol, rel_tol) -> str:
+    """'; unconverged at the last iteration: dev/region/eq (abs a, rel r), ..., circuit (...)' -- names
+    what holds the joint Newton back (it may be ANOTHER live device: DEVSIM solves them all together, or
+    the circuit: v0.15 2026-11-08, which this list used to leave out). A relative test on a ~0 unknown is
+    tagged with the bound on |x| (_unmet_tests)."""
+    bad = []
+    for label, a, r, bound in _unmet_tests(info, abs_tol, rel_tol):
+        tag = "" if bound is None else ", relative test on a ~0 unknown: |x| <= {:.1e}".format(bound)
+        bad.append("{} (abs {:.3g}, rel {:.3g}{})".format(label, a, r, tag))
     return ("; unconverged at the last iteration: " + ", ".join(bad)) if bad else ""
 
 

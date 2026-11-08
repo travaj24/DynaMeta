@@ -54,6 +54,37 @@ def _quiet():
     return V.quiet()
 
 
+# The frozen-carrier POISSON presolve of build_2d (2026-11-08, PR #36 CI). Its seed is locally neutral, so the
+# presolve is a Laplace solve between the two contacts: psi is linear in x, and on the symmetric 2-D devices
+# (+-N, the junction or the slant centre at the middle) a whole column of nodes solves to psi = 0 (+- 9e-17 V
+# of round-off; the slanted diode: the 25 nodes at x = 0.6 um). DEVSIM's relative test |dpsi| / (|psi| + 1e-10)
+# is then an ABSOLUTE test |dpsi| < relative_error * 1e-10 there -- 1e-18 V at the old relative_error = 1e-8,
+# 1/100 ulp of the 0.18 V contact potential and BELOW the round-off of the converged update at those nodes
+# (MEASURED 1.3-3.5e-8 relative = 1.3-3.5e-18 V). The old presolve exited only when the last bits fell under
+# it: 7 / 8 iterations with WSL's OpenBLAS Haswell kernel / on Windows, "Convergence failure!" after 100 with
+# the Sandybridge / Nehalem kernels (OPENBLAS_CORETYPE) and on the CI runner; the lateral Zener's took 94 of
+# its 100 there. PRESOLVE_REL puts the relative test above that floor with the house 1024-ulp margin
+# (dc_solve.ABS_TOL_ULPS): 1024 u max|psi| / 1e-10 = 2.1e-4 for the 0.18 V slant; 1e-3 covers |psi| <= 0.88 V.
+# It is still only the exit test of a quadratically converging Laplace solve (MEASURED: max |dpsi| 2.5e-2 ->
+# 7e-16 V in the step that passes it), and only the coupled Newton's starting point; that Newton keeps its
+# own criteria. The absolute test stays 1e10: DEVSIM applies ONE absolute_error to every live device, and a
+# live drift-diffusion device's is a density update (an absolute 1e-12 V presolve failed exactly that way in
+# a two-device scenario). The 1-D build_zener presolve keeps relative 1e-8: its psi = 0 node exits at
+# 5.7e-11 (MEASURED, Sandybridge; 175x margin), and its gates are pinned on its exact states.
+PRESOLVE_ABS, PRESOLVE_REL = 1e10, 1e-3
+
+
+def _poisson_presolve(dev):
+    """Frozen-carrier Poisson solve of `dev` (its continuity equations dropped, then re-applied)."""
+    ds = _ds()
+    from dynameta.carriers import eq_registry as _R
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.delete_by_name(dev, ceq)
+    ds.solve(type="dc", absolute_error=PRESOLVE_ABS, relative_error=PRESOLVE_REL, maximum_iterations=100)
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.reapply_by_name(dev, ceq)
+
+
 # =====================================================================================================
 # devices
 # =====================================================================================================
@@ -531,11 +562,7 @@ def build_2d(dev, xlines, ylines, doping, *, n_i, tau, mu=(0.135, 0.048), circui
             ds.set_node_values(device=dev, region="b", name=v,
                                values=ds.get_node_model_values(device=dev, region="b", name=m))
         if presolve:
-            for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
-                _R.delete_by_name(dev, ceq)
-            ds.solve(type="dc", absolute_error=1e10, relative_error=1e-8, maximum_iterations=100)
-            for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
-                _R.reapply_by_name(dev, ceq)
+            _poisson_presolve(dev)
     return dev
 
 

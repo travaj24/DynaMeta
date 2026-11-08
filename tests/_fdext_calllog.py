@@ -13,14 +13,25 @@ It intercepts every DEVSIM model-, equation-, parameter- and solution-defining c
 log. The gate hashes it and compares to the digest recorded on 06b9ade: equal digests mean the legacy
 definition is character-for-character unchanged. No solve, no circuit.
 
+CANONICAL FORM (2026-11-08). By default the log is recorded inside tests/_cr_libm.correctly_rounded(): every
+math / numpy transcendental the physics calls returns its correctly rounded value, so the log -- and its
+digest -- no longer depends on which C library rounded a hard case (the Windows UCRT and glibc differ in
+the last digit of one interface-trap n1: docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). Everything
+else is still recorded bit for bit. canonical=False records with the platform's own libm (the raw log
+the pre-2026-11-08 digest was taken of).
+
 Re-record (only on an intended change of the legacy definition):
     cd <a checkout of the reference code> && PYTHONPATH=. python <this file>
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import re
 import sys
+
+import _cr_libm
 
 _RECORDED = ("node_model", "edge_model", "element_model", "contact_node_model", "equation",
              "contact_equation", "set_parameter", "node_solution", "edge_from_node_model",
@@ -44,10 +55,16 @@ def _tensor_2d(ds, mesh, n=3, L=6e-9):
     ds.add_gmsh_region(mesh=mesh, gmsh_name="r", region="r", material="Si")
 
 
-def record_call_log(tag="fdcl", **region_kw):
+def record_call_log(tag="fdcl", canonical=True, **region_kw):
     """The ordered call log of the two legacy fixtures (devices <tag>_1d / <tag>_2d, deleted afterwards).
-    `region_kw` are extra setup_bipolar_region keywords for BOTH fixtures (the gate passes statistics=None,
-    which must give the same log)."""
+    `region_kw` are extra setup_bipolar_region keywords for BOTH fixtures (the gate passes
+    statistics='legacy'). canonical=True (default): recorded with correctly rounded transcendentals (module
+    docstring); False: with the platform's libm."""
+    with (_cr_libm.correctly_rounded() if canonical else contextlib.nullcontext()):
+        return _record(tag, **region_kw)
+
+
+def _record(tag, **region_kw):
     import warnings
     from dynameta.carriers.devsim_env import import_devsim
     from dynameta.carriers import eq_registry as _R
@@ -128,6 +145,14 @@ def record_call_log(tag="fdcl", **region_kw):
 
 def digest(log) -> str:
     return hashlib.sha256(json.dumps(log, sort_keys=False).encode("utf-8")).hexdigest()
+
+
+_NUMBER = re.compile(r"(?<![A-Za-z_0-9.])(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
+
+
+def skeleton(log):
+    """The log with every numeric literal replaced by '#': what the libm choice cannot change."""
+    return [[name, [[k, _NUMBER.sub("#", v)] for k, v in kw]] for name, kw in log]
 
 
 if __name__ == "__main__":                                    # pragma: no cover - re-record helper

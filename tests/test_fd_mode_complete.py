@@ -284,21 +284,42 @@ def test_n_non_degenerate_limit_equals_legacy(opts):
 # shifted built-in SRH level, charged + neutral bulk levels of all three energy references, a BTBT TUPLE, an
 # SiO2 region with interface traps; and a 2-D BGN slab with one BTBT set), RECORDED on 06b9ade (the commit this
 # work was cut from) before any edit; this tree gives the same log (MEASURED: the JSON logs compare equal).
-_FDEXT_CALLLOG_DIGEST = "dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49"
+# RE-RECORDED 2026-11-08 as the CANONICAL log (correctly rounded transcendentals, tests/_cr_libm.py), again on
+# an export of 06b9ade: 71a3219d... on Windows AND Linux, = this tree's on both. The pre-2026-11-08 digest
+# dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49 was of the raw Windows-UCRT log (06b9ade and
+# this tree reproduce it there; glibc gives the canonical one raw): docs/audit/2026-11-08-v0.15-linux-ci-exactness.md.
+_FDEXT_CALLLOG_DIGEST = "71a3219d99b19df76013665cfe42c7a38e2157464c6a9ab7108526c68616a360"
 
 
 def test_d_legacy_statistics_definition_is_byte_identical():
     """GATE D (REVISED 2026-11-07 for the v0.15.0 default change). statistics='legacy' -- the v0.14 default,
     kept reachable explicitly -- reproduces the recorded digest of every legacy path (recorded on 06b9ade, 501
     calls) character-for-character; the DEFAULT (statistics unset) now equals statistics='fermi_dirac' and
-    differs from it (the intended change: docs/audit/2026-11-06-v0.15.0-release.md, decision (a))."""
+    differs from it (the intended change: docs/audit/2026-11-06-v0.15.0-release.md, decision (a)).
+    REVISED 2026-11-08 (Linux CI): the digest was of repr() of floats some of which pass through a C-library
+    transcendental, whose last bit IEEE-754 leaves open. The raw logs of Windows (UCRT) and Linux (glibc 2.39)
+    differ in ONE literal, interface-trap bin 14's n1 = n_i exp(-7.384693350077327): 6206809661957.206 (UCRT,
+    0.510 ulp from exact) vs ...205 (glibc, 0.490 ulp: correctly rounded), 12 occurrences in 9 calls (MEASURED;
+    the skeletons with numbers masked are equal). The log is now recorded in its CANONICAL form
+    (tests/_cr_libm.py: math / numpy exp, log, log10, log2, expm1, log1p, power correctly rounded through
+    decimal at 60 digits; the other transcendentals refused), a platform-independent function of the code that
+    still pins every IEEE operation bit for bit. STILL BITES (MEASURED on Windows and Linux, canonical):
+    (a) n1 = n_i (3 exp(e)) / 3 instead of n_i exp(e) -- one extra rounding, mathematically equal: 370 literals
+    move by 1-2 ulps, the skeleton is unchanged -- changes the digest (a tolerance on the literals would not
+    see it); (b) the FD reference densities in the legacy SRH string (srh_reference_densities fd=True) change
+    it. NOT COVERED: the
+    C pow() behind the ** operator, which cannot be intercepted; the fixture reaches it in import-time preset
+    constants (tunneling.py: 100.0 ** -P, E_J ** 1.5; constants.py C ** 2; bipolar_options.py x ** (1/3)) and
+    in fd_potential_shift (physics_bipolar_dd.py: s ** 3), all bitwise equal on UCRT and glibc (MEASURED: the
+    raw logs differ only in the exp literal above)."""
     import _fdext_calllog as CL
     import devsim  # noqa: F401
     log = CL.record_call_log(statistics="legacy")
     assert len(log) == 501 and CL.digest(log) == _FDEXT_CALLLOG_DIGEST
-    default = CL.record_call_log()
-    assert default == CL.record_call_log(statistics="fermi_dirac")
-    assert CL.digest(default) != _FDEXT_CALLLOG_DIGEST
+    # default vs explicit FD: two logs of ONE process (one libm), compared bitwise -- platform-stable raw
+    default = CL.record_call_log(canonical=False)
+    assert default == CL.record_call_log(statistics="fermi_dirac", canonical=False)
+    assert CL.skeleton(default) != CL.skeleton(log)              # differs from legacy in its TEXT, not by libm
 
 
 def test_d_kernels_default_strings_unchanged_and_fd_guards():
