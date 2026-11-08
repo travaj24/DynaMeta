@@ -597,6 +597,11 @@ jobs:
     # is its own interpreter, so DEVSIM's joint all-live-devices Newton never spans workers; the
     # devsim_isolated children and the child-process cases start their own interpreters as before.
     # 2 workers on the 4-vCPU runner leave room for those children. Re-measure on the first run.
+    # + tests/test_devsim_junction_band.py (v0.15.1 opt-in junction mesh band, LayeredDevsimBuilder(junction_band=),
+    #   2026-11-08): 60 s serial MEASURED on the Windows dev box (15 fast tests; the longest is the GaN-like 1-D
+    #   extended-precision twin gate, 21 s; one devsim_isolated child ~6 s). Its one @slow 2-D extended GaN gate
+    #   (A2, 88 s MEASURED) runs in the nightly `-m slow` step. The devsim-free half, tests/test_junction_mesh.py
+    #   (10 tests, < 1 s), runs on every `test` leg.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -634,7 +639,8 @@ jobs:
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
             tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
             tests/test_devsim_noise_method.py tests/test_quasi_equilibrium.py tests/test_devsim_btbt_resolution.py \
-            tests/test_trap_noise.py tests/test_fd_mode_complete.py tests/test_btbt_nonlocal_2d.py
+            tests/test_trap_noise.py tests/test_fd_mode_complete.py tests/test_btbt_nonlocal_2d.py \
+            tests/test_devsim_junction_band.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
