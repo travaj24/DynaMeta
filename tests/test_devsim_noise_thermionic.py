@@ -161,7 +161,7 @@ def test_isotype_heterojunction_obeys_the_coth_law_under_bias():
     OLD CODE: S misses the oracle by -1.0 (the bulk share only, ~1e-7)."""
     dev = V.hetero_isotype_1d(astar_scale=1e-6)
     VT = KT / QE
-    G0 = V.dc_conductance(0.0, V.ISO_AE, dv=1e-4)
+    G0 = V.dc_conductance(0.0, V.ISO_AE, dv=1e-4, zero_current=True)    # V = 0: the circuit test is ill-posed
     eps0 = _bulk_resistance(dev) * G0
     assert eps0 < 1e-3
     pv = np.asarray(ds.get_interface_model_values(device=dev, interface="jn", name="jn_HJn_pair"))
@@ -184,6 +184,53 @@ def test_isotype_heterojunction_obeys_the_coth_law_under_bias():
             assert float(_te(sn)[0] / sn.S[0]) > 0.999
 
 
+def test_zero_current_circuit_floor_is_named_not_blamed_on_the_jacobian():
+    """The isotype device at ZERO bias (2026-11-08, PR #36's Linux CI): its source current is round-off, so
+    DEVSIM's circuit test |dI| / (|I| + 1e-10) has a floor of 1e-6 .. 7e-5 (MEASURED) that the device
+    equations (4e-15) do not share; at the default relative 1e-5 solve_dc exits or not by the last bits
+    (Windows: converged at iteration 8; WSL: 60 iterations, then 'Convergence failure!' with an EMPTY
+    'unconverged' list -- the circuit was left out -- and the dense-SVD 'DC Jacobian conditioning ... mode in
+    Holes' appended, a misdiagnosis). At relative 1e-12 it fails on every platform, deterministically: the
+    message must name the circuit, bound |I| <= 1e-10, give the zero-unknown note, and pay no SVD.
+    validation.devsim_noise.solve_zero_current is the remedy the note names: it converges the same device
+    with the device equations held to 1e-5."""
+    from dynameta.carriers import dc_solve as DC
+    V.hetero_isotype_1d(astar_scale=1e-6)
+    with pytest.raises(devsim.error) as e:
+        with V.quiet():
+            DC.solve_dc("iso1d", rel_tol=1e-12, max_iter=20)
+    msg = str(e.value)
+    assert msg.startswith("Convergence failure!")
+    unmet = msg.split("unconverged at the last iteration: ")[1].split("\n")[0]
+    assert unmet.startswith("circuit (abs") and "relative test on a ~0 unknown" in unmet and "iso1d/" not in unmet
+    assert DC.ZERO_UNKNOWN_NOTE in msg and "sigma_min" not in msg
+    info = V.solve_zero_current(V.ISO_AE)                     # DEVSIM restored the zero-bias state
+    assert max(d["relative_error"] for d in info["iterations"][-1]["devices"]) < 1e-5
+
+
+def test_unmet_tests_bounds_the_unknown_only_when_it_is_provably_zero():
+    """dc_solve._unmet_tests on DEVSIM-shaped info: rel = |dx_r| / (|x_r| + 1e-10) with |dx_r| <= abs gives
+    |x_r| <= abs / rel - 1e-10. The 2-D slanted diode's Laplace presolve (tests/_btbt_nonlocal_child.py,
+    PRESOLVE_ABS_V): Potential abs 1.46e-17 V, rel 1.46e-7 -> |psi| <= 0 at the worst node (a psi = 0
+    column); an ordinary unconverged potential (abs 1e-6, rel 1e-3 -> |psi| <= 1e-3) and an unmet ABSOLUTE
+    test are NOT tagged, and a met test is not listed."""
+    from dynameta.carriers import dc_solve as DC
+
+    def info(eqs, circuit=None):
+        it = {"devices": [{"name": "d", "regions": [{"name": "r", "equations": [
+            {"name": n, "absolute_error": a, "relative_error": r} for n, a, r in eqs]}]}]}
+        if circuit is not None:
+            it["circuit"] = {"absolute_error": circuit[0], "relative_error": circuit[1]}
+        return {"converged": False, "iterations": [it]}
+
+    bad = DC._unmet_tests(info([("PotentialEquation", 1.46e-17, 1.46e-7)]), 1e10, 1e-8)
+    assert len(bad) == 1 and bad[0][0] == "d/r/PotentialEquation" and bad[0][3] == pytest.approx(0.0, abs=1e-16)
+    assert DC._unmet_tests(info([("PotentialEquation", 1e-6, 1e-3)]), 1e10, 1e-8)[0][3] is None
+    assert DC._unmet_tests(info([("ElectronContinuityEquation", 1e12, 1e-15)]), 1e10, 1e-8)[0][3] is None
+    bad = DC._unmet_tests(info([("PotentialEquation", 1e-20, 1e-12)], circuit=(4.3e-15, 4.3e-5)), 1e10, 1e-5)
+    assert [b[0] for b in bad] == ["circuit"] and bad[0][3] <= 1e-10
+
+
 # =====================================================================================================
 # T0: the per-node area DEVSIM's fluxterm assembly ACTUALLY uses, against the source's own weights
 # =====================================================================================================
@@ -193,9 +240,15 @@ def _assembled_flux_weights(dev, iface, flux_model, var="Electrons", eq=EQ_N):
     its derivatives) set to 1.0 vs 0.0 at the same state, residual difference -(rhs_1 - rhs_0) per region row
     (get_matrix_and_rhs returns rhs = -F). Also a round-off bound per row: both assemblies sum the row's
     other terms identically, so the difference is the unit flux up to the running sum's rounding,
-    <= 16 eps (P_row + |w|) with P_row = Sum_edges |ElectronCurrent| EdgeCouple + |ElectronGeneration|
-    NodeVolume of the node (the magnitude of every term the row adds). DESTRUCTIVE: the flux model stays
-    replaced -- measure last."""
+    <= 16 eps (P_row + |w|) with P_row = Sum_edges |ElectronCurrent EdgeCouple| + |ElectronGeneration
+    NodeVolume| of the node (the magnitude of every term the row adds). The magnitude is of the PRODUCT:
+    devsim_geometry.apply_exact_geometry writes the SIGNED exact EdgeCouple, negative on the non-Delaunay
+    edges of the jittered 3-D stack (MEASURED 1106 of r_lo's and 236 of r_hi's edges; DEVSIM's own couples
+    are unsigned), and the pre-2026-11-08 form |ElectronCurrent| EdgeCouple then summed to a NEGATIVE
+    'magnitude' at a node whose currents are round-off (equilibrium): a negative budget, which an exact 0
+    difference fails (MEASURED on Linux, r_lo node 64 of jitter_exact: P = -3.0e-24, w = code = 0; the sign
+    is the platform's round-off -- docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). DESTRUCTIVE: the
+    flux model stays replaced -- measure last."""
     regs = list(ds.get_region_list(device=dev, interface=iface))
     scale = {}
     for r in regs:
@@ -206,9 +259,9 @@ def _assembled_flux_weights(dev, iface, flux_model, var="Electrons", eq=EQ_N):
         i1 = np.asarray(ds.get_edge_model_values(device=dev, region=r, name="node_index@n1")).astype(int)
         nv = np.asarray(ds.get_node_model_values(device=dev, region=r, name="NodeVolume"))
         gen = np.asarray(ds.get_node_model_values(device=dev, region=r, name="ElectronGeneration"))
-        P = np.abs(gen) * nv
-        np.add.at(P, i0, np.abs(cur) * ec)
-        np.add.at(P, i1, np.abs(cur) * ec)
+        P = np.abs(gen * nv)
+        np.add.at(P, i0, np.abs(cur * ec))
+        np.add.at(P, i1, np.abs(cur * ec))
         scale[r] = P
     out = {}
     for val in ("0.0", "1.0"):

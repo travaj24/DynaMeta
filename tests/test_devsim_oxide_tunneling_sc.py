@@ -285,7 +285,22 @@ def test_o10_noise_fluctuation_dissipation_with_the_tunnel_shot_source(fdt, case
     dropping the source misses by -100 % at low f; the one-sided shot formula S = 2 q |J| is 0 at
     equilibrium (the same -100 %); the 'one-sided sum' 2 q (J_fwd + J_bwd), which drops the Pauli
     partition term, overcounts by +68 % on the degenerate surface (and is right only when non-degenerate:
-    +7e-8 on n_dep, which is why the degenerate case is the gate)."""
+    +7e-8 on n_dep, which is why the degenerate case is the gate).
+    EQUILIBRIUM J (REVISED 2026-11-08; was 'one_sided == 0.0', i.e. J == 0 exactly, which held on Windows and
+    failed on Linux CI with 2q|J| = 5.41e-40: docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). At
+    equilibrium x_s (DEVSIM's activity of the solved n_s) and x_g = (psi_s - phi_c - V_g)/V_t are ONE Fermi
+    level evaluated two ways; J = 0 exactly only when they round to the same double (Windows); on Linux x_s
+    is 1 ulp below x_g (-14.980390283369633 vs ...632, MEASURED) and J = -1.69e-21 A/m^2 = 1.8e-15 J_fwd, the
+    linear response dJ/dx_s (x_s - x_g) to 1 % (the rest: the per-energy roundings of x - eps/kT). Detailed balance gives the a-priori bound instead: with a = x - eps/kT and
+    N = kT softplus(a), |N(a_s) - N(a_g)| <= N |a_s - a_g| (logistic <= softplus), |a_s - a_g| <= |dx| +
+    2 eps A (the two roundings of x - eps/kT, A = max |a| <= |x_s| + eps_max/kT), each N to 4 eps (logaddexp +
+    the kT product), so |J| <= max(J_fwd, J_bwd) (dx_max + 2 eps A) + 4 eps (J_fwd + J_bwd), where
+    dx_max = re (1 + (|psi_s| + |phi_c| + |V_g|)/V_t) is the DC solve's relative tolerance (re = 1e-12) carried
+    to x (dx_max = 6.8e-11 n_dep / 8.5e-11 n_acc; MEASURED |dx| <= 1.8e-15, |J| <= 2.6e-5 of the bound). The
+    refutation then reads: the one-sided formula is -100 % to 3.4e-11 (n_dep) / 7.2e-11 (n_acc). The bound
+    still BITES on a detailed-balance defect (MEASURED with the kernel at the n_dep state): a 1e-9 Fermi split
+    at 'equilibrium' gives |J| / J_fwd = 1.0e-9, 15x the bound's 6.8e-11; a 10 % heavier supply mass on the
+    gate side gives 0.10."""
     r = fdt[case]
     S, G = np.array(r["S"]), np.array(r["G"])
     assert np.all(G > 0.0)
@@ -295,8 +310,16 @@ def test_o10_noise_fluctuation_dissipation_with_the_tunnel_shot_source(fdt, case
     assert t[0] / S[0] > 0.99
     dropped = (S - t) / (4 * KB * 300.0 * G) - 1.0
     assert dropped[0] < -0.99
+    dx = r["x_s"] - r["x_g"]
+    dx_max = r["re_dc"] * (1.0 + abs(r["psi_s_over_Vt"]) + abs(r["phi_c_over_Vt"]) + abs(r["V_g_over_Vt"]))
+    assert abs(dx) <= dx_max, (dx, dx_max)
+    a_max = abs(r["x_s"]) + r["eps_max_over_kT"]
+    jf, jb = r["J_fwd"], r["J_bwd"]
+    j_budget = max(jf, jb) * (dx_max + 2 * EPS * a_max) + 4 * EPS * (jf + jb)
+    assert abs(r["J"]) <= j_budget, (r["J"], j_budget)
     one_sided = 2 * Q * abs(r["J"]) * r["area"]
-    assert one_sided == 0.0
+    bound = 2 * Q * j_budget * r["area"] / (4 * KB * 300.0 * G[0])
+    assert one_sided / (4 * KB * 300.0 * G[0]) <= bound <= 1e-10, bound   # the one-sided formula: -100 %
     if case == "n_acc":
         alt = t * 2 * Q * (r["J_fwd"] + r["J_bwd"]) / r["S_kernel"]
         assert ((S - t + alt) / (4 * KB * 300.0 * G) - 1.0)[0] > 0.5
@@ -666,10 +689,27 @@ def test_o7_newton_quality(newton):
         term, and every step converges quadratically (log e_(k+1) / log e_k >= 1.8 over the tail above
         1e-12; MEASURED 2.45-3.19).
     (b) The O4 deep-depletion sweep (p-Si, 0.1 -> 3 V), where the sink IS the interface node's electron
-        balance: <= the no-tunnelling count + 3 at every step. The no-term body is solved with tau 1e-12:
-        its DC state does not depend on tau, and that is the only tau at which it converges. MEASURED max
-        +3 (range -31..+3). REFUTE: the n_s column of the term's Jacobian halved (residual unchanged): the
-        Newton fails to converge at the 4th step (80 iterations)."""
+        balance. That makes the DC Jacobian near-singular: the inversion-layer electrons (x > 1450 nm) are
+        pinned only by the weak SRH generation and the tunnel sink (equilibrated sigma_min/sigma_max <= 4.4e-16
+        at 0.3 / 1.0 / 3.0 V, MEASURED with well_posedness), so the Newton tail is LINEAR -- each step leaves
+        a fraction ~kappa u of the error along that mode -- with a rate set by the rounding of the
+        factorisation (CPU-dispatched OpenBLAS kernel, libm): MEASURED 0.070 .. 0.081 per iteration below 1e-2
+        on Windows and on WSL's Haswell / Sandybridge / Nehalem kernels, deterministic per kernel (OpenBLAS
+        1/2/4 threads give the same counts). The tail's iteration COUNT therefore moves with the platform
+        (0.3 V: 14 / 15 / 16 / 17 iterations), and so does the no-term reference's (tau 1e-12, the only tau
+        at which the no-term body converges; it is near-singular too at 1.0-3.0 V: 0.6 V took 12 / 12 / 26 /
+        49). The plan's per-step "<= the no-term count + 3" compared those two rounding-set counts: MEASURED
+        max +3 on Windows (zero margin), +4 on WSL-Haswell (2026-11-08: the WSL failure), +2 / +3 on
+        Sandybridge / Nehalem. The gate therefore asserts what the per-step count stood for, on quantities
+        that do not depend on the rounding: (i) every step of both sweeps converges; (ii) the sweep with the
+        term needs no more Newton iterations in TOTAL than without it (MEASURED 0.65 .. 0.72 of it); (iii) at
+        every step the relative error contracts monotonically from 1e-2 to convergence by <= 0.2 per
+        iteration (2.5x the worst measured 0.081 -- the near-singular mode's linear rate; a quadratic step is
+        far below it). A Jacobian error delta along the converging direction shows up as a linear rate
+        ~delta, which (iii) bounds.
+        REFUTE: the n_s column of the term's Jacobian halved (residual unchanged): at 0.3 V the error
+        contracts by only 0.32 .. 0.46 per iteration (34 iterations: fails (iii)), and the Newton fails to
+        converge at the 4th step (80 iterations)."""
     a_on, a_off = newton["acc_on"], newton["acc_off"]
     assert len(a_on) == len(a_off) == 14 and all(p["converged"] for p in a_on)
     for p, q in zip(a_on, a_off):
@@ -678,11 +718,20 @@ def test_o7_newton_quality(newton):
         for e0, e1 in zip(e[:-1], e[1:]):
             if e1 > 1e-12:
                 assert math.log(e1) / math.log(e0) >= 1.8, (p["V"], e)
+
+    def contraction(rel):
+        """Per-iteration ratios e_(k+1)/e_k from the first relative error below 1e-2 to the end."""
+        k = next(i for i, x in enumerate(rel) if x < 1e-2)
+        return [e1 / e0 for e0, e1 in zip(rel[k:-1], rel[k + 1:])]
+
     i_on, i_off = newton["inv_on"], newton["inv_off"]
     assert len(i_on) == len(i_off) == 30 and all(p["converged"] for p in i_on + i_off)
-    assert all(p["n_it"] <= q["n_it"] + 3 for p, q in zip(i_on, i_off))
+    assert sum(p["n_it"] for p in i_on) <= sum(q["n_it"] for q in i_off)
+    for p in i_on:
+        assert max(contraction(p["rel"])) <= 0.2, (p["V"], p["rel"])
     w = newton["inv_wrong"]
     assert not w[-1]["converged"] and len(w) < 30
+    assert w[-2]["converged"] and max(contraction(w[-2]["rel"])) > 0.2     # 0.3 V: converged, but slowly
 
 
 @pytest.fixture(scope="module")
