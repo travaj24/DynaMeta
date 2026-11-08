@@ -18,6 +18,20 @@ paper):
              of temperature"; GaInAs Sec. IV.A.2). AlGaAs Gamma: C = -0.127 + 1.310 x (Table XII, Aspnes et
              al.; the composition-dependent form the paper recommends for this alloy) -> `algaas_gap_law(x)`.
              GaInAs lattice-matched to InP: C = 0.477 eV at x(In) = 0.53 (Table XIII) -> "InGaAs_LM".
+  * lattice-matched quaternary  Eq. (5.4)  G(z) = (1-z) G_a + z G_b - z (1-z) C_ab: the SAME closed form
+             with two LATTICE-MATCHED end points a, b, each a binary or a ternary (Sec. V, introduction).
+             GaInAsP on InP = (InP)(1-z) (Ga0.47In0.53As)(z), i.e. Ga(x)In(1-x)As(z)P(1-z) with x = 0.47 z
+             (Sec. V.B.1): C = 0.13 eV "at all temperatures", and the temperature dependence deduced from
+             the binary Varshni laws (the paper's recommendation over the two published, mutually
+             inconsistent GaInAsP Varshni fits) -> `ingaasp_lm_gap_law(z)` and the C-band SOA preset
+             "InGaAsP_LM_C". The paper's printed closed forms "Eg = 1.4236(1-z) + 0.816z + 0.13z^2" (0 K)
+             and "1.353(1-z) + 0.737z + 0.13z^2" (300 K) drop the -0.13 z term of -z(1-z)C (at z = 1 they
+             give 0.946 / 0.867 eV, not the paper's own Ga0.47In0.53As end points 0.816 / 0.737 eV); the
+             code follows Eq. (5.4), as the text says to.
+  LATTICE CONSTANTS (300 K, Tables I-IV and VI: GaAs 5.65325, AlAs 5.6611, GaP 5.4505, InAs 6.0583, InP
+             5.8697 Angstrom) with Vegard's law decide which end-point pairs are lattice matched (an alloy end
+             point is refused otherwise) and give the strain of a GaInAsP composition on InP
+             (`ingaasp_lattice_mismatch`).
   Validity: Varshni is an empirical fit; the cited parameter sets are fitted from ~4 K to above room
   temperature, and some sets elsewhere in the literature misbehave below ~50 K -- the gates go no lower
   than 77 K. The Gamma gap of Al(x)Ga(1-x)As is the FUNDAMENTAL gap only below the Gamma-X crossover,
@@ -83,7 +97,8 @@ from typing import NamedTuple, Optional, Tuple, Union
 from dynameta.constants import KB, Q_E, T_REF
 
 __all__ = ["VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "ALGAAS_GAMMA_BOWING_EV", "varshni_eg_ev",
-           "d_eg_dT_ev_per_K", "algaas_gap_law", "BandTemperature", "BandData", "BAND_ANCHORS",
+           "d_eg_dT_ev_per_K", "algaas_gap_law", "LATTICE_CONSTANT_300K_A", "LATTICE_MATCH_RTOL",
+           "INGAASP_LM_BOWING_EV", "INGAASP_LM_C_Z", "ingaasp_lm_gap_law", "ingaasp_lattice_mismatch", "BandTemperature", "BandData", "BAND_ANCHORS",
            "reference_temperature_K", "transport_temperature_K", "band_data_at_T", "band_gap_ratio",
            "check_band_temperature"]
 
@@ -106,9 +121,42 @@ VARSHNI_PARAMS = {
 #   quotes for this end point in Sec. V.B.1 (GaInAsP on InP). Audit 2026-11-06: this row used to be a
 #   Varshni triple (0.816 eV, 2.9e-4 eV/K, 193 K) with no table behind it -- right at 0 K but 26 meV
 #   too wide at 300 K.
+#   InGaAsP_LM_C: the opt-in C-band SOA active material (v0.15.1, user decision 2026-11-08): the
+#   InP-lattice-matched quaternary (InP)(1-z)(Ga0.47In0.53As)(z) = Ga(0.47z)In(1-0.47z)As(z)P(1-z) of
+#   Sec. V.B.1 -- Eq. (5.4) with C = 0.13 eV between the InP law and the "InGaAs_LM" law above -- at the
+#   composition INGAASP_LM_C_Z (see ingaasp_lm_gap_law).
+# GaInAsP on InP: the Eq. (5.4) bowing of Sec. V.B.1 ("C = 0.13 at all temperatures"), T-independent.
+INGAASP_LM_BOWING_EV = 0.13
+# z (= the As fraction y; Ga fraction 0.47 z) of the C-band preset: solved so that the Connelly material-gain
+# peak of optics.soa.qw_gain.BulkGainParams.c_band() sits at 1550.0 nm at the library's reference operating
+# point (every other BulkGainParams default: 298 K, 130 mA, P = 0 -> N0 = 1.695e24 m^-3), then rounded to the
+# 0.001 a grower specifies (brentq on the peak wavelength: z* = 0.93737, docs/audit/2026-11-08-v0.15-soa-cband.md;
+# 0.001 in z moves the peak ~1 nm). At z = 0.937: Eg(300 K) = 0.76837 eV, Ga0.440In0.560As0.937P0.063, Vegard
+# mismatch on InP -3.5e-4. The gain peak sits 31 meV above the gap by band filling, so the GAP wavelength is
+# 1.614 um ("Q1.61" in grower's notation); a "Q1.55" composition (1.55 um GAP, z = 0.875) peaks at ~1491 nm here.
+INGAASP_LM_C_Z = 0.937
+
 ALLOY_GAP_PARAMS = {
     "InGaAs_LM":  ("GaAs", "InAs", 0.53, 0.477),
+    "InGaAsP_LM_C": ("InP", "InGaAs_LM", INGAASP_LM_C_Z, INGAASP_LM_BOWING_EV),
 }
+
+# Lattice constants [Angstrom] at 300 K: the a_lc rows of Vurgaftman Tables I (GaAs), II (AlAs), III (InAs),
+# IV (GaP), VI (InP) (their T-slopes, 2.7-3.9e-5 A/K, are not used). Vegard's law (linear in the binary
+# fractions) over these decides lattice matching.
+LATTICE_CONSTANT_300K_A = {
+    "GaAs": 5.65325,
+    "AlAs": 5.6611,
+    "GaP":  5.4505,
+    "InAs": 6.0583,
+    "InP":  5.8697,
+}
+# Two end points count as lattice matched for Eq. (5.4) when their Vegard lattice constants differ by at most
+# 1e-3 (relative): 2x the largest mismatch among the paper's OWN named lattice-matched end points by the same
+# rule -- Ga0.51In0.49P / GaAs +4.7e-4, Al0.48In0.52As / InP -3.5e-4, Ga0.47In0.53As / InP -3.0e-4 (Secs.
+# V.A.1, V.B.1-2; computed from the table above). A non-matched pair (InGaAs_LM with InAs: 3.2 %) is not an
+# Eq. (5.4) quaternary and is refused.
+LATTICE_MATCH_RTOL = 1.0e-3
 
 # Al(x)Ga(1-x)As Gamma-gap bowing C(x) = c0 + c1 x [eV], Vurgaftman Table XII (Aspnes et al.), T-independent.
 ALGAAS_GAMMA_BOWING_EV = (-0.127, 1.310)
@@ -126,6 +174,35 @@ def algaas_gap_law(x_Al: float) -> Tuple[str, str, float, float]:
     return ("GaAs", "AlAs", x, c0 + c1 * x)
 
 
+def ingaasp_lm_gap_law(z: float) -> Tuple[str, str, float, float]:
+    """The Gamma-gap law of Ga(x)In(1-x)As(z)P(1-z) lattice-matched to InP, x = 0.47 z, as a varshni_eg_ev
+    spec: ("InP", "InGaAs_LM", z, 0.13) = Vurgaftman Eq. (5.4) between InP (Table VI) and Ga0.47In0.53As (the
+    "InGaAs_LM" alloy law) with the Sec. V.B.1 bowing C = 0.13 eV, temperature-independent. z is the
+    Ga0.47In0.53As fraction, which equals the As fraction y. 300 K gap: 1.353 eV at z = 0 down to 0.737 eV at
+    z = 1 (the paper's end points). Use it for any InP-matched GaInAsP layer (active region, barrier, SCH);
+    "InGaAsP_LM_C" is the composition behind the library's C-band SOA preset (BulkGainParams.c_band())."""
+    z = float(z)
+    if not (0.0 <= z <= 1.0):
+        raise ValueError("ingaasp_lm_gap_law: z (the As fraction) must be in [0, 1], got {!r}".format(z))
+    return ("InP", "InGaAs_LM", z, INGAASP_LM_BOWING_EV)
+
+
+def ingaasp_lattice_mismatch(z: float, x_Ga: Optional[float] = None) -> float:
+    """(a - a_InP) / a_InP of Ga(x)In(1-x)As(z)P(1-z) by Vegard's law over the four binaries at 300 K
+    (LATTICE_CONSTANT_300K_A): a = x z a_GaAs + x (1-z) a_GaP + (1-x) z a_InAs + (1-x)(1-z) a_InP. x_Ga
+    defaults to the paper's lattice-matched scheme x = 0.47 z (Sec. V.B.1). Negative = smaller than InP
+    (tensile on an InP substrate). The exact Vegard match would be
+    x = z (a_InAs - a_InP) / (z (a_InAs - a_GaAs) + (1-z) (a_InP - a_GaP))."""
+    z = float(z)
+    x = 0.47 * z if x_Ga is None else float(x_Ga)
+    if not (0.0 <= z <= 1.0 and 0.0 <= x <= 1.0):
+        raise ValueError("ingaasp_lattice_mismatch: compositions must be in [0, 1] (z={!r}, x={!r})".format(z, x))
+    a = LATTICE_CONSTANT_300K_A
+    a_q = (x * z * a["GaAs"] + x * (1.0 - z) * a["GaP"] + (1.0 - x) * z * a["InAs"]
+           + (1.0 - x) * (1.0 - z) * a["InP"])
+    return (a_q - a["InP"]) / a["InP"]
+
+
 def _varshni_abc(material) -> Tuple[float, float, float]:
     if isinstance(material, str):
         if material not in VARSHNI_PARAMS:
@@ -139,10 +216,50 @@ def _varshni_abc(material) -> Tuple[float, float, float]:
     return abc  # type: ignore[return-value]
 
 
+def _lattice_constant_A(spec) -> Optional[float]:
+    """Vegard lattice constant [A] at 300 K of a binary name, or of an ALLOY_GAP_PARAMS ternary whose end
+    points are binary names; None when it is not known (a custom triple, a quaternary)."""
+    if not isinstance(spec, str):
+        return None
+    if spec in LATTICE_CONSTANT_300K_A:
+        return LATTICE_CONSTANT_300K_A[spec]
+    alloy = ALLOY_GAP_PARAMS.get(spec)
+    if alloy is None:
+        return None
+    A, B, x = alloy[0], alloy[1], float(alloy[2])
+    if A in LATTICE_CONSTANT_300K_A and B in LATTICE_CONSTANT_300K_A:
+        return (1.0 - x) * LATTICE_CONSTANT_300K_A[A] + x * LATTICE_CONSTANT_300K_A[B]
+    return None
+
+
+def _alloy_endpoint_terms(name: str, other):
+    """Terms of an alloy END POINT of an Eq. (5.4) lattice-matched quaternary: `name` must be an
+    ALLOY_GAP_PARAMS ternary of two binaries, lattice matched (LATTICE_MATCH_RTOL) to the `other` end point."""
+    A, B = ALLOY_GAP_PARAMS[name][:2]
+    if not all(isinstance(e, str) and e in VARSHNI_PARAMS for e in (A, B)):
+        raise ValueError("varshni: end point '{}' is not a binary or a ternary of two binaries; Eq. (5.4) "
+                         "combines binary or ternary end points only".format(name))
+    a_n, a_o = _lattice_constant_A(name), _lattice_constant_A(other)
+    if a_n is None or a_o is None:
+        raise ValueError("varshni: end point '{}' is not a binary; an alloy end point is accepted only in a "
+                         "lattice-matched quaternary (Vurgaftman Eq. (5.4)) whose other end point has a known "
+                         "lattice constant (a binary or ternary NAME), got {!r}".format(name, other))
+    mis = (a_n - a_o) / a_o
+    if abs(mis) > LATTICE_MATCH_RTOL:
+        raise ValueError("varshni: end point '{}' is not a binary; an alloy end point is accepted only in a "
+                         "lattice-matched quaternary (Vurgaftman Eq. (5.4)), and '{}' ({:.5f} A) and {!r} "
+                         "({:.5f} A) differ by {:.3g} % (> {:.3g} %)".format(
+                             name, name, a_n, other, a_o, 100.0 * mis, 100.0 * LATTICE_MATCH_RTOL))
+    return _gap_terms(name)
+
+
 def _gap_terms(material) -> Tuple[Tuple[Tuple[float, Tuple[float, float, float]], ...], float]:
     """Resolve a material spec into ((weight, (Eg0, alpha, beta)), ...) and a constant bowing
     offset [eV], so Eg(T) = sum w (Eg0 - alpha T^2/(T + beta)) - offset. A binary / custom triple
-    is one term of weight 1 and no offset (bit-identical to the bare Varshni law)."""
+    is one term of weight 1 and no offset (bit-identical to the bare Varshni law); a ternary is two
+    terms (unchanged since v0.14). A lattice-matched quaternary (Eq. (5.4): an end point that is an
+    ALLOY_GAP_PARAMS ternary name) flattens to the binaries of its end points, weights multiplied and
+    bowing offsets combined: offset = z (1-z) C_ab + (1-z) offset_a + z offset_b."""
     if isinstance(material, str):
         if material in ALLOY_GAP_PARAMS:
             material = ALLOY_GAP_PARAMS[material]
@@ -159,7 +276,15 @@ def _gap_terms(material) -> Tuple[Tuple[Tuple[float, Tuple[float, float, float]]
         x, C = float(x), float(C)
         if not (0.0 <= x <= 1.0):
             raise ValueError("varshni: ternary composition x must be in [0, 1], got {}".format(x))
-        return ((1.0 - x, _varshni_abc(A)), (x, _varshni_abc(B))), x * (1.0 - x) * C
+        a_alloy = isinstance(A, str) and A in ALLOY_GAP_PARAMS
+        b_alloy = isinstance(B, str) and B in ALLOY_GAP_PARAMS
+        if not (a_alloy or b_alloy):                    # Eq. (4.1) ternary: the v0.14 path, unchanged
+            return ((1.0 - x, _varshni_abc(A)), (x, _varshni_abc(B))), x * (1.0 - x) * C
+        # Eq. (5.4): a lattice-matched quaternary of two end points (binary or ternary)
+        t_a, off_a = _alloy_endpoint_terms(A, B) if a_alloy else (((1.0, _varshni_abc(A)),), 0.0)
+        t_b, off_b = _alloy_endpoint_terms(B, A) if b_alloy else (((1.0, _varshni_abc(B)),), 0.0)
+        terms = tuple(((1.0 - x) * w, abc) for w, abc in t_a) + tuple((x * w, abc) for w, abc in t_b)
+        return terms, x * (1.0 - x) * C + (1.0 - x) * off_a + x * off_b
     return ((1.0, _varshni_abc(spec)),), 0.0
 
 
@@ -172,7 +297,10 @@ def varshni_eg_ev(T_K: float, material: Union[str, Tuple] = "InAs") -> float:
       * a ternary name in ALLOY_GAP_PARAMS ("InGaAs_LM" = Ga0.47In0.53As on InP), algaas_gap_law(x), or a
         custom (A, B, x, C_eV) tuple (A, B binary names or triples) -> Vurgaftman, Meyer & Ram-Mohan,
         JAP 89, 5815 (2001) Eq. (4.1) over the binary Varshni laws with a temperature-independent
-        bowing: Eg(T) = (1-x) Eg_A(T) + x Eg_B(T) - x (1-x) C.
+        bowing: Eg(T) = (1-x) Eg_A(T) + x Eg_B(T) - x (1-x) C;
+      * a lattice-matched quaternary: the same (A, B, z, C_eV) form with an ALLOY_GAP_PARAMS ternary NAME
+        as an end point, lattice matched to the other one (Eq. (5.4)) -- ingaasp_lm_gap_law(z) for GaInAsP
+        on InP, or the C-band SOA preset "InGaAsP_LM_C" (z = INGAASP_LM_C_Z).
     Use the alloy rule (not a fitted Varshni triple) for any ternary: Vurgaftman tabulates Varshni
     parameters for binaries only (Tables I-IX) and bowings for alloys (Tables XII-XXX). InGaAs_LM:
     GaAs Table I + InAs Table III + C = 0.477 eV Table XIII -> 0.816 eV at 0 K, 0.737 eV at 300 K."""
