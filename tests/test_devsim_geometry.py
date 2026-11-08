@@ -589,21 +589,21 @@ def test_negative_policies_raise_warn_clip():
     """A random-point Delaunay square (its long convex-hull edges face obtuse angles) has negative
     ASSEMBLED couples and node volumes (MEASURED: 4 couples, worst -23.8 L; 4 node volumes, worst -6.65
     h^2; clip removes 0.284 of sum|EC| and adds 14.1 x the volume) -- the boundary caveat.
-    'raise' (the default) leaves the device untouched; 'warn' writes the exact signed geometry (volume
-    exact) with UnreliableResultWarning; re-applying is idempotent; 'clip' leaves no negative EdgeCouple /
+    'raise' leaves the device untouched; 'warn' (the default since the 2026-11-06 user decision) writes
+    the exact signed geometry (volume exact) with UnreliableResultWarning; re-applying is idempotent; 'clip' leaves no negative EdgeCouple /
     NodeVolume, keeps 2 sum ENV exact, and its clipped fractions equal a recount from the exact values
     (a consistency check: the module is the only source of the exact values)."""
     P, T = _random_square_2d("np_r")
     eec0 = elv("np_r", "r", "ElementEdgeCouple")
     with pytest.raises(G.NegativeDualGeometryError) as ei:
-        G.apply_exact_geometry("np_r", "r")                          # default policy = raise
+        G.apply_exact_geometry("np_r", "r", negative="raise")
     rep = ei.value.report
     assert rep.n_negative_couples > 0 and rep.n_negative_volumes > 0 and not rep.applied
     assert np.array_equal(elv("np_r", "r", "ElementEdgeCouple"), eec0)
     assert not G.exact_geometry_applied("np_r", "r")
     Vt = _true_volume(P, T).sum()
     with pytest.warns(UnreliableResultWarning, match="NO M-matrix guarantee"):
-        G.apply_exact_geometry("np_r", "r", negative="warn")
+        assert G.apply_exact_geometry("np_r", "r").policy == "warn"     # the default policy
     exact_nv = nv("np_r", "r")
     exact_ec = ev("np_r", "r", "EdgeCouple")
     L = ev("np_r", "r", "EdgeLength")
