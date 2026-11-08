@@ -591,6 +591,9 @@ def sc_fdt(opts):
     return {"S": _lst(sn.S), "by_mechanism": {k: _lst(v) for k, v in sn.by_mechanism.items()},
             "G": _lst(G), "C": _lst(C), "f": list(ff), "J": float(te.J[0]), "J_fwd": float(te.J_fwd[0]),
             "J_bwd": float(te.J_bwd[0]), "S_kernel": float(te.S[0]), "x_s": float(st["x_s"][0]),
+            "x_g": float(st["x_g"][0]), "psi_s_over_Vt": float(st["psi_s"][0]) / term.V_t,
+            "V_g_over_Vt": float(st["V_g"]) / term.V_t, "phi_c_over_Vt": float(term.phi_c) / term.V_t,
+            "eps_max_over_kT": float(term.grid.eps_max_J / term.grid.kT_J), "re_dc": 1e-12,
             "area": float(term.area[0])}
 
 
