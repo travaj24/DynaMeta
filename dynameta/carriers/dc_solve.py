@@ -170,7 +170,7 @@ def solve_dc(device: str, *, method: str = "newton",
     well_posedness.ensure_dc_well_posed (cached per equation-set fingerprint), which raises
     IllPosedDCError (a ValueError) for an EXACTLY singular DC problem -- a floating body, a pure-Neumann
     potential -- instead of letting round-off pick the answer. A Newton failure that STALLED (ran out of
-    iterations close to a solution) is re-raised as devsim.error with the conditioning diagnosis
+    iterations after some iterate came within 1e-2 of a solution) is re-raised as devsim.error with the conditioning diagnosis
     (well_posedness.diagnose_singular: "near-singular DC Jacobian ... mode in Electrons ...") appended.
 
     A RELATIVE TEST ON A ZERO UNKNOWN (v0.15, 2026-11-08). DEVSIM's relative update is |dx| / (|x| + 1e-10),
@@ -248,9 +248,15 @@ def solve_dc(device: str, *, method: str = "newton",
     raise ValueError("unknown dc solve method: {!r}".format(method))
 
 
-# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and ended
-# close to a solution -- the near-floating signature: the relative update wanders at 1e-6..1e-2
-# (MOS inversion at 0.80 V, tests/test_well_posedness.py) -- not when it diverged or aborted early.
+# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and CAME
+# close to a solution (some iterate's relative update < _STALL_REL) -- the near-floating signature -- not
+# when it diverged or aborted early. The BEST iterate, not the last: along a near-null mode the update is
+# round-off amplified by 1/sigma_min (u / 1.7e-17 ~ 6 for the MOS inversion layer at 0.78-0.80 V,
+# tests/test_well_posedness.py), so where the walk ends is chance -- MEASURED 2026-11-08 on the same
+# fixture: Windows wanders 3e-10..4e-7 to the end; Linux (OpenBLAS 0.3.26 / glibc) reaches 4.7e-5 at
+# iteration 13, then escapes to 1e3 and ends at 6.5e-2, which the old last-iterate rule called "not a
+# stall" (no diagnosis). A run that never got within 1e-2 (a 0.76 -> 1.2 V jump: best 1.9e-2 / 4.5e-2
+# over 40 iterations, >= 1e3 over its first 10) is not one.
 _STALL_REL = 1e-2
 
 
@@ -258,8 +264,9 @@ def _stalled(info, max_iter) -> bool:
     its = info.get("iterations") or ()
     if len(its) < max_iter:
         return False
-    last = [d.get("relative_error", np.inf) for d in its[-1].get("devices", ())]
-    return bool(last) and max(last) < _STALL_REL
+    best = [max((d.get("relative_error", np.inf) for d in it.get("devices", ())), default=np.inf)
+            for it in its]
+    return min(best) < _STALL_REL
 
 
 def _newton(device, abs_tol, rel_tol, max_iter):
