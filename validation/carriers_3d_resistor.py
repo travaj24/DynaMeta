@@ -2,13 +2,20 @@
 test -- a MOS-cap carries no DC current, so DD trivially equals equilibrium. This is the
 missing independent test of 3D DRIFT transport: a uniform semiconductor BAR with ohmic
 contacts on its two x-end faces, a small applied voltage, and a check that the DD contact
-current obeys OHM'S LAW (I = V*sigma*A/L, sigma = q*n*mu). Run:
-python -m validation.carriers_3d_resistor
+current obeys OHM'S LAW (I = V*sigma*A/L, sigma = q*n*mu).
+
+D2c (v0.14.0): meshed with devsim_3d's tensor-product Kuhn mesh (the builder default), on which DEVSIM's
+3-D couplings are exact. The old unstructured gmsh bar read Ohm's law 14 % HIGH (DEVSIM sums the
+magnitudes of each tet's circumcentric dual pieces, inflating the couplings -- the same 1.2-1.3 x the
+node volumes show; docs/audit/2026-11-03-devsim-3d-mesh.md), and the gate sat at < 0.16 to absorb it.
+Run: python -m validation.carriers_3d_resistor [--gmsh  (the legacy mesh, for the comparison)]
 """
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
+
+ds = import_devsim()
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E
@@ -19,10 +26,23 @@ Q = 1.602176634e-19
 V_APPLIED = 0.02                    # small -> ohmic
 
 
+def build_bar_tensor(mesh="bar", dev="bar_dev", h_nm=8.0):
+    """The bar on the Kuhn-tensor mesh (devsim_3d's shared helpers), contacts on the two x-end faces."""
+    from dynameta.carriers import devsim_3d as D3
+    # in memory (2026-11-04): no fixed ~/.dynameta/_resistor_tensor.msh shared by concurrent runs
+    D3.kuhn_bar_mesh(mesh, (LX, LY, LZ), h_nm, region="semi", contacts=("left", "right"))
+    ds.add_gmsh_region(mesh=mesh, gmsh_name="semi", region="semi", material="ITO")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="left", region="semi", name="left", material="metal")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="right", region="semi", name="right", material="metal")
+    ds.finalize_mesh(mesh=mesh); ds.create_device(mesh=mesh, device=dev)
+    return dev
+
+
 def build_bar(mesh="bar", dev="bar_dev"):
+    """The LEGACY unstructured gmsh bar (--gmsh): Ohm's law 14 % high (module docstring)."""
     import gmsh
-    path = os.path.join(os.path.expanduser("~"), ".dynameta", "_resistor.msh")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(prefix="dynameta_resistor_"), "bar.msh")   # per run (2026-11-04)
     gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
     gmsh.model.add("bar"); occ = gmsh.model.occ
     occ.addBox(0, 0, 0, LX, LY, LZ); occ.synchronize()
@@ -48,7 +68,8 @@ def build_bar(mesh="bar", dev="bar_dev"):
 
 
 def main():
-    dev = build_bar()
+    legacy = "--gmsh" in sys.argv
+    dev = build_bar() if legacy else build_bar_tensor()
     DD.setup_semiconductor_region_dd(dev, "semi", n_bg_m3=N_BG, eps_static=EPS,
                                       dos_mass_kg=0.35 * M_E, mobility_m2Vs=MU)
     for c in ("left", "right"):
@@ -56,12 +77,12 @@ def main():
     abs_tol = max(1e10, N_BG * 1e-12)
     ds.set_parameter(device=dev, name="left_bias", value=0.0)
     ds.set_parameter(device=dev, name="right_bias", value=0.0)
-    solve_dc(dev, method="newton", abs_tol=abs_tol, rel_tol=1e-6, max_iter=100,
+    solve_dc(dev, method="newton", abs_tol=abs_tol, rel_tol=1e-10, max_iter=100,
              semiconductor_regions=["semi"])
     n_steps = 4
     for k in range(1, n_steps + 1):
         ds.set_parameter(device=dev, name="right_bias", value=V_APPLIED * k / n_steps)
-        solve_dc(dev, method="newton", abs_tol=abs_tol, rel_tol=1e-6, max_iter=100,
+        solve_dc(dev, method="newton", abs_tol=abs_tol, rel_tol=1e-10, max_iter=100,
                  semiconductor_regions=["semi"])
     # DEVSIM electron current through the contact (A); total = electron (unipolar)
     I_dev = abs(ds.get_contact_current(device=dev, contact="right",
@@ -72,15 +93,15 @@ def main():
     rel = abs(I_dev - I_ohm) / I_ohm
     print("[t] 3D resistor (ITO bar {:.0f}x{:.0f}x{:.0f} nm, V={:.3f} V):".format(LX, LY, LZ, V_APPLIED), flush=True)
     print("[t]   sigma={:.3e} S/m  R={:.2f} ohm".format(sigma, L / (sigma * A)), flush=True)
-    print("[t]   I_devsim={:.4e} A   I_ohm={:.4e} A   rel-diff={:.3f}".format(I_dev, I_ohm, rel), flush=True)
-    # 3D DD carries current per Ohm's law (I ~ V*sigma*A/L); the residual is MESH
-    # discretization, which shrinks under refinement (rel-diff 0.20 -> 0.14 from a
-    # coarse 12-18nm to a 5-8nm mesh). The FD g-factor cancels in the pure-drift limit,
-    # so Boltzmann sigma=q*n*mu is the correct reference. Gate tightened to <=0.16 (just
-    # above the observed 0.142 at this mesh) so a regression cannot drift unnoticed
-    # (audit F3); refine the mesh to push it lower.
-    ok = 0.0 < rel < 0.16
-    print("[t] *** 3D DD TRANSPORT (Ohm's law, mesh-limited): {} ***".format("PASS" if ok else "FAIL"), flush=True)
+    print("[t]   I_devsim={:.4e} A   I_ohm={:.4e} A   rel-diff={:.2e}".format(I_dev, I_ohm, rel), flush=True)
+    # 3D DD carries current per Ohm's law (I ~ V*sigma*A/L). The FD g-factor cancels in the pure-drift
+    # limit, so Boltzmann sigma=q*n*mu is the correct reference. On the Kuhn-tensor mesh the box-method
+    # couplings are exact and a uniform bar's SG solution is the exact linear potential, so the residual
+    # is solver tolerance only (D2c gate < 1e-6). The legacy gmsh bar (--gmsh) read 0.142 at its 5-8 nm
+    # mesh (0.20 at 12-18 nm) -- the inflated-coupling defect, not discretization (it was gated < 0.16).
+    ok = (0.0 < rel < 0.16) if legacy else (rel < 1e-6)
+    print("[t] *** 3D DD TRANSPORT (Ohm's law, {}): {} ***".format(
+        "legacy gmsh mesh" if legacy else "exact Kuhn-tensor mesh", "PASS" if ok else "FAIL"), flush=True)
     return ok
 
 

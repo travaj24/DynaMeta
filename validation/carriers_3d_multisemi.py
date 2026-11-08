@@ -13,7 +13,9 @@ GATE B (from_design heterostack extraction, NO solve): a Design with TWO stacked
         extra_semiconductor, and the emitted field region named after the gate-adjacent layer; a Design
         whose two semiconductors are NON-contiguous (separated by a dielectric) is ambiguous -> raises.
         (audit S1-9) The extracted extra entry carries the layer's own electron affinity + DOS mass, and
-        the spec the primary's affinity, so the equilibrium solve can align the bands.
+        the spec the primary's affinity, so the equilibrium solve can align the bands. Since v0.14
+        (user decision 2026-11-04) TransportModel.chi_eV defaults to None: this ITO/ITO stack carries
+        None through (same material -> zero offset by identity), it no longer reads a 4.5 default.
 GATE C (built-in potential, SOLVER; audit S1-9, wave-7 2026-11-02): an n+/n ITO homojunction
         (4e26 | 4e25 m^-3, 12 nm each) with the gate held at the n side's flat band. Equilibrium = flat
         Fermi level, so each bulk must sit at its OWN neutral potential: psi(semi bulk) = 0 and
@@ -30,6 +32,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
 from dynameta.materials import (Material, MaterialRegistry, DrudeOptical, ConstantOptical,
                                  TransportModel, M_E)
@@ -47,7 +50,7 @@ COMMON = dict(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, oxide
 
 
 def _zprofile(dev, region, zg):
-    import devsim as ds
+    ds = import_devsim()
     z = np.asarray(ds.get_node_model_values(device=dev, region=region, name="z"))
     n = np.asarray(ds.get_node_model_values(device=dev, region=region, name="Electrons"))
     return z, n
@@ -62,7 +65,7 @@ def _collapse(z, n, zg):
 
 
 def _gate_a():
-    import devsim as ds
+    ds = import_devsim()
     zg = np.linspace(0.0, TSEMI, 60)
     # single 16 nm semiconductor
     s1 = Devsim3DEquilibrium(Stacked3DSpec(semi_thk_m=TSEMI, **COMMON),
@@ -120,9 +123,11 @@ def _gate_b():
             and spec.extra_semiconductors[0][0] == "ito_top"
             and abs(spec.extra_semiconductors[0][2] - 5e-9) < 1e-12
             and spec.oxide_material == "HfO2" and abs(spec.oxide_thk_m - 7e-9) < 1e-12
-            # audit S1-9: the affinity + DOS mass ride along (chi_eV = TransportModel's default 4.5)
+            # audit S1-9: the affinity + DOS mass ride along (v0.14: chi_eV defaults to None, carried
+            # through as None; same material -> band_alignment's zero offset)
             and len(spec.extra_semiconductors[0]) == 7
-            and spec.extra_semiconductors[0][5] == 4.5 and spec.chi_semi_eV == 4.5
+            and spec.extra_semiconductors[0][5] is None and spec.chi_semi_eV is None
+            and spec.band_alignment()["ito_top"][0] == spec.band_alignment()["semi"][0]
             and abs(spec.extra_semiconductors[0][6] - 0.35 * M_E) < 1e-40)
     print("[ms] B from_design heterostack: primary='semi'({:.0f}nm) extra={} field='{}' oxide={}({:.0f}nm)"
           " -> {}".format(spec.semi_thk_m * 1e9,
@@ -143,7 +148,7 @@ def _gate_b():
 
 
 def _gate_c():
-    import devsim as ds
+    ds = import_devsim()
     n_lo = 4.0e25
     spec = Stacked3DSpec(semi_thk_m=12e-9, extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, n_lo)],
                          **{**COMMON, "lateral_m": 4e-9, "oxide_thk_m": 4e-9, "grid_n": (3, 3, 17),

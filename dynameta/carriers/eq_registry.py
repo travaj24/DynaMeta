@@ -22,8 +22,9 @@ class _DevsimShim:
 
     def __getattr__(self, name):
         if _DevsimShim._mod is None:
-            import devsim as _devsim
-            _DevsimShim._mod = _devsim
+            # D0: through the ONE devsim import home (BLAS pinned before the first import)
+            from dynameta.carriers.devsim_env import import_devsim
+            _DevsimShim._mod = import_devsim()
         return getattr(_DevsimShim._mod, name)
 
 
@@ -49,6 +50,34 @@ def record_interface_equation(device: str, interface: str, **kwargs) -> None:
     ds.interface_equation(device=device, interface=interface, **kwargs)
     _REG.setdefault(device, []).append(
         {"scope": "interface", "loc": interface, "name": kwargs["name"], "kwargs": kwargs})
+
+
+def amend_region_equation(device: str, region: str, eq_name: str, **extra_kwargs) -> None:
+    """ADD terms to an already-recorded REGION equation (D1d, 2026-11-03): merge `extra_kwargs`
+    (e.g. edge_volume_model / volume_node0_model / volume_node1_model) into its recorded kwargs, then
+    delete + re-create the live DEVSIM equation from the merged record, so a later Gummel/staged
+    delete_by_name -> reapply_by_name re-creates it WITH the new terms. Refuses to silently REPLACE a
+    term the record already carries with a different model (two physics modules wiring the same
+    equation slot would otherwise drop one of them without a trace)."""
+    hits = [e for e in _REG.get(device, [])
+            if e["name"] == eq_name and e["scope"] == "region" and e["loc"] == region]
+    if len(hits) != 1:
+        raise ValueError("amend_region_equation: expected one recorded {!r} on region {!r}, found {}"
+                         .format(eq_name, region, len(hits)))
+    kw = hits[0]["kwargs"]
+    clash = {k: (kw[k], v) for k, v in extra_kwargs.items() if k in kw and kw[k] != v}
+    if clash:
+        raise ValueError("amend_region_equation: {!r} on {!r} already carries {} -- refusing to "
+                         "overwrite (compose the terms into one model instead)".format(
+                             eq_name, region, clash))
+    merged = dict(kw, **extra_kwargs)
+    ds.delete_equation(device=device, region=region, name=eq_name)
+    try:
+        ds.equation(device=device, region=region, **merged)
+    except Exception:
+        ds.equation(device=device, region=region, **kw)      # put the legacy equation back, then raise
+        raise
+    kw.update(extra_kwargs)                                  # record only what DEVSIM accepted
 
 
 def delete_by_name(device: str, eq_name: str) -> None:
@@ -117,12 +146,35 @@ def edge_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
                           equation="simplify(diff({}, {}@{}))".format(eq, w, nd))
 
 
+def element_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
+    """Create an element (element-edge) model + its derivatives w.r.t. each NODE-SUFFIXED variable in
+    `wrt` (e.g. "Potential@en0" .. "Holes@en3"). DEVSIM's element assembler demands the derivative
+    w.r.t. EVERY element node of EVERY solution variable of the equation (a missing one is FATAL:
+    "Model: ...:Electrons@en1 MISSING"), so callers pass the full list; most simplify to 0."""
+    ds.element_model(device=device, region=region, name=name, equation=eq)
+    for v in wrt:
+        ds.element_model(device=device, region=region, name="{}:{}".format(name, v),
+                         equation="simplify(diff({}, {}))".format(eq, v))
+
+
 def node_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
     """Create a node model + its derivatives w.r.t. each variable in `wrt`."""
     ds.node_model(device=device, region=region, name=name, equation=eq)
     for w in wrt:
         ds.node_model(device=device, region=region, name="{}:{}".format(name, w),
                       equation="simplify(diff({}, {}))".format(eq, w))
+
+
+def circuit_driven_contacts(device: str) -> Dict[str, str]:
+    """{contact: circuit node} for every contact whose recorded PotentialEquation is tied to a
+    circuit node (ac_analysis.setup_circuit_contact, the *_circuit ohmic twins). v0.14.0 (2026-11-04):
+    the builders' solve() drives contacts through their `<name>_bias` PARAMETER, which a circuit-driven
+    contact no longer reads -- they consult this to drive the circuit source instead, or to refuse."""
+    out: Dict[str, str] = {}
+    for e in _REG.get(device, []):
+        if e["scope"] == "contact" and e["name"] == "PotentialEquation"                 and e["kwargs"].get("circuit_node"):
+            out[e["loc"]] = e["kwargs"]["circuit_node"]
+    return out
 
 
 def equation_names(device: str) -> set:

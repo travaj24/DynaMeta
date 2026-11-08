@@ -46,7 +46,29 @@ from dynameta.constants import HBAR, KB, Q_E
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
-__all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m"]
+__all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m", "GAMMA_WALL"]
+
+
+# GAMMA_WALL (user decision 2026-11-04: a named constant; the DEFAULT gamma stays 1 everywhere).
+# The gamma at which the density-gradient dark space at an IMPENETRABLE wall carries exactly the
+# deficit of the EXACT quantum free gas (docs/audit/2026-11-03-devsim-bipolar-density-gradient.md,
+# GATE B). Derivation, flat potential, non-degenerate gas against an infinite barrier at z = 0:
+#   * DG: with t = sqrt(c/c_bulk) the DG equation integrates in closed form,
+#       z(t) = L_q int_0^t ds/sqrt(F(s)),   F(t) = t^2 ln t^2 - t^2 + 1,   L_q = hbar sqrt(gamma/(6 m kT)),
+#     and the missing charge is  int (c_bulk - c) dz = I c_bulk L_q  with
+#       I = int_0^1 (1 - t^2)/sqrt(F(t)) dt = 1.1872068904949610...
+#   * exact (Schrodinger) free gas: c/c_bulk = 1 - exp(-2 m kT z^2/hbar^2), deficit
+#       sqrt(pi)/(2 sqrt 2) c_bulk hbar/sqrt(m kT).
+#   Equal deficits: I sqrt(gamma/6) = sqrt(pi)/(2 sqrt 2)  ->  gamma = (3 pi/4)/I^2.
+# At gamma = 1 the DG deficit is 0.7734 of the exact one (the known shortfall of the first-order
+# gradient theory at a hard wall). The value is fixed a priori by that limit, not fitted to any
+# device; GATE C then used it unfitted against Schrodinger-Poisson accumulation layers (see "Choosing
+# gamma" in physics_density_gradient.setup_bipolar_dg). Literal = (3 pi/4)/I^2 evaluated in mpmath
+# at 80 digits (I by tanh-sinh: 1.187206890494961043770811572951519755863; gamma_wall =
+# 1.671699909504550822781459754942...), rounded once to double; pinned by
+# tests/test_density_gradient.py against an independent scipy quadrature and against
+# dg_correct_density_1d's own BVP on a flat profile.
+GAMMA_WALL = 1.6716999095045508
 
 
 def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = T_REF,
@@ -58,7 +80,13 @@ def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = T_REF,
     BOLTZMANN limit and the byte-identical off-switch (what this function always returned, and
     what the BVP in dg_correct_density_1d closes with; see the module header on audit C-8). For
     degenerate ITO the FD-consistent length is sqrt(g) SHORTER -- 1.1847 nm -> 0.3236 nm at
-    g = 13.4 -- and the difference is exactly what the fitted `gamma` absorbs."""
+    g = 13.4 -- and the difference is exactly what the fitted `gamma` absorbs.
+
+    Choosing gamma (default 1): L_q grows as sqrt(gamma). gamma = 1 is the Wigner / Ancona value
+    for smooth potentials (literature comparisons; the ITO calibration of this module). GAMMA_WALL
+    (= 1.6717) is the value whose dark space at a hard insulator wall equals the exact free-gas one;
+    use it for oxide-bounded accumulation / inversion layers. Full guidance and the measured numbers:
+    dg_correct_density_1d."""
     if not (m_eff_kg > 0.0 and gamma >= 0.0 and T_K > 0.0 and degeneracy_g > 0.0):
         raise ValueError("density_gradient: m_eff_kg > 0, gamma >= 0, T_K > 0, degeneracy_g > 0 "
                          "required")
@@ -117,7 +145,12 @@ def _second_derivative(f: np.ndarray, z: np.ndarray) -> np.ndarray:
 def quantum_potential_V(z_m, n_m3, m_eff_kg: float, *, gamma: float = 1.0) -> np.ndarray:
     """Lambda(z) = b (sqrt(n))'' / sqrt(n) [VOLTS] on a solved density profile (second-order
     finite differences AT EVERY NODE, ends included -- audit C-3/N3; non-uniform z supported).
-    gamma = 0 -> exactly zeros."""
+    gamma = 0 -> exactly zeros.
+
+    Choosing gamma (default 1): Lambda is linear in gamma. Evaluate it with the SAME gamma the
+    profile was solved with -- 1 (Wigner / Ancona, smooth potentials, literature) or GAMMA_WALL
+    (= 1.6717, exact free-gas dark space at a hard wall; oxide-bounded accumulation / inversion).
+    Full guidance and the measured numbers: dg_correct_density_1d."""
     z = np.asarray(z_m, dtype=np.float64)
     n = np.asarray(n_m3, dtype=np.float64)
     if z.ndim != 1 or z.shape != n.shape or z.size < 5:
@@ -144,7 +177,30 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
 
     The closure is BOLTZMANN (n = n_cl exp(Lambda/V_t)); on a degenerate profile `gamma` is a
     fitted parameter absorbing the generalized-Einstein factor g -- see the module header
-    (audit C-8) before quoting the dead-layer length as derived."""
+    (audit C-8) before quoting the dead-layer length as derived.
+
+    Choosing gamma (the default stays gamma = 1; user decision 2026-11-04):
+      gamma scales b = gamma hbar^2/(6 m q), i.e. the quantum length L_q = hbar sqrt(gamma/(6 m kT))
+      over which the density is pushed off the wall (the dark-space width grows as sqrt(gamma));
+      gamma = 0 is the exact classical off-switch.
+      * gamma = 1 -- the Wigner / Ancona high-temperature value for SMOOTH potentials. Use it for
+        bulk / smooth-potential corrections and to compare with the literature (which uses 1). It
+        is also the value this closure was CALIBRATED at on degenerate ITO
+        (validation/density_gradient_dead_layer.py GATE C, ~1.2 nm dead layer vs Schrodinger-
+        Poisson): there gamma absorbs the degeneracy factor g (module header, audit C-8), so keep 1
+        for that use.
+      * GAMMA_WALL = (3 pi/4)/I^2 = 1.6717 -- reproduces the EXACT free-gas dark space at a hard
+        insulator wall (gamma = 1 gives 0.7734 of it). On a FLAT profile this BVP is exactly that
+        closed-form problem, and GAMMA_WALL returns the exact quantum deficit
+        sqrt(pi)/(2 sqrt 2) c hbar/sqrt(m kT) (gated in tests/test_density_gradient.py). For
+        accumulation / inversion layers against a gate oxide the self-consistent bipolar DG at
+        GAMMA_WALL is 3-4x closer to Schrodinger-Poisson than at gamma = 1 (MEASURED, GATE C of
+        docs/audit/2026-11-03-devsim-bipolar-density-gradient.md, N = 1e24 m^-3, 0.15 V
+        accumulation, electrons / holes: excess sheet +5.6 / +4.0 % vs +21.3 / +17.3 %, centroid
+        -5.1 / -3.7 % vs -17.5 / -14.7 %). That comparison used the in-Newton DG
+        (physics_density_gradient), NOT this frozen-potential closure -- not measured here.
+      * Not validated: GAMMA_WALL on a degenerate (Fermi-Dirac) profile -- this closure is
+        Boltzmann and gamma = 1 is the calibrated value there; strong inversion; anything but 1-D."""
     z = np.asarray(z_m, dtype=np.float64)
     n_cl = np.asarray(n_cl_m3, dtype=np.float64)
     if z.ndim != 1 or z.shape != n_cl.shape or z.size < 5:

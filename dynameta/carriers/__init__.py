@@ -18,7 +18,7 @@ trimming the solver names out of it to make `*` cheap would un-declare the packa
 builder. Use named imports on a devsim-free install.
 """
 
-__all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis", "transient",
+__all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis", "noise_analysis", "transient",
            "lc_director", "lc_director_2d", "lc_dynamics", "carrier_heating", "llg"]
 
 

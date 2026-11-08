@@ -59,6 +59,47 @@ def test_v20_x21_every_advertised_carriers_name_resolves_in_a_fresh_process():
         raise AssertionError("a non-existent name must still raise AttributeError")
 
 
+def test_resolving_every_carriers_name_does_not_load_ngsolve():
+    """v0.14 task 8 (user decision 2026-11-04): the FEM carrier modules (electrostatics_fem,
+    electrothermal, fem_mesh, thermal_fem.*) import ngsolve LAZILY (dynameta.lazy_import.LazyModule).
+    ngsolve's own OpenBLAS commits ~4 GB per process at load; MEASURED (box A) for this child: private
+    commit 6170 MB on 6595bde (ngsolve + netgen loaded) vs 1652 MB now, = `import dynameta.carriers`
+    alone (1649 MB). Fails on 6595bde ('ngsolve' in sys.modules). The FEM tests (test_fem_drivers,
+    test_electrothermal, ...) are the gate that the lazy proxy still solves."""
+    code = "\n".join([
+        "import sys, dynameta.carriers as c",
+        "for n in sorted(set(c.__all__) | set(dir(c))):",
+        "    try:",
+        "        getattr(c, n)",
+        "    except ImportError:",
+        "        pass",
+        "import dynameta.carriers.thermal_fem, dynameta.carriers.thermal_fem.kirchhoff",
+        "import dynameta.carriers.thermal_fem.twotemp, dynameta.carriers.electrothermal",
+        "loaded = sorted(m for m in ('ngsolve', 'netgen') if m in sys.modules)",
+        "assert not loaded, loaded",
+        "print('lazy')"])
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(_PKG.parent))
+    assert out.returncode == 0 and "lazy" in out.stdout, out.stderr[-3000:]
+
+
+def test_lazy_module_proxy_contract():
+    """LazyModule forwards attributes, imports once, and a MISSING package raises the same
+    ModuleNotFoundError (with .name) the eager `import` did -- at first use."""
+    from dynameta.lazy_import import LazyModule
+    j = LazyModule("json")
+    assert not j.is_loaded
+    import json
+    assert j.dumps is json.dumps and j.is_loaded and "loaded" in repr(j)
+    missing = LazyModule("dynameta_no_such_pkg_xyz")
+    try:
+        missing.anything
+    except ModuleNotFoundError as e:
+        assert e.name == "dynameta_no_such_pkg_xyz"
+    else:
+        raise AssertionError("a missing package must raise ModuleNotFoundError at first use")
+
+
 _NC_RE = re.compile(r"HBAR\s*\*\*\s*2\s*\)\s*\)\s*\*\*\s*1\.5")
 
 

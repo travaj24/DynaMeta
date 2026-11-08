@@ -9,11 +9,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
 import numpy as np
-import ngsolve as ng
 
+from dynameta.lazy_import import LazyModule
 from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, add_load_terms, _build_layered_mesh, build_thermal_forms, mean_T_per_layer
 from dynameta.carriers.thermal_fem.transient import ThermalTransientResult
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
+
+ng = LazyModule("ngsolve")   # lazy (v0.14, 2026-11-04): ngsolve's OpenBLAS commits ~4 GB at load
 
 # ---- R21: temperature-dependent k(T) via the EXACT Kirchhoff transform ------------------------
 

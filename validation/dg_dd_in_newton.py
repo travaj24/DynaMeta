@@ -34,8 +34,10 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
-import devsim as ds
+ds = import_devsim()
+
 
 from dynameta.constants import HBAR, KB, M_E, Q_E, T_REF
 from dynameta.carriers import eq_registry as _R
@@ -215,10 +217,11 @@ def main():
     _ewd(devc, regc, "vdiff_f",
          "(Potential@n0 + LambdaFrozen@n0 - Potential@n1 - LambdaFrozen@n1)/V_t", ("Potential",))
     _ewd(devc, regc, "vdiff_g_f", "vdiff_f / g_enh", ("Potential", "Electrons"))
-    _ewd(devc, regc, "Bern_g_f", "B(vdiff_g_f)", ("Potential", "Electrons"))
-    jnf = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
-           "kahan3(Electrons@n1*Bern_g_f, Electrons@n1*vdiff_g_f, -Electrons@n0*Bern_g_f)")
-    _ewd(devc, regc, "ElectronCurrentF", jnf, ("Electrons", "Potential"))
+    from dynameta.carriers.sg_flux import install_sg_current      # the ONE SG kernel (2026-11-04)
+    install_sg_current(devc, regc, carrier="electrons", density="Electrons", vdiff="vdiff_g_f",
+                       bern="Bern_g_f", bern_m="Bern_g_f_m", current="ElectronCurrentF",
+                       prefactor="ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh",
+                       wrt=("Potential", "Electrons"), current_wrt=("Electrons", "Potential"))
     ds.delete_equation(device=devc, region=regc, name="ElectronContinuityEquation")
     _R.forget(devc, "ElectronContinuityEquation", loc=regc)
     _R.record_region_equation(devc, regc, name="ElectronContinuityEquation",
