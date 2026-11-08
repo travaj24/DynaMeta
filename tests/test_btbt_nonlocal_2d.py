@@ -1,0 +1,192 @@
+"""2-D nonlocal band-to-band tunnelling in the DEVSIM Newton (carriers/btbt_nonlocal.py + btbt_nonlocal_2d.py).
+Every case that adds the term runs in a CHILD process (tests/_btbt_nonlocal_child.py: DEVSIM's custom-equation
+registration and circuits are permanent); the children run the suite's DC well-posedness hook too. numba is
+REQUIRED for 2-D (user decision 23).
+
+OLD CODE (ec67290): setup_btbt_nonlocal refuses every 2-D device (NotImplementedError, decision 21) -- each child
+below fails at its setup call (MEASURED by running this file against an export of ec67290).
+
+  L2  LATERALLY UNIFORM 2-D Zener (4 rows, DEVSIM tensor mesh) at 0.9 V reverse: (a) every 2-D path == the 1-D
+      model on its own row of the 2-D solution; (b) q Int G per width == the 1-D Zener DEVICE (its own solve);
+      (c) the hole / electron residual shares cancel, the terminal current == q Int G within the contact-current
+      floor; (d) the Newton needs no more iterations than the local model's 2-D twin (+3).
+  S2  SLANTED (30 deg) FDT-type diode: the junction crosses the tensor mesh, paths cross triangles obliquely and
+      turn with the field (DYNAMIC direction, exact Jacobian): detailed balance at 0 V; S = 4kT Re Y to 1e-4
+      with the nonlocal BTBT >= 50 % of S (both carriers at the start -- the local shortcut -- must fail); ssac
+      Re Y(1 Hz) == the DC dI/dV at 0 V and at -0.2 V; the term's share of DEVSIM's Jacobian == central
+      differences of DEVSIM's residual at -0.2 V, the start's gradient-patch columns included (they carry the
+      rotation of the path). Refutation: the Jacobian without the rotation terms fails it.
+  D2  refusals: no numba -> ImportError before anything is registered.
+"""
+import numpy as np
+import pytest
+
+ds = pytest.importorskip("devsim")
+pytest.importorskip("numba")
+
+from dynameta.carriers.devsim_env import import_devsim  # noqa: E402
+
+import_devsim()
+import _btbt_nonlocal_child as C  # noqa: E402
+
+EPS = np.finfo(float).eps
+Q = 1.602176634e-19
+KT4 = 4.0 * 1.380649e-23 * 300.0
+VT = 1.380649e-23 * 300.0 / Q
+EG = 1.12
+
+
+@pytest.fixture(scope="module")
+def lat2d():
+    return C.run_child("lat2d", vr=0.9)
+
+
+def test_l2a_each_2d_path_equals_the_1d_model_on_its_row(lat2d):
+    """Budget (the kernel gate U2): 1e-13 x (1 + B/F) x 4 with B/F <= 20 at the 0.9 V junction field
+    (1.9e9 / ~1e8 V/m) = 8.4e-12. MEASURED 5.6e-13 over 192 paths."""
+    r = lat2d
+    assert r["n2d"] == r["n1d"] == r["paths"] > 100
+    assert r["per_path_dev"] <= 1e-13 * (1 + 20.0) * 4
+
+
+def test_l2b_current_per_width_equals_the_1d_device(lat2d):
+    """The 2-D and 1-D devices are solved separately. Budget: the per-path identity above (8.4e-12) plus the
+    rate's sensitivity to the potential, d ln R/d psi <= (B/F)/E_g = 18 /V, times the measured difference
+    of the two solutions' potentials (max over the rows' spread and 2-D vs 1-D: ~1e-16 V). MEASURED 8e-15."""
+    r = lat2d
+    assert r["same_x_nodes"]
+    dpsi = max(r["row_spread_V"], r["psi_2d_vs_1d_V"])
+    dev = abs(r["I2d_per_W"] / r["I1d"] - 1.0)
+    print("2-D/W vs 1-D", dev, "dpsi", dpsi)
+    assert dev <= 1e-13 * 21 * 4 + 18.0 * dpsi
+
+
+def test_l2c_conservation_and_newton(lat2d):
+    """Shares cancel to 4 N eps; terminal current vs q Int G within 32 ulps of the 1.4e12 A/m^2 majority SG term
+    (the Z3 budget of tests/test_devsim_tunneling.py; per unit width) + 1e-4 I; iterations <= local + 3."""
+    r = lat2d
+    assert abs(r["hole_share"] + r["elec_share"]) <= 4 * r["paths"] * EPS * r["abs_share"]
+    assert abs(r["In2d_per_W"] - r["I2d_per_W"]) <= 4 * r["paths"] * EPS * r["I2d_per_W"]
+    floor = 32.0 * EPS * Q * 0.135 * VT * C.ZN / 2e-9
+    assert abs(r["J2d_per_W"] - r["I2d_per_W"]) <= floor + 1e-4 * r["I2d_per_W"]
+    assert r["its"] <= r["its_local"] + 3 and r["its_eq"] <= r["its_eq_local"] + 3
+
+
+@pytest.fixture(scope="module")
+def slant_eq():
+    return C.run_child("slant", part="eq", same_node=True)
+
+
+def test_s2_detailed_balance_and_fdt(slant_eq):
+    """Detailed balance: 64 eps x 60 (the 1-D N3 budget). FDT: 1e-4 (the D2 gate-B tolerance). MEASURED 5.3e-15
+    and <= 6.4e-9 with the nonlocal BTBT 55 % of S at 1 Hz."""
+    r = slant_eq
+    S, Y = np.array(r["S"]), np.array(r["ReY"])
+    dev = S / (KT4 * Y) - 1.0
+    print("slant: paths", r["stats"], "share", r["share_btbt"], "FDT", dev, "db", r["db_ratio"])
+    assert r["stats"]["paths"] > 300
+    assert r["db_ratio"] <= 64 * EPS * 60
+    assert r["share_btbt"] >= 0.5
+    assert np.max(np.abs(dev)) <= 1e-4
+
+
+def test_s2_proveout_same_node_source_fails_fdt(slant_eq):
+    """MEASURED -3.0e-2: the separated placement (hole at the start, electron spread over the end triangle) is
+    what the FDT needs in 2-D as in 1-D."""
+    r = slant_eq
+    dev = np.array(r["S_same"]) / (KT4 * np.array(r["ReY"])) - 1.0
+    assert abs(dev[0]) > 1e-4
+
+
+def _ssac_tol(r, tag):
+    G, G1, G2 = r["G" + tag], r["G" + tag + "_1"], r["G" + tag + "_2"]
+    return abs(G1 / G - 1.0) + 2.0 * abs(G2 / G - 1.0) + 2e-6
+
+
+def test_s2_ssac_equals_dc_conductance_at_0v(slant_eq):
+    """Budget as the 1-D N8: the Richardson correction's size + 2x the spread to the dv = 2e-4 V reference +
+    2e-6. MEASURED 1.8e-8."""
+    r = slant_eq
+    assert abs(r["ReY"][0] / r["G0"] - 1.0) <= _ssac_tol(r, "0")
+
+
+@pytest.fixture(scope="module")
+def slant_rev():
+    return C.run_child("slant", part="rev")
+
+
+def test_s2_ssac_equals_dc_conductance_at_reverse_bias(slant_rev):
+    """MEASURED 1.8e-5 against its budget 7.4e-5 (the reference's own spread across step sizes, 3e-5, is the
+    Lipschitz kinks of I(V) when path ends cross mesh edges -- module doc, section 3)."""
+    r = slant_rev
+    assert r["Ip_r"] > 0 and abs(r["In_r"] - r["Ip_r"]) <= 1e-13 * r["Ip_r"]
+    assert abs(r["Yr"][0] / r["Gr"] - 1.0) <= _ssac_tol(r, "r")
+
+
+def _jac_ratio(recs):
+    """max |J - Richardson FD| / (1e-6 row scale + 2 |fd - fd2|) over the tested columns."""
+    J = np.array([q["J"] for q in recs])
+    fd = -np.array([q["fd"] for q in recs])
+    fd2 = -np.array([q["fd2"] for q in recs])
+    rich = (4.0 * fd - fd2) / 3.0
+    scale = np.max(np.abs(J), axis=0)[None, :]
+    return float(np.max(np.abs(J - rich) / (1e-6 * scale + 2.0 * np.abs(fd - fd2)))), \
+        float(np.max(np.abs(J - rich) / scale))
+
+
+def test_s2_jacobian_matches_fd_of_devsim_residual(slant_rev):
+    """The strongest path's hole row and end-triangle electron rows, columns: the start, a mid-path node, the
+    end triangle and the start's gradient patch (theta(psi)). Budget: 1e-6 of the row scale (the J1 pattern)
+    + 2 |fd - fd2|. MEASURED 1.4e-10 relative; dR/dtheta / R = 1.2 % per radian at that path."""
+    r = slant_rev
+    ratio, rel = _jac_ratio(r["recs"])
+    print("slant Jacobian: ratio", ratio, "rel", rel, "dR/dtheta", r["dR_dtheta"], "R", r["R_k"])
+    assert r["dR_dtheta"] is not None and abs(r["dR_dtheta"]) > 1e-3 * abs(r["R_k"])
+    assert ratio <= 1.0
+
+
+@pytest.mark.slow
+def test_s2_refute_jacobian_without_rotation_terms():
+    """~50 s (a third slanted-diode child). The frozen-geometry Jacobian of a DYNAMIC-direction term misses the
+    rotation of the paths: it must fail the gate above."""
+    r = C.run_child("slant", part="rev", drop_rotation=True)
+    ratio, rel = _jac_ratio(r["recs"])
+    print("without rotation terms: ratio", ratio, "rel", rel)
+    assert ratio > 10.0
+
+
+def test_d2_numba_missing_refuses_before_registration(monkeypatch):
+    import dynameta.numba_env as NE
+    from dynameta.carriers import btbt_nonlocal as NL
+    from dynameta.carriers import btbt_nonlocal_2d as B2
+    from dynameta.carriers import custom_terms as CT
+    from dynameta.carriers.tunneling import SILICON_HURKX
+    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers import physics_bipolar_dd as BP
+    for dv in list(ds.get_device_list()):
+        ds.delete_device(device=dv)
+    for m in list(ds.get_mesh_list()):
+        ds.delete_mesh(mesh=m)
+    try:
+        ds.create_2d_mesh(mesh="nm2_m")
+        for pos in (0.0, 2e-8):
+            ds.add_2d_mesh_line(mesh="nm2_m", dir="x", pos=pos, ps=5e-9)
+            ds.add_2d_mesh_line(mesh="nm2_m", dir="y", pos=pos, ps=5e-9)
+        ds.add_2d_region(mesh="nm2_m", material="Si", region="r")
+        ds.finalize_mesh(mesh="nm2_m")
+        ds.create_device(mesh="nm2_m", device="nm2")
+        _R.clear("nm2")
+        ds.node_model(device="nm2", region="r", name="NetDoping", equation="ifelse(x < 1e-8, -1e24, 1e24)")
+        BP.setup_bipolar_region("nm2", "r", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1e16, mobility_n_m2Vs=0.1,
+                                mobility_p_m2Vs=0.04, tau_n_s=1e-6, tau_p_s=1e-6, fd_enhancement=False)
+        monkeypatch.setattr(NE, "_NUMBA_OK", False)
+        monkeypatch.setattr(B2, "have_numba", NE.have_numba)
+        with pytest.raises(ImportError, match="decision 23"):
+            NL.setup_btbt_nonlocal("nm2", "r", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=EG))
+        assert not CT.is_registered()
+    finally:
+        for dv in list(ds.get_device_list()):
+            ds.delete_device(device=dv)
+        for m in list(ds.get_mesh_list()):
+            ds.delete_mesh(mesh=m)
+        _R.clear("nm2")
