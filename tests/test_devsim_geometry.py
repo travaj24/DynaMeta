@@ -688,3 +688,77 @@ def test_element_field_and_element_volume_consumers():
             G.apply_exact_geometry(name, "r")
         ratio = 2.0 * elv(name, "r", "ElementNodeVolume").sum() / _true_volume(P, T).sum()
         assert (abs(ratio - 1.0) < 1e-9) == apply, ratio            # impact_ionization's own condition
+
+
+class _WriteRecorder:
+    """Records every devsim call that is not a get_* read (create / set / delete / solve ...)."""
+
+    def __init__(self, monkeypatch):
+        import devsim as _dsm
+        self.calls = []
+        for nm in dir(_dsm):
+            fn = getattr(_dsm, nm)
+            if nm.startswith("_") or nm.startswith("get_") or not callable(fn) or isinstance(fn, type):
+                continue
+            monkeypatch.setattr(_dsm, nm, self._wrap(nm, fn))
+
+    def _wrap(self, nm, fn):
+        def inner(*a, **kw):
+            self.calls.append(nm)
+            return fn(*a, **kw)
+        return inner
+
+
+def test_already_exact_meshes_are_only_read(monkeypatch):
+    """BYTE-IDENTITY of the library meshes under the automatic correction: on the 3-D Kuhn lattice (with
+    contacts, so the surface shares are checked too) and the 2-D rectilinear right-triangle mesh,
+    apply_exact_geometry makes NO devsim call other than get_* reads (every other devsim function is wrapped
+    and recorded) and returns written=False, so DEVSIM's state is untouched. Adversarial: the same recorder
+    on the 5-tet lattice sees the write (set_element_values) and written=True."""
+    P, T = kuhn_lattice(2)
+    P = P / 2.0
+    lo, hi = _plates(P, T)
+    _device("ro_k", P, {"r": T}, {"slo": lo, "shi": hi}, [("lo", "slo", "r"), ("hi", "shi", "r")])
+    gx, gy = np.linspace(0, 1, 5), np.array([0, 0.2, 0.3, 0.7, 1.0])
+    P2 = np.array([[x, y] for y in gy for x in gx])
+    T2 = np.array([t for j, i in itertools.product(range(4), range(4))
+                   for t in ([j * 5 + i, j * 5 + i + 1, (j + 1) * 5 + i],
+                             [j * 5 + i + 1, (j + 1) * 5 + i + 1, (j + 1) * 5 + i])])
+    _device("ro_2", P2, {"r": T2})
+    P5, T5 = five_tet_lattice(1)
+    _device("ro_5", P5, {"r": T5})
+    rec = _WriteRecorder(monkeypatch)
+    for name in ("ro_k", "ro_2"):
+        assert G.geometry_already_exact(name, "r")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            rep = G.apply_exact_geometry(name, "r", negative="warn")
+        assert rep.applied and not rep.written and rep.devsim_volume_ratio == pytest.approx(1.0, abs=1e-13)
+    assert rec.calls == []
+    assert not G.exact_geometry_applied("ro_k", "r")
+    assert not G.geometry_already_exact("ro_5", "r")
+    rep = G.apply_exact_geometry("ro_5", "r", negative="warn")
+    assert rep.written and "set_element_values" in rec.calls
+
+
+def test_correct_device_geometry_policies():
+    """The builders' device-level entry: exact_geometry=True means 'warn' and merges the per-region
+    negative-couple warnings into ONE UnreliableResultWarning; 'raise' measures every region first and
+    leaves the WHOLE device unchanged on a refusal; False does nothing; anything else is refused."""
+    assert G.resolve_policy(True) == "warn" and G.resolve_policy(False) is None
+    assert G.resolve_policy(None) is None and G.resolve_policy("clip") == "clip"
+    with pytest.raises(ValueError, match="exact_geometry must be"):
+        G.resolve_policy("yes")
+    P, R = jittered_delaunay(4, 0.3, 8, split=0.5)               # region b has a negative couple
+    _device("cd_r", P, R)
+    eec = {r: elv("cd_r", r, "ElementEdgeCouple") for r in R}
+    with pytest.raises(G.NegativeDualGeometryError):
+        G.correct_device_geometry("cd_r", "raise")
+    assert all(np.array_equal(elv("cd_r", r, "ElementEdgeCouple"), eec[r]) for r in R)
+    assert G.correct_device_geometry("cd_r", False) == {}
+    with pytest.warns(UnreliableResultWarning) as w:
+        reps = G.correct_device_geometry("cd_r")
+    assert len(w) == 1 and "region 'b'" in str(w[0].message)
+    assert set(reps) == set(R) and all(rp.written for rp in reps.values())
+    for r, T in R.items():
+        assert nv("cd_r", r).sum() == pytest.approx(_true_volume(P, T).sum(), rel=1e-13)
