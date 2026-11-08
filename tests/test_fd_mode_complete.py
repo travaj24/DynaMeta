@@ -287,17 +287,18 @@ def test_n_non_degenerate_limit_equals_legacy(opts):
 _FDEXT_CALLLOG_DIGEST = "dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49"
 
 
-def test_d_defaults_off_legacy_definition_is_byte_identical():
-    """GATE D (defaults off, plan section 2 item 5): (ii) the recorded digest of every legacy path this work
-    touches; (i) same-tree A/B: statistics=None gives the identical log; ADVERSARIAL: statistics='fermi_dirac'
-    changes it. (iii) the SG cross-version gate tests/test_devsim_sg_flux.py and the existing digests
-    (bipolar options, BTBT presets, unipolar DG) run unchanged (audit note)."""
+def test_d_legacy_statistics_definition_is_byte_identical():
+    """GATE D (REVISED 2026-11-07 for the v0.15.0 default change). statistics='legacy' -- the v0.14 default,
+    kept reachable explicitly -- reproduces the recorded digest of every legacy path (recorded on 06b9ade, 501
+    calls) character-for-character; the DEFAULT (statistics unset) now equals statistics='fermi_dirac' and
+    differs from it (the intended change: docs/audit/2026-11-06-v0.15.0-release.md, decision (a))."""
     import _fdext_calllog as CL
     import devsim  # noqa: F401
-    log = CL.record_call_log()
+    log = CL.record_call_log(statistics="legacy")
     assert len(log) == 501 and CL.digest(log) == _FDEXT_CALLLOG_DIGEST
-    assert CL.record_call_log(statistics=None) == log
-    assert CL.digest(CL.record_call_log(statistics="fermi_dirac")) != _FDEXT_CALLLOG_DIGEST
+    default = CL.record_call_log()
+    assert default == CL.record_call_log(statistics="fermi_dirac")
+    assert CL.digest(default) != _FDEXT_CALLLOG_DIGEST
 
 
 def test_d_kernels_default_strings_unchanged_and_fd_guards():

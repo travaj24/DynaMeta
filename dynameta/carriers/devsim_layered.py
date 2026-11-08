@@ -793,9 +793,8 @@ class LayeredDevsimBuilder:
         # ONE helper shared with the 3-D builder (v0.14 row 3.2-7).
         from dynameta.carriers.bipolar_options import band_dos_at_T
         Nc, Nv = band_dos_at_T(dos, tr.dos_mass_p_kg, getattr(tr, "bipolar_options", None))
-        # v0.15 carrier statistics (TransportModel.carrier_statistics): None -> the legacy FD g-factor
-        # (fd_enhancement=True, statistics unset: byte-identical); "boltzmann" -> g == 1; "fermi_dirac"
-        # -> FD transport + FD detailed balance.
+        # carrier statistics (TransportModel.carrier_statistics): None -> "fermi_dirac" (v0.15.0 default: FD
+        # transport + FD detailed balance); "boltzmann" -> g == 1; "legacy" -> the v0.14 default, byte-identical.
         stats = getattr(tr, "carrier_statistics", None)
         # n_i at the region's T: n_i_m3 as given, or derived by the band-temperature model (derive_n_i=True)
         n_i = band_data_at_T(tr, transport_temperature_K(tr)).n_i_m3
