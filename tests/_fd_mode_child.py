@@ -1097,6 +1097,10 @@ def sc_dg_fd(opts):
     keep = {}
     if opts.get("jac"):
         V._drop = lambda dev, mesh: keep.setdefault("dev", dev) and None
+        # the validation's devices opt into DEVSIM's 128-bit models (extended_precision); there a perturbation
+        # set_node_value(...) does not reach the assembled residual (MEASURED: every central difference exactly
+        # 0, either statistics), so the Jacobian check runs the same device in double precision
+        V.XP.enable = lambda dev: None
     N_A, delta = float(opts.get("N_A", 3e23)), float(opts.get("delta", 0.6))
     r = V.mos("holes", N_A, delta, fd=True, length=150e-9, quantum_srh=True, steps=16, rel=1e-6)
     nc, nv = V.nc_model(V.MN, V.GVN), V.nc_model(V.MP, V.GVP)
@@ -1116,7 +1120,7 @@ def sc_dg_fd(opts):
         reg = ds.get_region_list(device=dev)[0]
         variables = [ds.get_equation_command(device=dev, region=reg, name=e)["variable_name"]
                      for e in ds.get_equation_list(device=dev, region=reg)]
-        ds.set_node_values(device=dev, region=reg, name="Electrons", values=_lst(1.2 * _v(dev, "Electrons", reg)))
+        ds.set_node_values(device=dev, region=reg, name="QSqrtN", values=_lst(1.1 * _v(dev, "QSqrtN", reg)))
         x = _v(dev, "x", reg)
         nodes = [int(i) for i in np.argsort(x)[1:5]]
         out["variables"] = variables
