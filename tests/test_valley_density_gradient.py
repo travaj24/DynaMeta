@@ -122,7 +122,7 @@ def test_two_identical_sets_reduce_to_the_isotropic_model(fd):
     psi <= 1.1e-16 V, Lambda_n vs Lambda_eff <= 1.9e-16 V. Gate 1e-12: the two are different sequences of
     double-precision operations converged to REL 1e-5 from the same seed, so only round-off separates them
     (~10 eps per row x the Newton's last correction). Refutation: one set's mass x (1 + 1e-4) must move n by
-    more than 1e-9 (a real, if tiny, model change -- MEASURED in the assertion message)."""
+    more than 1e-9 (a real, if tiny, model change -- MEASURED 8.8e-5 Boltzmann, 8.4e-5 FD)."""
     a = V.mos_qe(NA, (0.6, 1.2), fd=fd, dg_gamma=GW, tag="tw_iso")
     b = V.mos_qe(NA, (0.6, 1.2), fd=fd, dg_gamma=GW, tag="tw_two", valleys=TWIN)
     bad = V.mos_qe(NA, (1.2,), fd=fd, dg_gamma=GW, tag="tw_bad",
@@ -239,8 +239,8 @@ def test_mesh_convergence_of_the_inversion_charge():
     centroid >= 1.7 (the scheme is second order; G1-7's gate for the isotropic DG), Si(100) sets, FD,
     GAMMA_WALL, 1.2 V. And the Richardson estimate of the DEFAULT mesh's (0.05 nm) discretization error,
     (4/3)|q(0.05) - q(0.025)| / q, must be <= 1e-3: 1/25 of the smallest DG-vs-SP difference of the validation
-    matrix (+2.86 %), so no reported model error is a mesh artefact. MEASURED: orders 1.96 (N_inv) / see the
-    assertion message (centroid); default-mesh error 2.2e-4 (N_inv)."""
+    matrix (+2.86 %), so no reported model error is a mesh artefact. MEASURED: orders 1.956 (N_inv) / 1.963
+    (centroid); default-mesh error 2.2e-4 / 2.4e-4."""
     runs = [V.mos_qe(NA, (1.2,), fd=True, dg_gamma=GW, valleys=SI, mesh_nb=V.qe_mesh(h0), tag="mc%d" % i)[0]
             for i, h0 in enumerate((0.1e-9, 0.05e-9, 0.025e-9))]
     for j in (0, 1):
@@ -412,7 +412,8 @@ def test_ssac_of_the_valley_closure_is_the_low_frequency_cv(tmp_path):
     1 Hz capacitance equals the DC dQ/dV of the wall charge (Richardson of +-1 / +-0.5 mV) to 1e-6, G1-5''s gate
     and budget; the bare 1 mV difference must miss by > 1e-5 (its O(dV^2) curvature). The small-signal matrix is
     the DC Jacobian above plus the time terms, so this also checks that no valley row is missing from it. Child
-    process (DEVSIM circuits cannot be deleted in-process)."""
+    process (DEVSIM circuits cannot be deleted in-process). MEASURED: C_ssac / C_dc - 1 = -8.3e-10; the bare
+    1 mV difference -5.8e-5."""
     out = tmp_path / "ssac.json"
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     subprocess.run([sys.executable, "-c", _SSAC_CHILD, root, str(out)], check=True,
