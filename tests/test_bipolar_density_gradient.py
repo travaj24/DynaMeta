@@ -35,20 +35,37 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 # set_dg_gamma co-ramp sets; the Lambda row 'Electrons - QSqrtN*QSqrtN' replaces 'QLambda +
 # wall_lambda_pin'; no pinned ElectronContinuityEquation contact row) and the seed's node values (plus
 # the seeded Electrons). Every region model, edge model and flux string is unchanged.
-_DG_CALLLOG_DIGEST = "44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374"
+# RE-RECORDED 2026-11-10 (v0.15.1) as the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
+# tests/_cr_libm.py) on an export of e95a638 (the commit that recorded the value above) with the current
+# recorder + helpers copied in: 6af06e07... on Windows AND in WSL (glibc), = this tree's on both. The raw
+# digest of e95a638 and of this tree is still 44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374
+# on both platforms (the same log), but it carried numpy's np.tanh in the wall seed, which misses 3 of the
+# fixture's 15 arguments by 0.57-0.68 ulp (vs mpmath at 300 bits; identically on both platforms -- numpy's own
+# tanh, not the C library); cancellation in the seed turns that into 1-433726 ulp in 9 literals of 3 calls.
+# docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.
+_DG_CALLLOG_DIGEST = "6af06e078b7bdd3c41c02611e288dbd069b11228b9d7e97aebf25b4f7f29ef60"
 _DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
 # RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
 # e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
 # ElectronCurrent / HoleCurrent and their derivatives plus Bern_g_m / Bern_gp_m (+20 calls).
 # Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
+# 2026-11-10 (v0.15.1): now the CANONICAL log's digest (correctly rounded transcendentals, tests/_calllog.py),
+# re-recorded on an export of 273473b (the commit that recorded it): the SAME value, on Windows AND in WSL,
+# raw and canonical, and = this tree's -- none of this log's transcendental results is a hard rounding case on
+# either platform. It is pinned canonically so that stays true on any other libm.
 _BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 _BIPOLAR_CALLLOG_CALLS = 237
 # v0.15.0 (2026-11-07, the default statistics 'fermi_dirac'): the two digests above are now those of the
 # EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
 # tests: default == explicit 'fermi_dirac').
+# 2026-11-10 (v0.15.1): both CANONICAL (tests/_calllog.py), re-recorded on an export of 8434cce (the commit that
+# recorded them), Windows AND WSL, = this tree's on both. DG: the raw digest on both platforms was
+# 89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded (the same np.tanh seed misses as
+# _DG_CALLLOG_DIGEST); bipolar: canonical = raw, unchanged (its ~1.4e6 np.power elements of the FD
+# equilibrium root go through the vectorized fast path of tests/_cr_libm.py: 19 s instead of 1.4 s raw).
 _DG_CALLLOG_DIGEST_V0150, _DG_CALLLOG_CALLS_V0150 = (
-    "89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded", 157)
+    "cb2b24a2f73c50c0cd60b6f335903a99f049386c2331e6db3448c470abcf31fc", 157)
 _BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
     "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d", 302)
 
@@ -59,7 +76,10 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     """The shared kernel (_install_dg_variables), the generalized contact repoint and the hole-aware
     set_dg_gamma leave the UNIPOLAR DG's every DEVSIM definition call -- expression strings,
     parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
-    2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST)."""
+    2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST). Canonical logs since 2026-11-10 (v0.15.1). STILL
+    BITES (MEASURED on Windows and in WSL, canonical): lam = v_t ln(t t) written v_t (2 ln t) -- mathematically
+    equal -- moves 6 seed literals by 1-12118 ulp and changes both digests; a text change of the DG contact
+    equation ('QSqrtN - (...)') changes both."""
     import _dg_calllog as CL
     legacy = CL.record_call_log(statistics="legacy")
     assert len(legacy) == _DG_CALLLOG_CALLS
@@ -72,7 +92,9 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
 def test_bipolar_dd_without_dg_is_byte_identical():
     """No bipolar DG requested -> the bipolar DD definition is the recorded one (v0.13 / e46bd25 up to
     the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
-    `scale` keyword defaults to None)."""
+    `scale` keyword defaults to None). Canonical logs since 2026-11-10 (v0.15.1); STILL BITES (MEASURED,
+    Windows and WSL): see tests/test_bipolar_recombination_bgn_ionization.py::test_defaults_off_physics_
+    definition_is_byte_identical_to_the_recorded_digest."""
     import _bipolar_calllog as CL
     legacy = CL.record_call_log(statistics="legacy")
     assert len(legacy) == _BIPOLAR_CALLLOG_CALLS

@@ -655,6 +655,12 @@ _CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205
 # fixture's rows are identical.
 _CALLLOG_DIGEST_V0150 = "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d"
 _CALLLOG_CALLS_V0150 = 302
+# 2026-11-10 (v0.15.1): both digests are now of the CANONICAL logs (correctly rounded transcendentals:
+# tests/_calllog.py, tests/_cr_libm.py), re-recorded on exports of the commits that recorded them (273473b for
+# _CALLLOG_DIGEST, 8434cce for _V0150) with the current recorder + helpers copied in: the SAME two values, raw
+# and canonical, on Windows AND in WSL (glibc), and = this tree's on both -- none of these logs' libm results is
+# a hard rounding case there. They are pinned canonically so that holds on any libm / numpy build.
+# docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.
 
 
 def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_digest():
@@ -662,7 +668,15 @@ def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_diges
     the bipolar API makes for two fixtures (FD + DC contacts; Boltzmann + a circuit contact), with no
     `options`, hashes to the recorded digest -- every expression string and value character-for-
     character (v0.13.0's up to the 2026-11-04 flux re-record, see _CALLLOG_DIGEST). The recorder is
-    SENSITIVE: the same fixtures with one option on change the digest."""
+    SENSITIVE: the same fixtures with one option on change the digest.
+    CANONICAL since 2026-11-10 (v0.15.1): the pinned logs are recorded with correctly rounded
+    transcendentals, so the digests do not depend on the platform's libm. STILL BITES (MEASURED on Windows
+    and in WSL, canonical): the ohmic built-in offset written V_t (ln n0 - ln n_i) instead of V_t ln(n0/n_i)
+    -- mathematically equal -- moves the offset rows by 1 ulp (2 literals in the legacy log, 1 in the default)
+    and changes both digests; the FD closed-form coefficient K2 = 3 (GA - GC GB/GD)/GD instead of
+    (3 GA - 3 GC GB/GD)/GD moves 8 literals of the default log by 1 ulp and changes it; the SRH string with
+    'Holes*Electrons' changes both (6 calls each). The default == explicit 'fermi_dirac' cross-check compares
+    two RAW logs of this machine (one libm; the canonical FD log costs 19 s)."""
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -675,7 +689,7 @@ def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_diges
     assert CL.digest(legacy) == _CALLLOG_DIGEST
     log = CL.record_call_log()
     assert (len(log), CL.digest(log)) == (_CALLLOG_CALLS_V0150, _CALLLOG_DIGEST_V0150)
-    assert log == CL.record_call_log(statistics="fermi_dirac")
+    assert CL.record_call_log(canonical=False) == CL.record_call_log(statistics="fermi_dirac", canonical=False)
 
 
 @pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
