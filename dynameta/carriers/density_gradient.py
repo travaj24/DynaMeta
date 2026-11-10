@@ -50,7 +50,7 @@ from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m", "GAMMA_WALL",
            # v0.15.1: the valley-resolved electron DG (data)
-           "ValleySet", "SI100_ELECTRON_VALLEYS", "check_valley_table"]
+           "ValleySet", "SI100_ELECTRON_VALLEYS", "check_valley_table", "GAMMA_SI100_SP_CALIBRATED"]
 
 
 # GAMMA_WALL (user decision 2026-11-04: a named constant; the DEFAULT gamma stays 1 everywhere).
@@ -139,6 +139,38 @@ SI100_ELECTRON_VALLEYS = (
     ValleySet("Si(100) 2-fold (m_z = m_l)", 0.916 * M_E, 1.0 / 3.0, 0.19 * M_E, 2),
     ValleySet("Si(100) 4-fold (m_z = m_t)", 0.19 * M_E, 2.0 / 3.0, float(np.sqrt(0.916 * 0.19)) * M_E, 4),
 )
+
+
+# GAMMA_SI100_SP_CALIBRATED (v0.15.1, opt-in; user decision 2026-11-10: "item 2 as opt-in input"). The DEFAULT gamma
+# stays 1 and GAMMA_WALL stays the a-priori wall value; this is a FIT, to be passed explicitly
+# (setup_bipolar_dg(..., electron_valleys=SI100_ELECTRON_VALLEYS, gamma_n=GAMMA_SI100_SP_CALIBRATED)).
+#   FITTED TO: DynaMeta's own anisotropic Schrodinger-Poisson inversion oracle
+#     (validation.bipolar_density_gradient.sp_inversion with sp_valleys(SI100_ELECTRON_VALLEYS), the valleys made
+#     DOS-consistent): effective-mass, parabolic bands, an INFINITE barrier at the oxide (no penetration), classical
+#     holes, 300 K, a fixed surface potential. NOT fitted to measurements or to a published SP.
+#   FOR: the VALLEY-RESOLVED electron DG with the Si(100) sets (not the isotropic model), statistics='fermi_dirac',
+#     the quasi-equilibrium closure (MOS capacitor), p-type N_A = 1e23 .. 1e24 m^-3, psi_s - psi_b = 1.00 .. 1.30 V
+#     in 50 mV steps (21 points, N_inv 1.4e14 .. 1.3e17 m^-2).
+#   HOW: the two-decimal value minimizing the largest |N_inv error| over the 21 points, measured by direct runs
+#     at 1.86 / 1.87 / 1.88 (max 2.10 / 1.51 / 1.33 %); the per-point matching gamma*(N_inv) is 1.82 .. 1.90
+#     (it drifts down by <= 0.08 toward the highest band bending; spline over gamma = 1.60 .. 2.20).
+#   MEASURED RESIDUALS at 1.88 (2026-11-10, Windows, this tree; GATE VC of validation/valley_density_gradient.py
+#     re-measures them): N_inv -1.33 .. +0.93 % (all 21 points; -1.33 .. +0.28 % for N_inv >= 1e16 m^-2),
+#     centroid -2.75 .. +1.51 %. At GAMMA_WALL the same matrix gives N_inv +2.9 .. +7.9 % (N_inv >= 1e16 m^-2;
+#     up to +14.5 % near threshold) and centroid -1.2 .. -5.2 %.
+#   NOT COVERED: other orientations ((110): Pons et al. find a gamma 40 % different), holes, oxide penetration,
+#     other temperatures, Boltzmann statistics (there the matching gamma drifts with bias: research note 6.3),
+#     2-D/3-D confinement (Andrei: the fitted mass depends on the box size), accumulation, the isotropic model.
+#   WHY A FIT IS LEGITIMATE (the literature calibrates this coefficient; none derives an inversion-layer value):
+#     Biegel, Rafferty, Ancona & Yu (NASA NTRS 20000115881, sec. II): DG does not incorporate quantum mechanics
+#     exactly, "so r_n and r_p may be used as fitting parameters"; Watling et al., SISPAD 2002, p. 268: "the
+#     effective mass and/or the parameter r in the DG formalism should be considered as an adjustable parameter
+#     and have to be properly calibrated"; Schenk, ESSDERC 2001, Eq. 5: gamma "is a fit factor" (calibrated to
+#     Schrodinger); Pons et al., SISPAD 2013, Tab. 1: gamma calibrated per orientation against SP. Physical
+#     direction: fewer occupied subbands push the first-order coefficient up from the free-gas wall value
+#     (GAMMA_WALL) toward the one-state Bohm value 3 (Watling; Andrei, WSEAS 2005). Source: the 2026-11-08
+#     research note behind this option (dg_gamma_research/report.md, sections 2.2, 4, 6.3, 7.3).
+GAMMA_SI100_SP_CALIBRATED = 1.88
 
 
 def check_valley_table(valleys) -> tuple:

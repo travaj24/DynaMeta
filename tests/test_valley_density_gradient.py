@@ -274,6 +274,27 @@ def test_two_d_laterally_uniform_valley_mos_equals_one_d():
     assert max(float(np.max(np.abs(c["p"] / one[0]["p"] - 1.0))) for c in bad["cols"].values()) > 1e-10
 
 
+# ---- Phase C: the opt-in calibrated gamma ---------------------------------------------------------------------
+
+def test_calibrated_gamma_states_its_measured_residuals():
+    """GAMMA_SI100_SP_CALIBRATED is a FIT (density_gradient: to DynaMeta's anisotropic SP oracle, valley-resolved
+    Si(100) DG, FD, closure, 1e23 .. 1e24 m^-3, 1.00 .. 1.30 V). Its stated residuals hold on the 3e23 m^-3 row of
+    the fit matrix (seven band bendings): N_inv within -1.35 .. +0.95 %, centroid within -2.80 .. +1.55 % (the
+    statement rounded outward to 0.05 point; the full matrix is validation GATE VC). MEASURED at 3e23: see the
+    assertion messages. Refutation: GAMMA_WALL (the default wall value) on the same points leaves that band
+    (N_inv +3.0 .. +7.0 %). Opt-in: the defaults (gamma 1, GAMMA_WALL) are unchanged."""
+    from dynameta.carriers.density_gradient import GAMMA_SI100_SP_CALIBRATED
+    assert GAMMA_SI100_SP_CALIBRATED == 1.88 and DG.GAMMA_SI100_SP_CALIBRATED == 1.88
+    deltas = tuple(np.round(np.arange(1.0, 1.3001, 0.05), 10))
+    sp = [V.sp_inversion(NA, d, valleys=V.sp_valleys(SI)) for d in deltas]
+    for g, inside in ((GAMMA_SI100_SP_CALIBRATED, True), (GW, False)):
+        r = V.mos_qe(NA, deltas, fd=True, dg_gamma=g, valleys=SI, tag="cal")
+        en = [V.mos_sheet(a)[0] / s["N_inv"] - 1.0 for a, s in zip(r, sp)]
+        ec = [V.mos_sheet(a)[1] / s["centroid"] - 1.0 for a, s in zip(r, sp)]
+        ok = -0.0135 <= min(en) and max(en) <= 0.0095 and -0.0280 <= min(ec) and max(ec) <= 0.0155
+        assert ok == inside, (g, en, ec)
+
+
 # ---- Phase B: full transport (the single continuity row with the Lambda_eff flux) ------------------------------
 
 def _qfl_ptp(dev):

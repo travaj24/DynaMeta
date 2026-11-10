@@ -52,13 +52,18 @@ from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.eq_registry import node_with_derivs as _node_with_derivs
 from dynameta.carriers.density_gradient import GAMMA_WALL   # the hard-wall gamma (2026-11-04)
+from dynameta.carriers.density_gradient import (GAMMA_SI100_SP_CALIBRATED, SI100_ELECTRON_VALLEYS,  # noqa: F401
+                                                ValleySet)    # v0.15.1: the valley-resolved electron DG (data)
 from dynameta.constants import HBAR, Q_E
 
 __all__ = ["setup_dg_quantum_correction", "setup_contact_dg", "setup_dg_hard_wall",
            "seed_dg_from_solution", "set_dg_gamma", "dg_b_coefficient", "GAMMA_WALL",
            # D2d: bipolar density-gradient
            "setup_bipolar_dg", "setup_contact_bipolar_dg", "setup_dg_insulator_wall",
-           "seed_bipolar_dg", "bipolar_dg_carriers", "DG_SRH_TERM"]
+           "seed_bipolar_dg", "bipolar_dg_carriers", "DG_SRH_TERM",
+           # v0.15.1: the valley-resolved electron DG (setup_bipolar_dg(electron_valleys=...))
+           "ValleySet", "SI100_ELECTRON_VALLEYS", "GAMMA_SI100_SP_CALIBRATED", "electron_valley_sets",
+           "valley_densities"]
 
 
 def dg_b_coefficient(m_eff_kg: float, gamma: float = 1.0) -> float:
@@ -464,6 +469,27 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
       Each carrier takes its own gamma; for one gate oxide pass GAMMA_WALL to both.
       Doc: docs/audit/2026-11-03-devsim-bipolar-density-gradient.md (GATE B, GATE C, Limits).
 
+    electron_valleys (v0.15.1, opt-in; default None = the isotropic electron DG above, unchanged):
+      a table of density_gradient.ValleySet (e.g. SI100_ELECTRON_VALLEYS) -> VALLEY-RESOLVED electrons: every set
+      gets its own quantum potential with its own quantization mass and share of N_c, all sets share one quasi-
+      Fermi level, the electron current is the single continuity row on the total density (module block
+      "VALLEY-RESOLVED"). Pass it INSTEAD of m_eff_n_kg (both: ValueError); gamma_n applies to every set. A
+      one-set table IS the isotropic model (same rows, bit-identical solve). Needs statistics 'fermi_dirac' or
+      'boltzmann' ('legacy' is refused). Read back: electron_valley_sets / valley_densities; QLambda is then the
+      effective Lambda_eff (a model), the per-set variables are QSqrtN_v<k> / QLambda_v<k>.
+      WHY: a real Si(100) inversion layer moves into the two valleys with the heavy confinement mass m_l; one
+      isotropic quantum potential cannot represent that repopulation. MEASURED against the DOS-consistent
+      anisotropic Schrodinger-Poisson oracle (p-Si 1e23 .. 1e24 m^-3, 1.00 .. 1.30 V, FD, GAMMA_WALL, closure;
+      validation/valley_density_gradient.py GATE VA): N_inv +2.9 .. +7.9 % for N_inv >= 1e16 m^-2 (up to +14.5 %
+      near threshold), centroid -1.2 .. -5.2 %, 2-fold share within 0.02 .. 0.08 of the SP's; the isotropic model
+      against the same oracle: -8.7 .. -39 %. Cost: +2 unknowns per node per extra set (1-D ramp ~1.7x the time).
+      gamma_n = GAMMA_SI100_SP_CALIBRATED (= 1.88, a FIT to that oracle; its comment in density_gradient states
+      fit range and residuals: N_inv -1.3 .. +0.9 %, centroid -2.8 .. +1.5 %) is the opt-in calibration; the
+      default stays gamma = 1 and GAMMA_WALL stays the a-priori wall value.
+      Limits (not measured): other orientations (other tables), holes (single population), valley-dependent
+      mobility (one mu_n), oxide penetration, temperatures other than 300 K, 2-D/3-D confinement.
+      Doc: docs/audit/2026-11-10-v0.15.1-valley-resolved-dg.md.
+
     Each carrier gets the shared kernel (_install_dg_variables) and its continuity equation is
     re-pointed at the quantum-shifted SG flux (ElectronCurrentDG / HoleCurrentDG) built on the
     region's own quasi-field (vdiff_g / vdiff_gp: FD g-factor, BGN band edges and all -- header
@@ -839,32 +865,23 @@ def _install_valley_electrons(device: str, region: str, valleys: tuple, gamma: f
         ds.set_parameter(device=device, region=region, name=_vk("vdg_share", k), value=float(v.dos_share))
         ds.set_parameter(device=device, region=region, name=_vk("N_dos", k), value=float(v.dos_share) * n_c)
         _declare_dg_variables(device, region, _vk("QSqrtN", k), _vk("QLambda", k))
-    # the set densities n_k = u_k^2 and their activities (+ the derivative chain to u_k, which DEVSIM's diff()
-    # looks up by name: <model>:<variable>)
-    for k in range(nsets):
-        u, nk, dos = _vk("QSqrtN", k), _vk("VDGn", k), _vk("N_dos", k)
-        ds.node_model(device=device, region=region, name=nk, equation="{0}*{0}".format(u))
-        ds.node_model(device=device, region=region, name="{}:{}".format(nk, u), equation="2*{}".format(u))
-        act = setup_log_activity(device, region, nk, dos, fd=fd)
-        ds.node_model(device=device, region=region, name="{}:{}".format(act, u),
-                      equation="{a}:{n}*{n}:{u}".format(a=act, n=nk, u=u))
-        if fd:
-            dd = fd_delta_derivative(device, region, nk, dos)            # HJ_VDGn_v<k>_Delta:VDGn_v<k>
-            ds.node_model(device=device, region=region, name="HJ_{}_Delta:{}".format(nk, u),
-                          equation="{d}*{n}:{u}".format(d=dd, n=nk, u=u))
-    # U = sum_k u_k^2 (the sets' total, = n by the k = 0 row) and its activity over N_c
+    # the set densities n_k = u_k^2 and U = sum_k u_k^2 (the sets' total, = n by the k = 0 row), with the
+    # derivative chain to the u's that DEVSIM's diff() looks up by name (<model>:<variable>): the FD correction
+    # Delta of each (the intervalley rows, Lambda_eff) and the reference set's activity (the closure row)
     usum = " + ".join("{0}*{0}".format(_vk("QSqrtN", k)) for k in range(nsets))
-    ds.node_model(device=device, region=region, name="VDGn", equation=usum)
-    act_u = setup_log_activity(device, region, "VDGn", "N_dos", fd=fd)
-    for k in range(nsets):
-        u = _vk("QSqrtN", k)
-        ds.node_model(device=device, region=region, name="VDGn:" + u, equation="2*{}".format(u))
-        ds.node_model(device=device, region=region, name="{}:{}".format(act_u, u),
-                      equation="{a}:VDGn*VDGn:{u}".format(a=act_u, u=u))
-        if fd:
-            dd = fd_delta_derivative(device, region, "VDGn", "N_dos")
-            ds.node_model(device=device, region=region, name="HJ_VDGn_Delta:" + u,
-                          equation="{d}*VDGn:{u}".format(d=dd, u=u))
+    dens = [(_vk("VDGn", k), "{0}*{0}".format(_vk("QSqrtN", k)), _vk("N_dos", k), (k,)) for k in range(nsets)]
+    for nk, expr, dos, ks in dens + [("VDGn", usum, "N_dos", tuple(range(nsets)))]:
+        ds.node_model(device=device, region=region, name=nk, equation=expr)
+        dd = fd_delta_derivative(device, region, nk, dos) if fd else None     # HJ_<nk>_Delta:<nk>
+        for k in ks:
+            u = _vk("QSqrtN", k)
+            ds.node_model(device=device, region=region, name="{}:{}".format(nk, u), equation="2*{}".format(u))
+            if fd:
+                ds.node_model(device=device, region=region, name="HJ_{}_Delta:{}".format(nk, u),
+                              equation="{d}*{n}:{u}".format(d=dd, n=nk, u=u))
+    act = setup_log_activity(device, region, "VDGn_v0", "N_dos_v0", fd=fd)
+    ds.node_model(device=device, region=region, name=act + ":QSqrtN_v0",
+                  equation="{}:VDGn_v0*VDGn_v0:QSqrtN_v0".format(act))
     for k, v in enumerate(valleys):
         _install_dg_variables(device, region, u=_vk("QSqrtN", k), lam=_vk("QLambda", k), carrier="Electrons",
                               b=_vk("b_dg", k), b_full=dg_b_coefficient(v.m_z_kg, gamma),
