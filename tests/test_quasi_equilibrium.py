@@ -24,6 +24,7 @@ from dynameta.carriers import physics_bipolar_dd as BP  # noqa: E402
 from dynameta.constants import EPS0, Q_E, V_T  # noqa: E402
 
 NA = 3.0e23
+EPS_F64 = float(np.finfo(np.float64).eps)
 
 
 def _qs_boltzmann(delta, n_a=NA, v_ch=0.0):
@@ -83,8 +84,8 @@ def test_closure_row_fd_activity_and_jacobian():
 
 
 def _sigma(dev):
-    """(equilibrated sigma_min, sigma_max, sigma_min after the quasi-Fermi change of variables) of
-    DEVSIM's DC Jacobian (the 4.4.2 tooling: well_posedness._assemble / _ruiz)."""
+    """(equilibrated sigma_min, sigma_max, the same two after the quasi-Fermi change of variables, n = the
+    unknowns) of DEVSIM's DC Jacobian (the 4.4.2 tooling: well_posedness._assemble / _ruiz)."""
     from dynameta.carriers import well_posedness as WP
     J, _, _ = WP._assemble()
     A = J.toarray()
@@ -95,7 +96,7 @@ def _sigma(dev):
         return s[-1], s[0]
 
     smin, smax = eq_svd(A)
-    out = {"smin": smin, "smax": smax}
+    out = {"smin": smin, "smax": smax, "n": A.shape[0]}
     eqs = set(ds.get_equation_list(device=dev, region="s"))
     if "ElectronContinuityEquation" in eqs and ds.get_equation_command(
             device=dev, region="s", name="ElectronContinuityEquation").get("edge_model"):
@@ -106,8 +107,17 @@ def _sigma(dev):
         T = np.eye(A.shape[0])                     # (psi, n, p) -> (psi, phi_n, phi_p), chain rule
         T[i_n, ip], T[i_n, i_n] = n / V_T, -n / V_T
         T[ih, ip], T[ih, ih] = -p / V_T, p / V_T
-        out["smin_qfl"] = eq_svd(A @ T)[0]
+        out["smin_qfl"], out["smax_qfl"] = eq_svd(A @ T)
     return out
+
+
+def _svd_floor(p):
+    """n eps: the largest sigma_min / sigma_max a dense SVD can report for an EXACTLY singular matrix of n
+    unknowns. LAPACK's SVD is backward stable: the computed sigma are the exact ones of J_eq + E with
+    ||E||_2 <= p(n) u ||J_eq||_2 (LAPACK Users' Guide 3rd ed. 4.9; p taken linear, p(n) = 2n, u = eps/2), so
+    by Weyl |sigma_computed - sigma_true| <= n eps sigma_max (the budget of tests/test_well_posedness.py::
+    test_mos_inversion_stall_carries_the_near_singular_diagnosis)."""
+    return p["n"] * EPS_F64
 
 
 def test_closure_removes_the_near_null_mode():
@@ -120,14 +130,33 @@ def test_closure_removes_the_near_null_mode():
     cond 1.5e4 <= 1e6 (P4's 1.45e-4 / 1.4e4, which is therefore the both-closed system). Pinned as NO
     HELP: the quasi-Fermi change of variables raises the full model's sigma_min by < 10x (MEASURED 1.7x;
     P4 0.65x) -- a future "Slotboom" proposal must beat this. FAILS on the old code (only the full
-    model exists)."""
+    model exists).
+    REVISED 2026-11-10 (v0.15.1; docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md). The full model's
+    sigma_min is BELOW the dense SVD's resolution, so the reported 2.6e-16 is the SVD's own round-off, and
+    the two old quotients (closed / full >= 1e8, qfl / full < 10) divided by noise. MEASURED (sigma_min /
+    sigma_max, in units of the floor n eps = 1.8e-13 for the n = 804 unknowns; Windows py3.14 / WSL CI proxy
+    OpenBLAS 0.3.26): full 3.8e-4 / 6.6e-4 (sigma_min 2.6e-16 / 4.6e-16), the SAME full model reached by
+    the 0.05 V ramp 5.7e-4 / 4.0e-4 (3.9e-16 / 2.8e-16): one physical state, four different "values". The
+    old closed / full was 1.9e8 on Windows but 1.1e8 in WSL, a 1.1x margin over its 1e8; qfl / full was
+    1.7 / 1.1. The gate now states the claim without a quotient, with the budget of _svd_floor (LAPACK
+    backward stability + Weyl: |sigma_computed - sigma_true| <= n eps sigma_max):
+    (i) full: sigma_min / sigma_max <= n eps -- singular to working precision (the near-null mode);
+    (ii) electrons closed: sigma_min / sigma_max >= 100 n eps -- then Weyl puts the computed sigma_min
+    within 1 % of the true one: the mode is gone, not hidden in round-off. MEASURED 8.8e4 n eps on both
+    platforms (1.57e-8; margin 880x);
+    (iii) both closed: cond <= 1e6 (unchanged: 1.5e4, a resolved value, 3.8e8 n eps);
+    (iv) NO HELP: after the quasi-Fermi change of variables the full model is still at the floor,
+    sigma_min / sigma_max <= n eps (MEASURED 1.2e-3 / 1.4e-3 of it).
+    STILL BITES (MEASURED on both platforms): closure=False on the "closed" case gives 5.7e-4 / 4.0e-4 n eps
+    and fails (ii); picking s[-2] (an off-by-one: 5.7e-7 = 3.2e6 n eps) fails (i)."""
     kw = dict(mesh_nb="p4", length=150e-9, probe=_sigma)        # the P4 fixture: 268 nodes, 804 dof
     full = V.mos_qe(NA, (0.70,), closure=False, step=0.02, tag="svdf", **kw)[0]["probe"]
     closed = V.mos_qe(NA, (0.70,), tag="svdc", **kw)[0]["probe"]
     both = V.mos_qe(NA, (0.70,), tag="svdb", close=("electrons", "holes"), **kw)[0]["probe"]
-    assert closed["smin"] / full["smin"] >= 1e8, (closed, full)
-    assert both["smax"] / both["smin"] <= 1e6, both
-    assert full["smin_qfl"] / full["smin"] < 10.0
+    assert full["smin"] / full["smax"] <= _svd_floor(full), full                        # (i)
+    assert closed["smin"] / closed["smax"] >= 100.0 * _svd_floor(closed), closed       # (ii)
+    assert both["smax"] / both["smin"] <= 1e6, both                                     # (iii)
+    assert full["smin_qfl"] / full["smax_qfl"] <= _svd_floor(full), full                # (iv)
 
 
 @pytest.fixture(scope="module")
