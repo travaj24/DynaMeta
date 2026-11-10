@@ -1516,8 +1516,19 @@ def setup_quasi_equilibrium_carrier(device: str, region: str, carrier: str, *, c
 
     from dynameta.carriers.physics_heterojunction import setup_log_activity
     fd = float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) > 0.0
-    act = setup_log_activity(device, region, sp["var"], sp["dos"], fd=fd)
-    lam = sp["lam"] if sp["lam"] in nodes else None
+    # v0.15.1: valley-resolved DG electrons (setup_bipolar_dg(electron_valleys=...)) -- the row on the reference
+    # valley set, Lambda_0 and A(n_0/N_0) (the single-population row with Lambda -> Lambda_eff: the A(n/N_c) of
+    # Lambda_eff cancels exactly); its activity and derivative chain are installed by the valley setup
+    vt_terms = None
+    if carrier == "electrons":
+        from dynameta.carriers.physics_density_gradient import _valley_closure_terms
+        vt_terms = _valley_closure_terms(device, region)
+    if vt_terms is None:
+        act = setup_log_activity(device, region, sp["var"], sp["dos"], fd=fd)
+        lam = sp["lam"] if sp["lam"] in nodes else None
+        act_var = sp["var"]
+    else:
+        act, lam, act_var = vt_terms["act"], vt_terms["lam"], vt_terms["var"]
     band = sp["band"] if sp["band"] in nodes else None
     s = sp["sign"]
     psi_eff = "Potential" + "".join(" {} {}".format(s, t) for t in (band, lam) if t)
@@ -1542,8 +1553,9 @@ def setup_quasi_equilibrium_carrier(device: str, region: str, carrier: str, *, c
     ds.node_model(device=device, region=region, name=m, equation=row)
     # exact Jacobian, written out: dR/dc = V_t d(activity)/dc (= V_t g(u)/c), dR/dpsi = -/+1,
     # dR/dLambda = -1 (both carriers: R_n = phi_ref - psi - Lambda_n + ..., R_p = psi - Lambda_p + ...)
-    ds.node_model(device=device, region=region, name="{}:{}".format(m, sp["var"]),
-                  equation="V_t*{}:{}".format(act, sp["var"]))
+    # (valley-resolved electrons: the activity's variable is the reference set's u_0, no Electrons entry)
+    ds.node_model(device=device, region=region, name="{}:{}".format(m, act_var),
+                  equation="V_t*{}:{}".format(act, act_var))
     ds.node_model(device=device, region=region, name="{}:Potential".format(m),
                   equation="-1" if s == "+" else "1")
     if lam:

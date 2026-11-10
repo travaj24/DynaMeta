@@ -40,13 +40,17 @@ Pure numpy/scipy. Oracle: validation/density_gradient_dead_layer.py (vs Schrodin
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
-from dynameta.constants import HBAR, KB, Q_E
+from dynameta.constants import HBAR, KB, M_E, Q_E
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
-__all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m", "GAMMA_WALL"]
+__all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m", "GAMMA_WALL",
+           # v0.15.1: the valley-resolved electron DG (data)
+           "ValleySet", "SI100_ELECTRON_VALLEYS", "check_valley_table"]
 
 
 # GAMMA_WALL (user decision 2026-11-04: a named constant; the DEFAULT gamma stays 1 everywhere).
@@ -91,6 +95,67 @@ def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = T_REF,
         raise ValueError("density_gradient: m_eff_kg > 0, gamma >= 0, T_K > 0, degeneracy_g > 0 "
                          "required")
     return float(HBAR * np.sqrt(gamma / (6.0 * m_eff_kg * KB * T_K * degeneracy_g)))
+
+
+# ---- v0.15.1: VALLEY-RESOLVED electron density gradient (opt-in; physics_density_gradient.setup_bipolar_dg
+# electron_valleys=...). The valley data are DATA, not code: a table of ValleySet rows. ---------------------
+
+@dataclass(frozen=True)
+class ValleySet:
+    """One set of equivalent conduction-band valleys for the valley-resolved density gradient
+    (physics_density_gradient.setup_bipolar_dg(electron_valleys=...)).
+
+    Each set gets its OWN quantum potential Lambda_v = b_v lap(sqrt n_v)/sqrt n_v with
+    b_v = gamma hbar^2/(6 m_z q) and its own density n_v = dos_share N_c F(eta + (psi + Lambda_v)/V_t);
+    all sets share one electron quasi-Fermi level (intervalley equilibrium).
+
+    name       : a label (reports only).
+    m_z_kg     : the QUANTIZATION mass -- the effective mass along the confinement direction (the
+                 normal to the gate oxide). It sets b_v.
+    dos_share  : the set's share of the region's effective density of states N_c in the classical
+                 limit. The shares of one table must sum to 1 (validated), so the classical (Lambda = 0)
+                 total density is exactly the region's: n = sum_v dos_share_v N_c F(eta) = N_c F(eta).
+                 For bulk Si every valley has the same 3-D DOS mass (m_l m_t^2)^(1/3), so a set's share is
+                 its number of valleys / 6, for any orientation.
+    m_xy_kg    : optional, the 2-D (in-plane) density-of-states mass of ONE valley, sqrt(m_x m_y). Not
+                 used by the density gradient; carried so the Schrodinger-Poisson oracle can be built from
+                 the same table (validation.bipolar_density_gradient.sp_valleys).
+    degeneracy : optional, the number of valleys in the set (the same use as m_xy_kg)."""
+    name: str
+    m_z_kg: float
+    dos_share: float
+    m_xy_kg: "float | None" = None
+    degeneracy: "int | None" = None
+
+
+# Si(100) electrons (the confinement normal along [100]): the 2 valleys whose long axis is normal to the
+# interface quantize with the longitudinal mass m_l = 0.916 m0 (in-plane DOS mass m_t), the other 4 with the
+# transverse mass m_t = 0.19 m0 (in-plane DOS mass sqrt(m_l m_t)). Shares 2/6 and 4/6 of N_c (every Si valley
+# has the same 3-D DOS mass). Masses: the values of validation.bipolar_density_gradient's anisotropic
+# Schrodinger-Poisson run (decision 51) and of the research note behind this option (Sze / Ando-Fowler-Stern
+# textbook values). This preset is Si(100)-SPECIFIC: other orientations ((110), (111)) and strained Si are
+# other tables; holes are not valley-resolved.
+SI100_ELECTRON_VALLEYS = (
+    ValleySet("Si(100) 2-fold (m_z = m_l)", 0.916 * M_E, 1.0 / 3.0, 0.19 * M_E, 2),
+    ValleySet("Si(100) 4-fold (m_z = m_t)", 0.19 * M_E, 2.0 / 3.0, float(np.sqrt(0.916 * 0.19)) * M_E, 4),
+)
+
+
+def check_valley_table(valleys) -> tuple:
+    """Validate a valley table (a sequence of ValleySet) and return it as a tuple: >= 1 set, every m_z_kg > 0,
+    every dos_share > 0, and the shares summing to 1 within 1e-12 (the DOS-consistent split: the
+    classical-limit total equals the region's N_c). Raises ValueError otherwise."""
+    vs = tuple(valleys)
+    if not vs or not all(isinstance(v, ValleySet) for v in vs):
+        raise ValueError("electron valleys: a non-empty sequence of density_gradient.ValleySet is required")
+    for v in vs:
+        if not (np.isfinite(v.m_z_kg) and v.m_z_kg > 0.0 and np.isfinite(v.dos_share) and v.dos_share > 0.0):
+            raise ValueError("electron valleys: {!r} needs m_z_kg > 0 and dos_share > 0".format(v.name))
+    tot = float(sum(v.dos_share for v in vs))
+    if abs(tot - 1.0) > 1e-12:
+        raise ValueError("electron valleys: the dos_share values must sum to 1 (the classical-limit total is the "
+                         "region's N_c); they sum to {!r}".format(tot))
+    return vs
 
 
 def _fd_weights_d2(nodes, x0) -> np.ndarray:
