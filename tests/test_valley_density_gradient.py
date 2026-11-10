@@ -274,6 +274,87 @@ def test_two_d_laterally_uniform_valley_mos_equals_one_d():
     assert max(float(np.max(np.abs(c["p"] / one[0]["p"] - 1.0))) for c in bad["cols"].values()) > 1e-10
 
 
+# ---- Phase B: full transport (the single continuity row with the Lambda_eff flux) ------------------------------
+
+def _qfl_ptp(dev):
+    """Peak-to-peak of the electron quasi-Fermi level of the full model, written on the reference set exactly as
+    the closure row does: psi + Lambda_0 - V_t (A(n_0/N_0) + ln(N_c/n_i)) [V]."""
+    g = V._get
+    nd = float(ds.get_parameter(device=dev, region="s", name="N_dos"))
+    phi = (g(dev, "s", "Potential") + g(dev, "s", "QLambda_v0")
+           - V.V_T * (g(dev, "s", "HJ_L_VDGn_v0") + np.log(nd / V.NI_SI)))
+    return float(np.ptp(phi))
+
+
+@pytest.mark.parametrize("fd,delta", [(False, 0.6),
+                                      pytest.param(True, 0.35, marks=pytest.mark.slow)],   # FD: ~50 s, nightly
+                         ids=["boltzmann_0.6V", "fermi_dirac_0.35V"])
+def test_full_transport_equals_the_closure_at_equilibrium(fd, delta, monkeypatch):
+    """(B-ii/iii) A MOS capacitor's DC state is equilibrium, so the FULL model (one continuity row, the
+    Lambda_eff Scharfetter-Gummel flux, SRH) and the closure must be the same discrete solution where both
+    converge (the full DG model is installed at the target bias, the D2d GATE E order): <= 1e-10 relative in
+    n, p, every set's density and Lambda_eff (to its max), extended Newton REL 1e-10 (G1-2's gate). And the full
+    model's electron quasi-Fermi level is flat: <= 1e-12 V. MEASURED (Boltzmann 0.1 / 0.35 / 0.6 V and FD 0.1 /
+    0.35 / 0.6 V): <= 1.1e-15 and 2.8e-16 V. Refutation: the flux built on Lambda_0 instead of Lambda_eff (the
+    activity correction dropped) -- MEASURED 49-57 % apart, quasi-Fermi level 24-35 mV non-flat."""
+    kw = dict(fd=fd, dg_gamma=GW, valleys=SI, dg_at_target=True, ext=True, rel=1e-10, step=0.025)
+    closed = V.mos_qe(NA, (delta,), tag="eqc", **kw)[0]
+    full = V.mos_qe(NA, (delta,), tag="eqf", closure=False, probe=_qfl_ptp, **kw)[0]
+    m = max(float(np.max(np.abs(closed[k] / full[k] - 1.0))) for k in ("n", "p"))
+    m = max(m, max(float(np.max(np.abs(a / b - 1.0))) for a, b in zip(closed["n_v"], full["n_v"])))
+    m = max(m, float(np.max(np.abs(closed["lam_n"] - full["lam_n"])) / np.max(np.abs(full["lam_n"]))))
+    assert m <= 1e-10, m
+    assert full["probe"] <= 1e-12, full["probe"]
+    orig = DG._install_valley_electrons
+
+    def lambda0_flux(device, region, valleys, gamma):
+        out = orig(device, region, valleys, gamma)
+        ds.node_model(device=device, region=region, name="QLambda", equation="QLambda_v0")
+        for nm in ds.get_node_model_list(device=device, region=region):
+            if nm.startswith("QLambda:") and nm != "QLambda:QLambda_v0":
+                ds.node_model(device=device, region=region, name=nm, equation="0")
+        return out
+    monkeypatch.setattr(DG, "_install_valley_electrons", lambda0_flux)
+    bad = V.mos_qe(NA, (delta,), tag="eqb", closure=False, probe=_qfl_ptp, **kw)[0]
+    assert float(np.max(np.abs(closed["n"] / bad["n"] - 1.0))) > 1e-2
+    assert bad["probe"] > 1e-3
+
+
+@pytest.mark.slow                    # ~70 s: five extended-precision diode ramps
+def test_diode_transport():
+    """(B-iii/iv) The valley flux CARRYING CURRENT: the 1-D Si p-n diode of GATE F (1e23 / 1e22 m^-3, no wall,
+    Boltzmann, extended Newton) at 0, +0.4 and -0.5 V.
+      * two identical sets == the isotropic DG: MEASURED bit-identical currents and densities (the extended
+        Newton converges both to the correctly rounded double); gate 1e-12.
+      * the Si(100) sets: terminal currents conserve, |I_a + I_c| / |I_a| <= 1e-8 (GATE F's gate; MEASURED
+        <= 2.1e-16); the DG changes the current by a small FIRST-ORDER amount, linear in gamma: change(gamma =
+        1) / change(gamma = 1/2) = 2 +- 0.02 (MEASURED 1.996 forward, 2.005 reverse); and within 2 % of the
+        isotropic DG's change (smooth potential, Lambda ~ 0.02 V_t: the sets' masses matter only at second
+        order; MEASURED 0.4 % forward, 0.5 % reverse).
+      * equilibrium (0 V): every edge current <= 1e-20 of q mu n_max V_t / h (MEASURED 2e-29).
+    Refutation: the Lambda_0-flux perturbation of the MOS gate gives a NONZERO equilibrium diode current."""
+    def probe(dev):
+        jn = np.asarray(ds.get_edge_model_values(device=dev, region="s", name="ElectronCurrentDG"))
+        n = V._get(dev, "s", "Electrons")
+        return float(np.max(np.abs(jn))) / float(V.Q_E * 0.135 * np.max(n) * V.V_T / 10e-9)
+
+    bias = (0.0, 0.4, -0.5)
+    cl = V.diode(gamma_fracs=(None,), biases=bias)[None]
+    iso = V.diode(gamma_fracs=(1.0,), biases=bias, probe=probe)[1.0]
+    twin = V.diode(gamma_fracs=(1.0,), biases=bias, valleys=TWIN, probe=probe)[1.0]
+    si = V.diode(gamma_fracs=(1.0, 0.5), biases=bias, valleys=SI, probe=probe)
+    for b in bias[1:]:
+        key = "I" if b > 0 else "I_rec"
+        assert twin[b][key] == pytest.approx(iso[b][key], rel=1e-12)
+        for q in ("Electrons", "Holes"):
+            assert np.max(np.abs(twin[b]["arrays"][q] / iso[b]["arrays"][q] - 1.0)) <= 1e-12
+        ch = {fr: si[fr][b][key] / cl[b][key] - 1.0 for fr in (1.0, 0.5)}
+        assert si[1.0][b]["I_sum"] <= 1e-8
+        assert ch[1.0] / ch[0.5] == pytest.approx(2.0, abs=0.02)
+        assert ch[1.0] == pytest.approx(iso[b][key] / cl[b][key] - 1.0, rel=0.02)
+    assert si[1.0][0.0]["probe"] <= 1e-20
+
+
 _SSAC_CHILD = r'''
 import json, sys
 import numpy as np
