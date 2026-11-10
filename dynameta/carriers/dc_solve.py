@@ -43,6 +43,7 @@ ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned befo
 
 from dynameta.carriers import eq_registry as R
 from dynameta.carriers import extended_precision as XP
+from dynameta.carriers import well_posedness as WP
 # audit C10-d: the Fermi-Dirac SOLUTION-level ceiling test. solve_dc is the one wrapper that owns a
 # CONVERGED state (both its methods return only after the solve succeeded), which is what the check
 # needs -- the doping-level test at contact setup runs before any solve and cannot see accumulation.
@@ -61,15 +62,128 @@ _UNSUPPORTED_CARRIER_EQS = ("HoleContinuityEquation",)
 _TRACK_VARS = ("Potential", "Electrons")
 
 
+# ---- v0.15 (plan 4.4.1): the density-scaled default absolute tolerance -------------------------
+# DEVSIM's Newton convergence test (devsim/devsim main, read 2026-11-04: Equation.cc DefaultUpdate,
+# Region.cc / Device.cc Update, math/Newton.cc):
+#   per equation   abs = max_nodes |dx|          rel = max_nodes |dx| / (|x| + 1e-10)
+#   per region     the SUM over its equations (both)
+#   per device     abs = MAX over regions,       rel = SUM over regions
+#   converged      rel < relative_error  AND  abs < absolute_error, for every device (and the circuit)
+# So the absolute error of a drift-diffusion region is in practice its largest DENSITY update (m^-3;
+# a Poisson-only region's is in volts), and because the two tests are ANDed, raising absolute_error
+# can never accept a state the relative test rejects -- it can only remove a test that cannot be met.
+# Round-off floors max|dx| at kappa * u * S (S = solution_size below; kappa measured 2-4 ulp median,
+# <= 36 ulp max on the GATE C accumulation, tests/test_dc_solve_abs_tol.py), so a fixed 1e10 m^-3 is
+# below that floor once S > ~1e24 m^-3 and Newton then stalls at relative ~1e-15 "waiting for a lucky
+# update". The default is therefore the larger of the historical 1e10 and ABS_TOL_ULPS unit round-offs
+# of S: 1024 u = 512 ulp, 14x the worst measured floor.
+ABS_TOL_FLOOR = 1.0e10
+ABS_TOL_ULPS = 1024
+UNIT_ROUNDOFF_DOUBLE = 2.0 ** -53
+# boost cpp_bin_float_quad / __float128: 113-bit significand (the extended Newton's RESIDUAL precision;
+# its relative updates fall to ~1e-33, extended_precision module docstring)
+UNIT_ROUNDOFF_EXTENDED = 2.0 ** -113
+
+
+def solution_size(device: "str | None" = None) -> float:
+    """DEVSIM's aggregate solution size S: the max over regions of the SUM over that region's
+    equations of max over nodes |x| (x = the equation's variable), evaluated on the CURRENT node
+    values -- the same aggregation DEVSIM applies to the Newton updates (module comment above), so
+    `ABS_TOL_ULPS * u * S` is the absolute error round-off alone produces. `device=None` takes the max
+    over every live device: DEVSIM solves them all in ONE Newton and tests each against the same
+    absolute_error. Units are mixed exactly as DEVSIM mixes them (m^-3 + V + ...)."""
+    devices = list(ds.get_device_list()) if device is None else [device]
+    size = 0.0
+    for d in devices:
+        for r in ds.get_region_list(device=d):
+            s_r = 0.0
+            for eq in ds.get_equation_list(device=d, region=r):
+                var = ds.get_equation_command(device=d, region=r, name=eq)["variable_name"]
+                vals = np.abs(np.asarray(ds.get_node_model_values(device=d, region=r, name=var),
+                                         dtype=np.float64))
+                if vals.size:
+                    s_r += float(vals.max())
+            size = max(size, s_r)
+    return size
+
+
+def default_abs_tol(device: "str | None" = None) -> float:
+    """The default DC absolute tolerance `max(ABS_TOL_FLOOR, ABS_TOL_ULPS * max_d u_d S_d)` (plan
+    4.4.1, decision 58) -- the ONE implementation; `solve_dc(abs_tol=None)` resolves through it on the
+    PRE-solve state, over EVERY live device (device=None).
+
+    WHY EVERY LIVE DEVICE (v0.15 fix, 2026-11-06): DEVSIM's ds.solve runs ONE Newton over all live
+    devices and requires abs < absolute_error on EACH of them, so the tolerance must be attainable on
+    the worst one. Sizing only the device being solved left a converged, heavier device from an
+    earlier fixture (a module-scoped 1-D MOS at 9 V accumulation: floor 2.0e11) above a light device's
+    1.1e11 -- 60 iterations of stall in a 2-D builder solve whose own physics had converged to
+    relative 1e-15 (tests/test_dc_solve_abs_tol.py::test_default_sizes_every_live_device).
+    u_d = 2^-53 for a double device and 2^-113 for an extended-precision one (its residual is
+    assembled in 128-bit; a double device keeps its double residual inside the extended Newton, so a
+    mixed set is sized by the double device). S_d = `solution_size(d)`.
+    `device` = one name sizes that device alone (a diagnostic; NOT what one ds.solve needs).
+
+    WHEN TO USE WHICH:
+      * leave abs_tol=None (this default) for any DC solve -- it equals the historical 1e10 exactly
+        (the same float reaches DEVSIM, so results are byte-identical) whenever every live device has
+        S < 1e10 / (1024 * 2^-53) = 8.8e22 m^-3 (extended devices: up to S ~ 1e41); above that it is
+        the round-off-attainable criterion, 512 ulp of the largest S.
+      * pass an explicit float to reproduce a historical run or to demand an absolute density
+        criterion on purpose; it is passed to DEVSIM unchanged (and must then be attainable on every
+        live device).
+    What the default does NOT do: it never loosens the delivered accuracy -- the relative criterion
+    (a MAX over nodes of |dx|/(|x| + 1e-10)) still binds every node, minority densities included
+    (a 1e8 m^-3 hole density next to a 7.5e25 electron peak is still converged to rel_tol: gate
+    tests/test_dc_solve_abs_tol.py). The relative criterion's own floor for variables near 0
+    (|dx|/(|x| + 1e-10) with x ~ 0: density-gradient Lambda tails) is a separate unattainability that
+    this does not address -- that one is what extended precision is for."""
+    devices = list(ds.get_device_list()) if device is None else [device]
+    worst = max(((UNIT_ROUNDOFF_EXTENDED if XP.is_enabled(d) else UNIT_ROUNDOFF_DOUBLE)
+                 * solution_size(d) for d in devices), default=0.0)
+    return max(ABS_TOL_FLOOR, ABS_TOL_ULPS * worst)
+
+
 def solve_dc(device: str, *, method: str = "newton",
-              abs_tol: float = 1e10, rel_tol: float = 1e-5, max_iter: int = 60,
+              abs_tol: "float | None" = None, rel_tol: float = 1e-5, max_iter: int = 60,
               gummel_outer_max: int = 120, gummel_tol: float = 1e-5,
               gummel_inner_iter: int = 30,
               semiconductor_regions: Sequence[str] = (),
               verbose: bool = False) -> None:
+    """One DC operating-point solve of every live DEVSIM device (DEVSIM's Newton is global).
+
+    A DC solve iterates EVERY live DEVSIM device, not only `device`: a device left live by earlier work
+    both affects this solve's convergence (it must meet the same absolute and relative tests) and is
+    itself moved by it (its values change by round-off although nothing about it was touched), so tear
+    down devices you no longer need, and compare two separate solves bitwise only in a process with no
+    unrelated device live (the test suite's @pytest.mark.devsim_isolated).
+
+    abs_tol: None (default, v0.15) resolves through `default_abs_tol()` on the pre-solve state of
+        EVERY live device (DEVSIM's Newton solves and tests them all against one absolute_error) --
+        identical to the old fixed 1e10 while every live device has S < 8.8e22 m^-3 (extended devices:
+        always), the round-off-attainable 512 ulp of the largest S above (see default_abs_tol for when
+        to override). A float is passed to DEVSIM unchanged. The Gummel sub-solves use the same
+        resolved value.
+    rel_tol, max_iter: DEVSIM's relative_error / maximum_iterations, unchanged.
+    method: "newton" (coupled, the default) or "gummel" (unipolar only; module docstring).
+
+    WELL-POSEDNESS (v0.15, plan 4.4.2): before the Newton every live device goes through
+    well_posedness.ensure_dc_well_posed (cached per equation-set fingerprint), which raises
+    IllPosedDCError (a ValueError) for an EXACTLY singular DC problem -- a floating body, a pure-Neumann
+    potential -- instead of letting round-off pick the answer. A Newton failure that STALLED (ran out of
+    iterations after some iterate came within 1e-2 of a solution) is re-raised as devsim.error with the conditioning diagnosis
+    (well_posedness.diagnose_singular: "near-singular DC Jacobian ... mode in Electrons ...") appended.
+
+    A RELATIVE TEST ON A ZERO UNKNOWN (v0.15, 2026-11-08). DEVSIM's relative update is |dx| / (|x| + 1e-10),
+    so for an unknown that is ~0 -- a circuit source current at an equilibrium bias, a potential that is 0
+    at a node by symmetry -- it is the absolute test |dx| < rel_tol x 1e-10, which the round-off of a
+    converged update may never meet; whether the solve exits then depends on the last bits (BLAS build,
+    CPU). The failure message lists every unmet test INCLUDING the circuit, tags such entries with the
+    bound |x| <= ... (_unmet_tests), and, when they are all of that kind, explains it (ZERO_UNKNOWN_NOTE)
+    instead of running the conditioning diagnosis."""
     if method == "newton":
-        XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                  relative_error=rel_tol, maximum_iterations=max_iter)
+        if abs_tol is None:
+            abs_tol = default_abs_tol()
+        _newton(device, abs_tol, rel_tol, max_iter)
         warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d (converged state)
         return
     if method == "gummel":
@@ -80,11 +194,12 @@ def solve_dc(device: str, *, method: str = "newton",
             "route is the staged Poisson-presolve + coupled Newton recipe, "
             "validation/gated_dd*.py). "
             "method='newton' (default) remains the supported general route.", UnreliableResultWarning, stacklevel=2)
+        if abs_tol is None:
+            abs_tol = default_abs_tol()
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):
-            XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                      relative_error=rel_tol, maximum_iterations=max_iter)
+            _newton(device, abs_tol, rel_tol, max_iter)
             warn_if_solution_exceeds_fd_ceiling(device)         # audit C10-d (converged state)
             return
         # audit C-15 (2026-11-02): REFUSE a bipolar device instead of silently running a non-Gummel
@@ -123,6 +238,7 @@ def solve_dc(device: str, *, method: str = "newton",
                 "converging (audit C-6). Pass the semiconductor region name(s), e.g. "
                 "semiconductor_regions=['semi'] -- devsim.get_region_list(device={!r}) lists "
                 "them.".format(list(_TRACK_VARS), device))
+        WP.ensure_dc_well_posed()           # the coupled problem; the sub-solves freeze a variable
         _gummel(device, abs_tol, rel_tol, gummel_inner_iter, gummel_outer_max,
                 gummel_tol, semiconductor_regions, verbose)
         # ONE check per solve_dc call, not one per outer iteration: _gummel raises unless the outer
@@ -130,6 +246,109 @@ def solve_dc(device: str, *, method: str = "newton",
         warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d
         return
     raise ValueError("unknown dc solve method: {!r}".format(method))
+
+
+# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and CAME
+# close to a solution (some iterate's relative update < _STALL_REL) -- the near-floating signature -- not
+# when it diverged or aborted early. The BEST iterate, not the last: along a near-null mode the update is
+# round-off amplified by 1/sigma_min (u / 1.7e-17 ~ 6 for the MOS inversion layer at 0.78-0.80 V,
+# tests/test_well_posedness.py), so where the walk ends is chance -- MEASURED 2026-11-08 on the same
+# fixture: Windows wanders 3e-10..4e-7 to the end; Linux (OpenBLAS 0.3.26 / glibc) reaches 4.7e-5 at
+# iteration 13, then escapes to 1e3 and ends at 6.5e-2, which the old last-iterate rule called "not a
+# stall" (no diagnosis). A run that never got within 1e-2 (a 0.76 -> 1.2 V jump: best 1.9e-2 / 4.5e-2
+# over 40 iterations, >= 1e3 over its first 10) is not one.
+_STALL_REL = 1e-2
+
+
+def _stalled(info, max_iter) -> bool:
+    its = info.get("iterations") or ()
+    if len(its) < max_iter:
+        return False
+    best = [max((d.get("relative_error", np.inf) for d in it.get("devices", ())), default=np.inf)
+            for it in its]
+    return min(best) < _STALL_REL
+
+
+def _newton(device, abs_tol, rel_tol, max_iter):
+    """The coupled DC Newton: the well-posedness check, then DEVSIM's solve with info=True (it then
+    REPORTS non-convergence instead of raising; the device state is restored either way), re-raised
+    as devsim.error -- with the near-singular diagnosis appended when the failure is a stall, or the
+    zero-unknown explanation (ZERO_UNKNOWN_NOTE) when every unmet test is a relative test on a ~0 unknown."""
+    WP.ensure_dc_well_posed()
+    from dynameta.carriers.physics_traps import kinetic_dc_form
+    with kinetic_dc_form():                 # v0.15: kinetic trap rows in their linear DC form (no-op without)
+        info = XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+                        relative_error=rel_tol, maximum_iterations=max_iter, info=True)
+    if isinstance(info, dict) and not info.get("converged", True):
+        msg = ("Convergence failure! (solve_dc: {} Newton iterations, absolute_error={:.4g}, "
+               "relative_error={:.4g})".format(len(info.get("iterations") or ()), abs_tol, rel_tol))
+        bad = _unmet_tests(info, abs_tol, rel_tol)
+        msg += _unconverged(info, abs_tol, rel_tol)
+        if bad and all(b[3] is not None for b in bad):
+            # not a conditioning problem: the dense SVD would only blame whatever weakly pinned mode the
+            # device happens to have (2026-11-08: "mode in Holes" for a circuit-current floor)
+            msg += "\n" + ZERO_UNKNOWN_NOTE
+        elif _stalled(info, max_iter):
+            msg += "\n" + WP.diagnose_singular()
+        raise ds.error(msg)
+
+
+# DEVSIM's relative update is |dx| / (|x| + 1e-10) (module comment above), so for an unknown with |x| <~ 1e-10
+# the "relative" test is the ABSOLUTE test |dx| < relative_error * 1e-10, which round-off need not ever meet.
+DEVSIM_REL_REGULARIZER = 1e-10
+ZERO_UNKNOWN_NOTE = (
+    "Every unmet test is DEVSIM's RELATIVE test |dx| / (|x| + 1e-10) on an unknown that is ~0 (|x| <= 1e-10 at "
+    "its worst node, bounded from the reported errors), where it is the absolute test |dx| < relative_error x "
+    "1e-10 and the round-off of the converged update may never meet it -- Newton then wanders at that floor "
+    "and the exit is decided by the last bits of the arithmetic (it differs between BLAS builds / CPUs). "
+    "Typical: a circuit source current at an equilibrium (zero-current) bias; a potential that is 0 at a node "
+    "by symmetry. Every other test is met. Remedies: solve at a bias / reference away from the zero; or pass "
+    "a relative_error above the reported floor and check the OTHER tests at the accepted iteration yourself "
+    "(devsim.solve(info=True); validation/devsim_noise.solve_zero_current does this for a circuit at zero "
+    "current); or, for a circuit current, park the branch with a parallel DC current source.")
+
+
+def _unmet_tests(info, abs_tol, rel_tol) -> list:
+    """[(label, abs, rel, zero_bound)] for every test unmet at the last iteration of a failed DEVSIM
+    solve: each device equation, and the CIRCUIT (DEVSIM tests it too and it can be the only one left).
+    zero_bound is set when the entry is a relative test on a ~0 unknown -- its absolute test met, its
+    relative one not, and |x| at its worst-relative node provably <= DEVSIM_REL_REGULARIZER: since
+    rel = |dx_r| / (|x_r| + 1e-10) with |dx_r| <= abs, |x_r| <= abs / rel - 1e-10 -- else None."""
+    its = info.get("iterations") or ()
+    if not its:
+        return []
+    entries = []
+    for dv in its[-1].get("devices", ()):
+        for rg in dv.get("regions", ()):
+            for eq in rg.get("equations", ()):
+                entries.append(("{}/{}/{}".format(dv.get("name"), rg.get("name"), eq.get("name")),
+                                eq.get("absolute_error", 0.0), eq.get("relative_error", 0.0)))
+    cir = its[-1].get("circuit")
+    if cir:
+        entries.append(("circuit", cir.get("absolute_error", 0.0), cir.get("relative_error", 0.0)))
+    bad = []
+    for label, a, r in entries:
+        if a < abs_tol and r < rel_tol:
+            continue
+        bound = None
+        if a < abs_tol and r > 0.0:
+            b = max(a / r - DEVSIM_REL_REGULARIZER, 0.0)
+            if b <= DEVSIM_REL_REGULARIZER:
+                bound = b
+        bad.append((label, a, r, bound))
+    return bad
+
+
+def _unconverged(info, abs_tol, rel_tol) -> str:
+    """'; unconverged at the last iteration: dev/region/eq (abs a, rel r), ..., circuit (...)' -- names
+    what holds the joint Newton back (it may be ANOTHER live device: DEVSIM solves them all together, or
+    the circuit: v0.15 2026-11-08, which this list used to leave out). A relative test on a ~0 unknown is
+    tagged with the bound on |x| (_unmet_tests)."""
+    bad = []
+    for label, a, r, bound in _unmet_tests(info, abs_tol, rel_tol):
+        tag = "" if bound is None else ", relative test on a ~0 unknown: |x| <= {:.1e}".format(bound)
+        bad.append("{} (abs {:.3g}, rel {:.3g}{})".format(label, a, r, tag))
+    return ("; unconverged at the last iteration: " + ", ".join(bad)) if bad else ""
 
 
 def _snapshot(device, regions):

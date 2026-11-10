@@ -107,6 +107,8 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
+from dynameta.carriers.tunneling import btbt_for_material as _btbt_for_material
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
@@ -218,16 +220,23 @@ class Stacked3DSpec:
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
-    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams ->
+    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams (or a
+    # v0.15 tuple of them, one summed term per process, e.g. GERMANIUM_KAO) ->
     # local Kane/Hurkx band-to-band generation in the 'semi' bipolar region (physics='bipolar_dd' only),
     # coupled in the Newton with the ISOTROPIC element field. oxide_tunneling: a
     # carriers.tunneling.OxideTunnelingParams -> every solve adds CarrierField.extras["oxide_tunneling"]
     # (the gate-oxide tunneling current through 'oxide', post-processed from the converged field).
+    # v0.15: OxideTunnelingParams(coupling="self_consistent", ...) installs the self-consistent term
+    # (tunneling.setup_oxide_tunneling, 'semi' -> 'gate') at build_device -- bipolar_dd, single semiconductor
+    # -- and the extras report its own kernel call (+ "coupling", "I_gate_A").
     btbt: Optional[object] = None
     oxide_tunneling: Optional[object] = None
     # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
     # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
     extended_precision: bool = False
+    # carrier statistics (v0.15; default since v0.15.0: "fermi_dirac") -- None = "fermi_dirac" (FD transport +
+    # FD detailed balance) | "boltzmann" | "legacy" (the v0.14 default); see TransportModel.carrier_statistics.
+    carrier_statistics: Optional[str] = None
     # v0.14.0 (user decision 2026-11-06): correct DEVSIM's box-method geometry right after create_device
     # (devsim_geometry.correct_device_geometry). True (default) = negative policy 'warn' (exact volumes;
     # the few negative assembled couples of a gmsh mesh are kept and warned -- MEASURED best: capacitor
@@ -331,6 +340,14 @@ class Stacked3DSpec:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
                               "'bipolar_dd'; got {!r}".format(self.physics))
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            if self.physics != "bipolar_dd":
+                raise ValueError("Stacked3DSpec.oxide_tunneling(coupling='self_consistent') needs "
+                                 "physics='bipolar_dd' (the sink is an electron-continuity term); got {!r}"
+                                 .format(self.physics))
+            if self.extra_semiconductors:
+                raise NotImplementedError("Stacked3DSpec: self-consistent oxide tunnelling on a 3-D "
+                                          "heterostack is not wired (v0.15): its Anderson frame is not passed")
         if self.btbt is not None and self.physics != "bipolar_dd":
             raise ValueError("Stacked3DSpec.btbt (band-to-band tunneling generation) needs "
                              "physics='bipolar_dd'; got {!r}".format(self.physics))
@@ -355,6 +372,14 @@ class Stacked3DSpec:
                                 .format(type(self.bipolar_options).__name__))
             if self.physics != "bipolar_dd":
                 raise ValueError("Stacked3DSpec.bipolar_options applies only to physics='bipolar_dd'")
+        if self.carrier_statistics is not None:
+            if self.carrier_statistics not in ("boltzmann", "fermi_dirac", "legacy"):
+                raise ValueError("Stacked3DSpec.carrier_statistics must be None, 'fermi_dirac', 'boltzmann' or "
+                                 "'legacy', got {!r}".format(self.carrier_statistics))
+            if not (self.physics == "bipolar_dd"
+                    or (self.physics == "drift_diffusion" and self.carrier_statistics != "boltzmann")):
+                raise ValueError("Stacked3DSpec.carrier_statistics applies only to physics='bipolar_dd' (and "
+                                 "'fermi_dirac' / 'legacy' to 'drift_diffusion')")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -411,7 +436,7 @@ class Stacked3DSpec:
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
-                     interface_traps=None, extended_precision: bool = False,
+                     interface_traps=None, extended_precision: Optional[bool] = None,
                      mesher: str = "tensor", on_chi_temperature: str = "refuse",
                      exact_geometry=True) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
@@ -432,8 +457,16 @@ class Stacked3DSpec:
         on_chi_temperature (v0.14 row 3.2-10): a 3-D heterostack runs at T_REF (bipolar_dd, the only
         physics with a T_K, refuses extra semiconductors), so the check fires only when a material states
         TransportModel.chi_reference_T_K != T_REF. Same three settings as LayeredDevsimBuilder
-        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature)."""
+        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature). v0.15: a
+        material with TransportModel.band_temperature has chi evaluated at the region T (T_REF here; the
+        bipolar body at BipolarOptions.T_K also gets its n_i from the model when derive_n_i=True) and is
+        not subject to the toggle (materials.band_data_at_T).
+
+        extended_precision (v0.15, decision 37): None (default) follows Design.carriers.extended_precision
+        (unstated = off); an explicit bool wins, with ONE AdvisoryWarning when it contradicts a stated
+        design value (extended_precision.resolve_design_flag; geometry.specs.CarrierSpec)."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
+        extended_precision = XP.resolve_design_flag(design, extended_precision, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
                       if design.material_role(L.background_material) == "semiconductor"]
@@ -517,10 +550,12 @@ class Stacked3DSpec:
             # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
             # the bands by the work-function difference (Stacked3DSpec.band_alignment)
             # v0.14 (user decision 2026-11-04): chi_eV defaults to None -- carried through as None so
-            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity
+            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity.
+            # v0.15: chi at the region's T (band_temperature model); no model -> chi_eV unchanged
+            chi_i = band_data_at_T(tri, transport_temperature_K(tri)).chi_eV
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
                                 float(tri.eps_static), float(tri.n_bg_m3),
-                                (float(tri.chi_eV) if tri.chi_eV is not None else None),
+                                (float(chi_i) if chi_i is not None else None),
                                 float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
@@ -528,9 +563,10 @@ class Stacked3DSpec:
         _htr = {layers[i].background_material: design.materials.get(layers[i].background_material).transport
                 for i in semi_idxs}
         if extra_semis and len({(t.chi_eV, t.band_gap_eV) for t in _htr.values()}) > 1:
-            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10)
+            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10); a material
+            # with a band-temperature model has chi evaluated there (v0.15) -> consistent (the tags)
             HJ.check_affinity_temperature(
-                {m: getattr(t, "chi_reference_T_K", None) for m, t in _htr.items()},
+                HJ.affinity_temperature_tags(_htr, PE.T_REF),
                 PE.T_REF, mode=on_chi_temperature, owner="Stacked3DSpec.from_design")
         eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
         if eps_ox is None:
@@ -566,18 +602,23 @@ class Stacked3DSpec:
         # bipolar (holes + SRH): derive the hole mobility / intrinsic density / lifetime / valence DOS
         # from the transport model (the transport model's __post_init__ already required them).
         bip = {}
+        band = band_data_at_T(tr, transport_temperature_K(tr))     # v0.15; no model -> the inputs unchanged
         if tr.physics == "bipolar_dd":
             bip = dict(
-                n_i_m3=float(tr.n_i_m3),
+                n_i_m3=float(band.n_i_m3),
                 mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(n_bg)),
                 tau_srh_s=float(tr.tau_srh_s),
                 dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
                 acceptor=bool(tr.acceptor),
                 net_doping_expr=tr.net_doping_expr,
                 bipolar_options=getattr(tr, "bipolar_options", None),
+                carrier_statistics=getattr(tr, "carrier_statistics", None),
                 srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
                 srh_traps=tuple(getattr(tr, "srh_traps", ())),
-                btbt=getattr(tr, "btbt", None))
+                # v0.15: scale_B_with_gap sets get B at the body T from the band-temperature model
+                btbt=_btbt_for_material(getattr(tr, "btbt", None), tr))
+        elif tr.physics == "drift_diffusion" and getattr(tr, "carrier_statistics", None) is not None:
+            bip = dict(carrier_statistics=tr.carrier_statistics)    # v0.15: the consistent FD transport
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -588,9 +629,16 @@ class Stacked3DSpec:
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
+                    chi_semi_eV=(float(band.chi_eV) if (extra_semis and band.chi_eV is not None) else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), exact_geometry=exact_geometry, **bip)
+
+
+def _dd_stats(spec) -> dict:
+    """The unipolar DD regions' statistics keyword: {} for the default (byte-identical calls), else the
+    spec's carrier_statistics ("fermi_dirac": the consistent FD transport, for the primary and every extra
+    semiconductor of the stack)."""
+    return {} if spec.carrier_statistics is None else {"statistics": spec.carrier_statistics}
 
 
 # ---- D2c: tensor-product Kuhn mesh (the default 3-D mesh; see Devsim3DEquilibrium._build_mesh_tensor) ----
@@ -831,7 +879,7 @@ class Devsim3DEquilibrium:
             # Gummel) + Poisson on the 3D semi region (dimension-agnostic models).
             DD.setup_semiconductor_region_dd(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                               eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg,
-                                              mobility_m2Vs=s.mobility_m2Vs)
+                                              mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
         else:
             PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                            eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
@@ -848,7 +896,7 @@ class Devsim3DEquilibrium:
                     DD.setup_semiconductor_region_dd(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
                                                      eps_static=eps,
                                                      dos_mass_kg=s.semiconductor_dos_mass_kg(name),
-                                                     mobility_m2Vs=s.mobility_m2Vs)
+                                                     mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
                 else:
                     PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
                                                    eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
@@ -890,6 +938,10 @@ class Devsim3DEquilibrium:
                 DD.setup_contact_ohmic_dd(self.device, c)
             else:
                 PE.setup_contact(self.device, c)
+        if getattr(s.oxide_tunneling, "coupling", "post") == "self_consistent":   # v0.15, plan 4.1.1
+            from dynameta.carriers import tunneling as TN
+            TN.setup_oxide_tunneling(self.device, "semi", "gate", s.oxide_tunneling,
+                                     semiconductor_material=s.semi_material)
         self._built = True
 
     def _wire_heterointerfaces(self) -> None:
@@ -937,7 +989,9 @@ class Devsim3DEquilibrium:
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
-            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s),
+            fd_enhancement=s.carrier_statistics != "boltzmann",  # statistics (None -> fermi_dirac, v0.15.0)
+            statistics=s.carrier_statistics, n_dos_p_m3=Nv,
             options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
             btbt=s.btbt,                                         # D1d: None -> no BTBT (byte-identical)
             srh_trap_energy_eV=float(s.srh_trap_energy_eV), traps=tuple(s.srh_traps) or None)
@@ -998,7 +1052,7 @@ class Devsim3DEquilibrium:
             # a raw gate at Vg sits only (Vg - phi_bi) above the bulk and the cap badly UNDER-accumulates
             # (measured 7x low before this fix). So drive gate_bias = applied_Vg + phi_bi; at applied_Vg=0
             # the gate equals the body node -> flat band -> the equilibrium profile.
-            abs_tol = max(1e13, self.spec.n_bg_m3 * 1e-12)
+            abs_tol = None        # dc_solve.default_abs_tol per solve (v0.15 decision 59; was max(1e13, n_bg 1e-12))
             ni = float(self.spec.n_i_m3)
             # audit C2-1: with net_doping_expr the (acceptor, n_bg_m3) scalars are DEAD as
             # doping definitions -- the body contact pins psi from the ACTUAL NetDoping node
@@ -1032,7 +1086,9 @@ class Devsim3DEquilibrium:
             # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
                                                 options=self.spec.bipolar_options,
-                                                traps=self.spec.srh_traps)
+                                                traps=self.spec.srh_traps,
+                                                fd_enhancement=self.spec.carrier_statistics != "boltzmann",
+                                                statistics=self.spec.carrier_statistics)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
             # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
             # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.
@@ -1048,6 +1104,7 @@ class Devsim3DEquilibrium:
             ds.set_node_values(device=self.device, region="semi", name="Holes",
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="IntrinsicHoles"))
+            PT.seed_kinetic_traps(self.device, ["semi"])   # v0.15: no-op without kinetic traps
             ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi)   # flat band
             # audit C10-d: these two calls are `ds.solve(type='dc', solver_type='direct', ...)`
             # routed through solve_dc(method='newton'), which is that exact call plus the post-solve
@@ -1063,10 +1120,10 @@ class Devsim3DEquilibrium:
                          max_iter=100, semiconductor_regions=["semi"])
         elif getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
-            # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
-            # gate in 0.25 V steps (coupled Newton at each step).
+            # residual ~n_bg: dc_solve.default_abs_tol per solve, v0.15 decision 59; was
+            # max(1e10, max n_bg 1e-12)), zero-bias seed, then ramp the gate in 0.25 V steps.
             semis = ["semi"] + [e[0] for e in self.spec.extra_semiconductor_entries()]
-            abs_tol = max(1e10, max(self.spec.semiconductor_nbg(r) for r in semis) * 1e-12)
+            abs_tol = None
             ds.set_parameter(device=self.device, name="gate_bias", value=0.0)
             solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
                       max_iter=100, semiconductor_regions=semis)
@@ -1118,6 +1175,11 @@ class Devsim3DEquilibrium:
                 "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
                 "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
                 "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
+            if res.get("coupling") == "self_consistent":         # v0.15: the term's own kernel call
+                extras["oxide_tunneling"]["oxide"].update(
+                    {"coupling": "self_consistent", "gate": "gate", "I_gate_A": float(res["I_gate"])})
+        if self.spec.extended_precision:                      # v0.15 provenance; off adds no key
+            extras["extended_precision"] = True
         # the temperature the emitted region was solved at: its V_t (BipolarOptions.T_K on the bipolar
         # path; exactly T_REF otherwise). v0.14 row 3.2-7: this always reported T_REF.
         return CarrierField(

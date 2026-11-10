@@ -145,6 +145,7 @@ def _seed(dev, region):
     for v, m in (("Potential", "_seed"), ("Electrons", "IntrinsicElectrons"),
                  ("Holes", "IntrinsicHoles")):
         ds.set_node_values(device=dev, region=region, name=v, values=_vals(dev, region, m).tolist())
+    PT.seed_kinetic_traps(dev, [region])      # v0.15 kinetic levels (tests/test_trap_kinetics.py); else no-op
 
 
 def _slab(dev, *, length, net_doping, tau_n, tau_p, ps_end=5e-8, ps_mid=1e-6, **kw):
@@ -206,6 +207,7 @@ def _diode_state(dev, **kw):
     return models, out
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_defaults_off_byte_identical():
     """traps=None / traps=() / srh_trap_energy_eV=0.0 against the bare legacy call on a forward-biased
     1-D Si diode: the node-model inventory and every solved array (Potential, Electrons, Holes, USRH,

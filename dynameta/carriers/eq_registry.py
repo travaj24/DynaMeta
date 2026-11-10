@@ -181,5 +181,26 @@ def equation_names(device: str) -> set:
     return {e["name"] for e in _REG.get(device, [])}
 
 
+# v0.15 (plan 4.4.2): well_posedness.allow_floating acknowledgements, device -> {(region, eq): reason},
+# and a per-device generation counter bumped by clear() so a device torn down and rebuilt under the same
+# name never inherits a cached well-posedness verdict.
+_FLOATING: Dict[str, Dict[tuple, str]] = {}
+_GEN: Dict[str, int] = {}
+
+
+def record_floating(device: str, region: str, eq_name: str, reason: str) -> None:
+    _FLOATING.setdefault(device, {})[(region, eq_name)] = reason
+
+
+def floating_acknowledgements(device: str) -> Dict[tuple, str]:
+    return dict(_FLOATING.get(device, {}))
+
+
+def generation(device: str) -> int:
+    return _GEN.get(device, 0)
+
+
 def clear(device: str) -> None:
     _REG.pop(device, None)
+    _FLOATING.pop(device, None)
+    _GEN[device] = _GEN.get(device, 0) + 1

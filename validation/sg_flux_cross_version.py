@@ -15,7 +15,9 @@ sha256 comparison until the flux changed on purpose). docs/audit/2026-11-04-sg-f
           (TOL_B) and the terminal currents to the round-off of their contact edges' terms.
   GATE C  Newton convergence unchanged: per-solve iteration counts on the GATE B paths equal to
           the reference's within 1, and the totals within 5 %.
-  REPORT  max |v| per edge (each carrier's Bernoulli argument) on the GATE B states.
+  REPORT  max |v| per edge (each carrier's Bernoulli argument) on the GATE B states; and (v0.15.0) what
+          the default statistics ('fermi_dirac') move on the same fixtures -- GATE B pins the
+          bipolar regions of a v0.15.0+ tree to statistics='legacy', the path the reference solves.
 
 Run:  python -m validation.sg_flux_cross_version [--ref <checkout>]
 """
@@ -65,6 +67,24 @@ _FIXTURE = textwrap.dedent('''
             raise ds.error("Convergence failure!")
         return r
     ds.solve = solve
+    # v0.15.0 changed the bipolar default statistics to 'fermi_dirac'; the reference arrays are the LEGACY
+    # path (the v0.14 default), so a tree that knows statistics='legacy' is pinned to it here (SGX_DEFAULT=1
+    # runs the tree's own default instead -- the REPORT of what the default change moves).
+    import os
+    from dynameta.carriers import physics_bipolar_dd as _BPm
+    try:
+        from dynameta.carriers.bipolar_options import resolve_statistics as _rs
+        _rs("legacy", True)
+        _LEGACY = os.environ.get("SGX_DEFAULT") != "1"
+    except (ImportError, ValueError):
+        _LEGACY = False
+    if _LEGACY:
+        _orig_sbr = _BPm.setup_bipolar_region
+        def _sbr_legacy(*a, **kw):
+            if kw.get("statistics") is None and kw.get("fd_enhancement", True):
+                kw["statistics"] = "legacy"
+            return _orig_sbr(*a, **kw)
+        _BPm.setup_bipolar_region = _sbr_legacy
     OUT = {}
     def nv(dev, reg, name):
         return [float(x) for x in ds.get_node_model_values(device=dev, region=reg, name=name)]
@@ -130,12 +150,13 @@ _FIXTURE = textwrap.dedent('''
 ''')
 
 
-def run_fixture(tree):
-    """(rc, results dict, stderr tail) of _FIXTURE on `tree` (cwd + PYTHONPATH = tree)."""
+def run_fixture(tree, default=False):
+    """(rc, results dict, stderr tail) of _FIXTURE on `tree` (cwd + PYTHONPATH = tree); default=True runs the
+    tree's own default statistics instead of the pinned legacy path (v0.15.0)."""
     fd, path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
-        env = dict(os.environ, PYTHONPATH=tree)
+        env = dict(os.environ, PYTHONPATH=tree, SGX_DEFAULT="1" if default else "0")
         r = subprocess.run([sys.executable, "-c", _FIXTURE, path], cwd=tree, env=env,
                            capture_output=True, text=True, timeout=3000)
         out = {}
@@ -244,6 +265,13 @@ def main():
             print("[sgx]   iterations {:8s} ref {}  this {}".format(k, o, n), flush=True)
         H.gate("C Newton iterations unchanged", per and abs(tot1 - tot0) <= 0.05 * tot0,
                "per solve within 1, total {} vs {}".format(tot1, tot0))
+        rcd, rd, ed = run_fixture(HERE, default=True)
+        if rcd == 0:
+            for key, m, _ok in compare(r1, rd):
+                print("[sgx]   REPORT v0.15.0 default ('fermi_dirac') vs legacy {:30s} {:.2e}".format(key, m),
+                      flush=True)
+        else:
+            print("[sgx]   REPORT default-statistics run failed: rc {} {}".format(rcd, ed), flush=True)
         for k in sorted(r1):
             if k.endswith(":maxv"):
                 print("[sgx]   REPORT max |v| {:8s} {}".format(k[:-5], "  ".join(

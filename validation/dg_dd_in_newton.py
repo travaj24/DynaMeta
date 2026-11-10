@@ -24,6 +24,9 @@ GATE C (fixed-point decomposition, the feedback half): the converged Lambda(z) i
         the exp(Lambda/V_t) ballpark).
 GATE D (transport sanity): at 10 mV bias the two terminal currents conserve (< 1e-8 rel) and
         the current is finite and bias-driven.
+GATE E (v0.15 4.4.4, plan G2-3): the oxide WALL -- setup_dg_insulator_wall on a unipolar bar
+        (n0 = 1e23), potential coupled: the converged density equals the post-hoc DG BVP on its own
+        potential (< 2e-3 of the peak) and the wall carries no current (< 1e-12 of q mu n0 V_t/L_q).
 
 Run: python -m validation.dg_dd_in_newton
 """
@@ -216,7 +219,14 @@ def main():
     from dynameta.carriers.eq_registry import edge_with_derivs as _ewd
     _ewd(devc, regc, "vdiff_f",
          "(Potential@n0 + LambdaFrozen@n0 - Potential@n1 - LambdaFrozen@n1)/V_t", ("Potential",))
-    _ewd(devc, regc, "vdiff_g_f", "vdiff_f / g_enh", ("Potential", "Electrons"))
+    # the SAME transport as the coupled device: under the v0.15.0 default statistics ('fermi_dirac') the
+    # electron flux carries the FD quasi-field (g_enh = 1 + HJ_Electrons_dDelta, physics_density_gradient);
+    # without it this re-solve is the legacy averaged-g flux and GATE C read rel 3.8e-01 (MEASURED 2026-11-07)
+    fdq = ""
+    if "HJ_Electrons_dDelta" in ds.get_edge_model_list(device=devc, region=regc):
+        from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
+        fdq = " + " + fd_quasi_field_expr(devc, regc, "Electrons", "N_c")
+    _ewd(devc, regc, "vdiff_g_f", "vdiff_f / g_enh" + fdq, ("Potential", "Electrons"))
     from dynameta.carriers.sg_flux import install_sg_current      # the ONE SG kernel (2026-11-04)
     install_sg_current(devc, regc, carrier="electrons", density="Electrons", vdiff="vdiff_g_f",
                        bern="Bern_g_f", bern_m="Bern_g_f_m", current="ElectronCurrentF",
@@ -256,9 +266,80 @@ def main():
     print("[dn] GATE D: 10 mV bias -- |I| = {:.3e} (1D A/m^2), conservation {:.1e} -> {}".format(
         abs(iL), cons, "PASS" if g_d else "FAIL"), flush=True)
 
+    ok = gate_e() and ok
+
     print("[dn] *** IN-NEWTON DENSITY-GRADIENT DD: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
     return ok
+
+
+def _wall_device(tag, n0, ps_wall, *, length=100e-9):
+    """Unipolar bar against setup_dg_insulator_wall (v0.15 4.4.4), POTENTIAL COUPLED (the wall carries
+    no Potential row: zero normal field), nested exponential mesh (last/first spacing 40)."""
+    from dynameta.carriers.physics_density_gradient import setup_dg_insulator_wall
+    mesh, dev, reg = "dge_m_" + tag, "dge_d_" + tag, "bar"
+    with _quiet():
+        ds.create_1d_mesh(mesh=mesh)
+        beta = np.log(40.0)
+        nseg = int(round(length * beta / (ps_wall * np.expm1(beta))))
+        xs = length * np.expm1(beta * np.arange(nseg + 1) / nseg) / np.expm1(beta)
+        gaps = np.diff(xs)
+        for k, xk in enumerate(xs):
+            ds.add_1d_mesh_line(mesh=mesh, pos=float(xk), ps=1.01 * float(gaps[min(k, nseg - 1)]),
+                                **({"tag": "wall"} if k == 0 else {"tag": "back"} if k == nseg else {}))
+        ds.add_1d_contact(mesh=mesh, name="wall", tag="wall", material="metal")
+        ds.add_1d_contact(mesh=mesh, name="back", tag="back", material="metal")
+        ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="wall", tag2="back")
+        ds.finalize_mesh(mesh=mesh)
+        ds.create_device(mesh=mesh, device=dev)
+        setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.5, dos_mass_kg=MSTAR,
+                                      mobility_m2Vs=0.004)
+        setup_contact_ohmic_dd(dev, "back")
+    _solve(dev)
+    with _quiet():
+        setup_dg_quantum_correction(dev, reg, m_eff_kg=MSTAR, gamma=1.0)
+        setup_contact_dg(dev, "back", n0)
+        setup_dg_insulator_wall(dev, "wall")
+    for k, fr in enumerate((0.05, 0.1, 0.25, 0.5, 1.0)):
+        set_dg_gamma(dev, reg, fr)
+        if k == 0:
+            seed_dg_from_solution(dev, reg, walls=("wall",))
+        _solve(dev)
+    return dev, reg, mesh
+
+
+def gate_e():
+    """GATE E (v0.15 item 4.4.4, plan G2-3): the unipolar DG with the insulator wall (the retired
+    setup_dg_hard_wall's replacement), potential COUPLED, n0 = 1e23 m^-3: the converged DG density equals
+    the post-hoc DG boundary-value problem (density_gradient.dg_correct_density_1d, scipy solve_bvp)
+    evaluated on the DG solution's OWN potential, n_cl = n0 exp((psi - psi_b)/V_t), within 2e-3 of the
+    peak (the bipolar GATE D twin measured 2.7e-4; the unipolar region's FD g-factor, g - 1 = 0.7 % at
+    n0/N_c = 0.019, is outside the Boltzmann BVP and is budgeted inside the 2e-3). MEASURED 2026-11-06:
+    1.2e-3 at 1e23; the same comparison at 1e22 / 1e21 (g - 1 = 6.7e-4 / 6.6e-5) gives 2.5e-4 / 1.6e-4
+    -- the residual is the g-factor plus a ~1.5e-4 discretization floor, as budgeted. On the old rows the
+    self-consistent leg raised a DEVSIM convergence failure (audit X-6, 2026-07-26). The frozen-psi
+    closed-form gates (deficit, order, conservation) are in tests/test_density_gradient.py."""
+    from dynameta.carriers.density_gradient import dg_correct_density_1d
+    from dynameta.constants import V_T
+    n0 = 1e23
+    dev, reg, mesh = _wall_device("e", n0, 0.05e-9)
+    try:
+        x = _np_node(dev, reg, "x")
+        o = np.argsort(x)
+        x, n, psi = x[o], _np_node(dev, reg, "Electrons")[o], _np_node(dev, reg, "Potential")[o]
+        jmax = float(np.max(np.abs(np.asarray(ds.get_edge_model_values(device=dev, region=reg,
+                                                                       name="ElectronCurrentDG")))))
+    finally:
+        _teardown(dev, mesh)
+    n_cl = n0 * np.exp((psi - psi[-1]) / V_T)
+    n_bvp = dg_correct_density_1d(x, n_cl, MSTAR, gamma=1.0, hard_wall="left", tol=1e-8)
+    err = float(np.max(np.abs(n - n_bvp)) / np.max(n))
+    scale = Q_E * 0.004 * n0 * 0.025851991 / (HBAR / np.sqrt(6.0 * MSTAR * KB * T_REF))
+    g_e = bool(err < 2e-3 and jmax <= 1e-12 * scale)
+    print("[dn] GATE E: insulator wall, coupled psi, n0 = 1e23: DG density vs post-hoc DG BVP on its own "
+          "potential max {:.1e} of peak; max wall-edge current {:.1e} of q mu n0 V_t/L_q -> {}".format(
+              err, jmax / scale, "PASS" if g_e else "FAIL"), flush=True)
+    return g_e
 
 
 if __name__ == "__main__":

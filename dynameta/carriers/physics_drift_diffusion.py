@@ -87,7 +87,25 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                                     dos_mass_kg: float, mobility_m2Vs: float,
                                     field_mobility: bool = False,
                                     v_sat_ms: Optional[float] = None,
-                                    ct_beta: float = 2.0, e_smooth_Vm: float = 1.0) -> None:
+                                    ct_beta: float = 2.0, e_smooth_Vm: float = 1.0,
+                                    statistics: Optional[str] = None) -> None:
+    """Unipolar (electron) drift-diffusion region with the FD g-factor transport.
+
+    statistics (v0.15; TransportModel.carrier_statistics): which FD SG flux.
+      None / "fermi_dirac" (the DEFAULT since v0.15.0, user decision 2026-11-07): the FD quasi-field (g = 1,
+          Delta1 - Delta0 in the SG argument; physics_heterojunction.fd_quasi_field_expr) -- the same transport
+          as the bipolar default: exact discrete equilibrium and an exactly Nyquist-consistent diffusion noise
+          (MEASURED 9e-12 on an ITO-like 3e26 / AZO-like 3e25 m^-3 thermionic stack).
+          docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md.
+      "legacy" (the v0.14 default, byte-identical; NOT recommended -- reproducing v0.14 numbers only): the
+          edge-averaged g, 0.5 (g(n0) + g(n1)). Its discrete zero-current state is NOT the activity
+          equilibrium the contacts and a thermionic heterointerface use: an O(h^2) zero-bias battery next to a
+          degenerate density gradient, and an S = 4kT Re Y residual of the same order (MEASURED: 2.1e-6 on that
+          stack at h = 0.5 nm, 5.4e-7 at 0.25 nm).
+      ("boltzmann" does not exist here: the unipolar model is FD by construction -- refused.)"""
+    if statistics not in (None, "fermi_dirac", "legacy"):
+        raise ValueError("setup_semiconductor_region_dd: statistics must be None, 'fermi_dirac' or 'legacy' (the "
+                         "unipolar model is Fermi-Dirac by construction), got {!r}".format(statistics))
     require_positive(n_bg_m3=n_bg_m3, eps_static=eps_static, dos_mass_kg=dos_mass_kg,
                      mobility_m2Vs=mobility_m2Vs)
     setup_phi_c0(device, region, n_bg_m3, dos_mass_kg)   # Phi_c0, N_c, N_D
@@ -129,13 +147,19 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
 
     # --- FD diffusion-enhancement g(n) (accurate rational fit; see module docstring) ---
     # edge value g_enh = average of g(Electrons/N_c) over the edge's two nodes.
-    g_avg = "(0.5*({} + {}))".format(_g_expr("@n0"), _g_expr("@n1"))
-    _edge_with_derivs(device, region, "g_enh", g_avg, ("Electrons",))
+    fdq = ""
+    if statistics != "legacy":                     # g = 1 + the FD quasi-field (fd_quasi_field_expr)
+        from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
+        fdq = " + " + fd_quasi_field_expr(device, region, "Electrons", "N_c")
+        ds.edge_model(device=device, region=region, name="g_enh", equation="1.0")
+    else:
+        g_avg = "(0.5*({} + {}))".format(_g_expr("@n0"), _g_expr("@n1"))
+        _edge_with_derivs(device, region, "g_enh", g_avg, ("Electrons",))
 
     # vdiff and the FD-scaled argument vdiff_g = vdiff / g_enh
     _edge_with_derivs(device, region, "vdiff",
                         "(Potential@n0 - Potential@n1)/V_t", ("Potential",))
-    _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh",
+    _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh" + fdq,
                         ("Potential", "Electrons"))
 
     # Enhanced SG current. FIELD-DEPENDENT MOBILITY (R1): when field_mobility is on, the scalar mu_n is

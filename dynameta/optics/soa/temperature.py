@@ -36,106 +36,22 @@ import numpy as np
 from dynameta.constants import C_LIGHT, H_PLANCK, KB, Q_E
 from dynameta.optics.soa.qd_gain import QDGainParams
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
+# The gap law and its tables live in the materials layer (ONE Varshni function and ONE table for the whole
+# package, v0.15 plan 4.0.4; moved there verbatim 2026-11-06 -- every optics.soa result is bit-identical). The
+# names are re-exported here unchanged: VARSHNI_PARAMS (binaries: GaAs, AlAs, InAs, InP), ALLOY_GAP_PARAMS
+# ("InGaAs_LM"), varshni_eg_ev, d_eg_dT_ev_per_K.
+from dynameta.materials.band_temperature import (ALLOY_GAP_PARAMS, VARSHNI_PARAMS,  # noqa: F401
+                                                 d_eg_dT_ev_per_K, varshni_eg_ev)
 
 __all__ = ["VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "B_LO_10MEV_HZ", "varshni_eg_ev",
            "d_eg_dT_ev_per_K", "gain_peak_drift_nm_per_K", "fwhm_hom_at_temperature",
            "qd_params_at_temperature"]
 
 
-# Gamma-gap Varshni (Eg0 [eV], alpha [eV/K], beta [K]) of the BINARIES -- Vurgaftman, Meyer &
-# Ram-Mohan, JAP 89, 5815 (2001): GaAs Table I, InAs Table III, InP Table VI (alpha re-typed from the
-# tables' meV/K). Only a binary has a Varshni row; an alloy is NOT a Varshni triple (ALLOY_GAP_PARAMS).
-VARSHNI_PARAMS = {
-    "GaAs":       (1.519, 5.405e-4, 204.0),
-    "InAs":       (0.417, 2.76e-4, 93.0),
-    "InP":        (1.4236, 3.63e-4, 162.0),
-}
-
-# Ternary A(1-x) B(x) C alloys: (binary A, binary B, x, Gamma-gap bowing C [eV]) for Vurgaftman
-# Eq. (4.1) Eg(T) = (1-x) Eg_A(T) + x Eg_B(T) - x (1-x) C, with C temperature-INDEPENDENT (the
-# paper's stated choice for GaInAs, Sec. IV.A.2) and Eg_A, Eg_B the VARSHNI_PARAMS laws.
-#   InGaAs_LM: Ga0.47In0.53As lattice-matched to InP; C = 0.477 eV (Table XIII), which the paper
-#   fixes from its composite Eg(0) = 816 meV at x = 0.53. Eg(300 K) = 0.737 eV, as the paper itself
-#   quotes for this end point in Sec. V.B.1 (GaInAsP on InP). Audit 2026-11-06: this row used to be a
-#   Varshni triple (0.816 eV, 2.9e-4 eV/K, 193 K) with no table behind it -- right at 0 K but 26 meV
-#   too wide at 300 K.
-ALLOY_GAP_PARAMS = {
-    "InGaAs_LM":  ("GaAs", "InAs", 0.53, 0.477),
-}
-
 # b_LO [Hz] that yields ~10 meV homogeneous-FWHM growth from 0 -> 300 K at E_LO = 36 meV
 # (n_LO(300 K) = 1/(exp(36/25.85) - 1) = 0.3306; 10 meV / 0.3306 = 30.25 meV -> Hz). Per Borri 2001.
 # This is a documented reference magnitude; the qd_params_at_temperature default is 0 (OFF).
 B_LO_10MEV_HZ = 30.25e-3 * Q_E / H_PLANCK   # ~7.31e12 Hz
-
-
-def _varshni_abc(material) -> Tuple[float, float, float]:
-    if isinstance(material, str):
-        if material not in VARSHNI_PARAMS:
-            raise ValueError("varshni: '{}' is not a binary with a Varshni row (known: {}); an "
-                             "alloy end point must be a binary".format(material,
-                                                                      sorted(VARSHNI_PARAMS)))
-        return VARSHNI_PARAMS[material]
-    abc = tuple(float(x) for x in material)
-    if len(abc) != 3:
-        raise ValueError("varshni: custom binary must be (Eg0_eV, alpha_eV_K, beta_K)")
-    return abc  # type: ignore[return-value]
-
-
-def _gap_terms(material) -> Tuple[Tuple[Tuple[float, Tuple[float, float, float]], ...], float]:
-    """Resolve a material spec into ((weight, (Eg0, alpha, beta)), ...) and a constant bowing
-    offset [eV], so Eg(T) = sum w (Eg0 - alpha T^2/(T + beta)) - offset. A binary / custom triple
-    is one term of weight 1 and no offset (bit-identical to the bare Varshni law)."""
-    if isinstance(material, str):
-        if material in ALLOY_GAP_PARAMS:
-            material = ALLOY_GAP_PARAMS[material]
-        elif material not in VARSHNI_PARAMS:
-            raise ValueError("varshni: unknown material '{}' (known: {}); pass a custom "
-                             "(Eg0_eV, alpha_eV_K, beta_K) binary or (A, B, x, C_eV) ternary "
-                             "instead".format(material,
-                                              sorted(VARSHNI_PARAMS) + sorted(ALLOY_GAP_PARAMS)))
-        else:
-            return ((1.0, VARSHNI_PARAMS[material]),), 0.0
-    spec = tuple(material)
-    if len(spec) == 4:
-        A, B, x, C = spec
-        x, C = float(x), float(C)
-        if not (0.0 <= x <= 1.0):
-            raise ValueError("varshni: ternary composition x must be in [0, 1], got {}".format(x))
-        return ((1.0 - x, _varshni_abc(A)), (x, _varshni_abc(B))), x * (1.0 - x) * C
-    return ((1.0, _varshni_abc(spec)),), 0.0
-
-
-def varshni_eg_ev(T_K: float, material: Union[str, Tuple] = "InAs") -> float:
-    """Gamma band gap Eg(T) [eV] -- THE temperature law of the gap for optics.soa (qw_gain's
-    band_edge_Eg_J and qd_params_at_temperature both call it). material is:
-      * a binary name in VARSHNI_PARAMS ("GaAs", "InAs", "InP") or a custom (Eg0_eV, alpha_eV_K,
-        beta_K) triple -> the Varshni law Eg(T) = Eg0 - alpha T^2/(T + beta);
-      * a ternary name in ALLOY_GAP_PARAMS ("InGaAs_LM" = Ga0.47In0.53As on InP) or a custom
-        (A, B, x, C_eV) tuple (A, B binary names or triples) -> Vurgaftman, Meyer & Ram-Mohan,
-        JAP 89, 5815 (2001) Eq. (4.1) over the binary Varshni laws with a temperature-independent
-        bowing: Eg(T) = (1-x) Eg_A(T) + x Eg_B(T) - x (1-x) C.
-    Use the alloy rule (not a fitted Varshni triple) for any ternary: Vurgaftman tabulates Varshni
-    parameters for binaries only (Tables I-IX) and bowings for alloys (Tables XII-XXX). InGaAs_LM:
-    GaAs Table I + InAs Table III + C = 0.477 eV Table XIII -> 0.816 eV at 0 K, 0.737 eV at 300 K."""
-    terms, offset = _gap_terms(material)
-    T = float(T_K)
-    eg = 0.0
-    for w, (Eg0, a, b) in terms:
-        eg += w * (Eg0 - a * T * T / (T + b))
-    return float(eg - offset)
-
-
-def d_eg_dT_ev_per_K(T_K: float, material: Union[str, Tuple] = "InAs") -> float:
-    """Temperature slope dEg/dT [eV/K] of varshni_eg_ev (<= 0; the gap narrows as T rises): per
-    binary term -alpha T (T + 2 beta)/(T + beta)^2 (hand-derived from d/dT[-a T^2/(T+b)]), weighted
-    by the alloy fractions; the bowing is temperature-independent so it does not enter."""
-    terms, _offset = _gap_terms(material)
-    T = float(T_K)
-    d = 0.0
-    for w, (_Eg0, a, b) in terms:
-        d += w * (-a * T * (T + 2.0 * b) / (T + b) ** 2)
-    return float(d)
 
 
 def gain_peak_drift_nm_per_K(lambda_nm: float, material: Union[str, Tuple] = "InAs",

@@ -351,6 +351,8 @@ def _fd_residual_error(device, dim):
     return jd, dr
 
 
+@pytest.mark.floating_ok("assembly only: the contact-free device is never solved -- its one-iteration "
+                         "ds.solve just numbers the equations for get_matrix_and_rhs (v0.15 4.4.2 hook)")
 @pytest.mark.parametrize("dim", [1, 2, 3])
 def test_j1_btbt_jacobian_matches_finite_differences(dim):
     """The BTBT share of the Jacobian, isolated as (with BTBT) - (without), on the same state."""
@@ -488,7 +490,9 @@ def _l1_currents(h):
             for s_ in np.linspace(v0, V, 11)[1:]:
                 ds.set_parameter(device=dev, name="pc_bias", value=float(s_))
                 _solve(1e13, 1e-10)
-            i1[V] = btbt_generation_current(dev, "b")
+            # a convergence study: at h = 2 nm, V = 0 the resolution advisory fires (MEASURED estimate +2.3 % of
+            # the gross rate); it is gated in tests/test_devsim_btbt_resolution.py, not here
+            i1[V] = btbt_generation_current(dev, "b", check_resolution=False)
     finally:
         _wipe(dev)
     return i2, i1
@@ -524,16 +528,19 @@ def test_l1_layered_builder_btbt_converges_to_the_1d_twin():
     fixture runs the Fermi-Dirac g-factor: the discrete FD equilibrium (edge-averaged g) puts n p off
     n_i^2 at O(h^2) in the junction -- MEASURED on the 1-D twin I(0)/Kane = 6.4e-5 (2 nm), 1.6e-5 (1 nm),
     order 1.97, vs 3.2e-16 with fd_enhancement=False; 2-D and 1-D carry the same residual (-6.01e-3 vs
-    -6.01e-3 A/m^2 at 2 nm), so it is the FD statistics, not the BTBT assembly."""
+    -6.01e-3 A/m^2 at 2 nm), so it is the FD statistics, not the BTBT assembly.
+    RE-RECORDED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac': FD detailed balance + the quasi-field
+    transport, whose discrete zero-current state IS the equilibrium): (d) is now ROUND-OFF at both meshes --
+    MEASURED 1.35e-16 (2 nm) / 9.8e-17 (1 nm), was 4.7e-5 / 1.6e-5 -- so the gate is |I(0)|/Kane <= 64 eps
+    (a few ulps of the summed rates) at each h instead of the O(h^2) shrinkage."""
     gaps, eq = {}, {}
     for h_nm in (2.0, 1.0):
         i2, i1 = _l1_currents(h_nm * 1e-9)
         assert i1[-0.5] > 1e3 and i2[-0.5] > 1e3                      # MEASURED 2.26e3 / 2.31e3 A/m^2
         eq[h_nm] = abs(i2[0.0]) / i2["kane0"]
-        assert eq[h_nm] <= 1e-4                                       # MEASURED 4.7e-5 (2 nm), 1.6e-5 (1 nm)
+        assert eq[h_nm] <= 64.0 * 2.220446049250313e-16             # MEASURED 1.35e-16 (2 nm), 9.8e-17 (1 nm)
         gaps[h_nm] = i2[-0.5] / i1[-0.5] - 1.0
         assert abs(gaps[h_nm]) <= _L1_K_NM2 * h_nm ** 2, (h_nm, gaps[h_nm])
-    assert eq[1.0] < 0.5 * eq[2.0]                                    # the equilibrium residual converges
     order = math.log(abs(gaps[2.0] / gaps[1.0])) / math.log(2.0)
     assert order >= 1.7, (gaps, order)
 
@@ -700,6 +707,9 @@ def _gated_design():
                   mesh_2d=Mesh2DSpec(coarse_ps_m=1e-9, x_spacing_edge_m=5e-9, x_spacing_feature_mid_m=5e-9))
 
 
+@pytest.mark.devsim_isolated("bitwise off/on comparison of two separate builder solves: a device left "
+                              "live by another test is iterated by the same joint DEVSIM Newton and moves "
+                              "the answer by ulps (measured 1.1e-16 V with two leftovers live)")
 def test_w1_layered_oxide_tunneling_extras_and_default_off():
     from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
     from dynameta.sweep import BiasPoint

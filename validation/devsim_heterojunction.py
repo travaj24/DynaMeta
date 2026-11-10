@@ -28,7 +28,16 @@ equilibrium builder put every region at psi = 0 in its own frame, i.e. zero buil
           equilibrium profile. MEASURED 2026-11-03: TE vs continuous 1.5e-9, DD vs equilibrium 2.8e-3
           (the FD g fit vs the Aymerich-Humet closure).
 
-Run: python -m validation.devsim_heterojunction [--3d]
+  TEMPERATURE (v0.15 plan P3 item 3, H2; docs/audit/2026-11-06-v0.15-band-temperature.md) -- the band-
+          temperature gates of tests/test_devsim_band_temperature.py, slow ones included: Varshni values,
+          the bit-identity of the model at its reference T, V_bi(T) and Delta E_c(T) of N-AlGaAs / p-GaAs at
+          200 / 400 K, the isotype thermionic conductance at 400 K against an independent barrier, the
+          derived n_i(T), the T_K guard and the 3-D from_design path (MEASURED ~60 s on box A).
+
+Run: python -m validation.devsim_heterojunction [--temperature] [--3d]
+  (no flag)       gates A-E AND the temperature section (what validation.run_all runs);
+  --temperature   the temperature section only;
+  --3d            adds gate F (heavy).
 """
 from __future__ import annotations
 
@@ -241,14 +250,24 @@ def report_3d():                                          # pragma: no cover - C
     return out, timing
 
 
+GATE_FILES = ("test_devsim_heterojunction.py",)
+TEMPERATURE_FILES = ("test_devsim_band_temperature.py",)
+
+
+def pytest_files(argv) -> list:
+    """The test files the CLI runs (module docstring): gates A-E plus the temperature section by default,
+    the temperature section alone with --temperature. Every marker is selected (the slow H2 gates too)."""
+    tests = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests")
+    names = TEMPERATURE_FILES if "--temperature" in argv else GATE_FILES + TEMPERATURE_FILES
+    return [os.path.join(tests, n) for n in names]
+
+
 def main() -> int:                                        # pragma: no cover - CLI
     import pytest
-    here = os.path.dirname(os.path.abspath(__file__))
-    rc = pytest.main(["-q", os.path.join(os.path.dirname(here), "tests",
-                                         "test_devsim_heterojunction.py"), "-p", "no:cacheprovider"])
+    rc = pytest.main(["-q", *pytest_files(sys.argv), "-p", "no:cacheprovider"])
     if "--3d" in sys.argv:
         report_3d()
-    return rc
+    return int(rc)
 
 
 if __name__ == "__main__":                               # pragma: no cover

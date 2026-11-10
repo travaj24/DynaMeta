@@ -109,17 +109,23 @@ activity L = ln u + Delta(u) is dimensionless in u = c/N, with N the bulk's own 
 needs no temperature of its own. The two sides of an interface must share ONE V_t: a NON-ISOTHERMAL
 interface (a temperature step) is refused -- it needs heat flow and the thermoelectric (Seebeck/Peltier)
 terms of thermionic emission, which are not modelled. Before this, a T_K region without BGN silently ran
-the interface at 300 K (and with BGN it was refused). The TE fluxterm has no noise source in
-noise_analysis (documented limit).
+the interface at 300 K (and with BGN it was refused).
+NOISE (v0.15, plan 4.3.1): every thermionic flux model <iface>_HJ<n|p> carries a pair-rate interface model
+<iface>_HJ<n|p>_pair = |pref| (exp(w0) + exp(w1)) = J_01 + J_10 from the same strings
+(thermionic_flux_and_pair); noise_analysis turns it into the te_n / te_p shot-noise source (on by default)
+and refuses a fluxterm without it. The pair model is referenced by no equation: DC and ssac are unchanged.
 
-AFFINITY TEMPERATURE (v0.14 row 3.2-10, user decision 3 as modified 2026-11-06). chi_eV is used as
-given at the device temperature: there is no chi(T) model (the Varshni E_g(T) / chi(T) band-temperature
-model is v0.15). Each TransportModel can state the temperature its chi was quoted at
-(`chi_reference_T_K`, None = unstated = T_REF); check_affinity_temperature compares it with the device
-T for every material of a heterostack and, on a mismatch, acts per the builder's
+AFFINITY TEMPERATURE (v0.14 row 3.2-10, user decision 3 as modified 2026-11-06). Without a band-temperature
+model chi_eV is used as given at the device temperature. Each TransportModel can state the temperature its
+chi was quoted at (`chi_reference_T_K`, None = unstated = T_REF); check_affinity_temperature compares it
+with the device T for every material of a heterostack and, on a mismatch, acts per the builder's
 `on_chi_temperature` toggle: "refuse" (default, AffinityTemperatureError), "warn" (AdvisoryWarning
 stating the size of the assumption) or "off" (silent). Materials of equal (chi_eV, band_gap_eV) -- one
 semiconductor at different dopings -- have no offset and are never checked.
+v0.15 (plan 4.3.3): a material with TransportModel.band_temperature (materials.BandTemperature) has its
+chi, E_g and (optionally) n_i EVALUATED at the device T (materials.band_data_at_T: Varshni anchored at
+chi_reference_T_K, chi moved by the required affinity_fraction of the gap change), so it satisfies the
+check (affinity_temperature_tags) and the toggle no longer applies to it; the others are checked as above.
 """
 
 from __future__ import annotations
@@ -138,7 +144,9 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_RICHARDSON_FREE",
            "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients", "AffinityTemperatureError",
-           "CHI_TEMPERATURE_MODES", "check_affinity_temperature"]
+           "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags",
+           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair", "fd_quasi_field_expr",
+           "fd_delta_derivative"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
 # quasi-Fermi-level drift-diffusion limit.
@@ -259,8 +267,9 @@ _ALGAAS_GAAS_DEG_MEV_PER_100K = 2.15
 
 class AffinityTemperatureError(NotImplementedError):
     """A heterostack runs at a temperature other than the one its electron affinities were quoted at, and
-    on_chi_temperature="refuse" (the default). Missing: a chi(T) model (v0.15). The message names the
-    materials, the toggle and the TransportModel field. A NotImplementedError, like the builder's other
+    on_chi_temperature="refuse" (the default), for a material WITHOUT a band-temperature model (v0.15:
+    TransportModel.band_temperature evaluates chi at T and is the physics remedy). The message names the
+    materials, the toggle and the TransportModel fields. A NotImplementedError, like the builder's other
     "this physics is not modelled" refusals (the non-isothermal stack)."""
 
 
@@ -286,7 +295,9 @@ def check_affinity_temperature(chi_T_K: Mapping[str, Optional[float]], T_K: floa
       "off"    : proceed silently. ONLY for users who have validated chi_eV at their T but cannot (or do
                not want to) tag every material -- e.g. a sweep over T with T-independent fitted offsets.
 
-    The chi_eV is None refusal (anderson_alignment) comes FIRST and is not affected by this toggle."""
+    The chi_eV is None refusal (anderson_alignment) comes FIRST and is not affected by this toggle. The
+    builders build chi_T_K with affinity_temperature_tags, so a material with a band-temperature model is
+    consistent by construction (its chi is evaluated at T)."""
     if mode not in CHI_TEMPERATURE_MODES:
         raise ValueError("on_chi_temperature must be one of {}; got {!r}".format(CHI_TEMPERATURE_MODES, mode))
     if mode == "off":
@@ -305,21 +316,33 @@ def check_affinity_temperature(chi_T_K: Mapping[str, Optional[float]], T_K: floa
     if mode == "refuse":
         raise AffinityTemperatureError(
             "{}: the heterostack runs at T = {:.6g} K but the electron affinities of {} were quoted at another "
-            "temperature, and they would be used unchanged (no chi(T) model; v0.15). Either set "
-            "TransportModel.chi_reference_T_K = {:.6g} on each material whose chi_eV is valid at that T, or pass "
-            "on_chi_temperature='warn' (proceed with a warning) / 'off' (proceed silently; for affinities you "
-            "have validated at T).".format(owner, T, which, T))
+            "temperature, and they would be used unchanged (those materials carry no band-temperature model). "
+            "Either give them TransportModel.band_temperature = materials.BandTemperature(...) (chi and E_g "
+            "evaluated at T), or set TransportModel.chi_reference_T_K = {:.6g} on each material whose chi_eV is "
+            "valid at that T, or pass on_chi_temperature='warn' (proceed with a warning) / 'off' (proceed "
+            "silently; for affinities you have validated at T).".format(owner, T, which, T))
     warnings.warn(
-        "{}: the heterostack runs at T = {:.6g} K with the electron affinities of {} used unchanged (no chi(T) "
-        "model; on_chi_temperature='warn'). Size of the assumption: Delta E_c(T) moves by gamma_chi x the "
-        "mismatch of the two gaps' temperature slopes -- for Al0.3Ga0.7As/GaAs (Vurgaftman et al. 2001 Varshni) "
-        "{:.2f} meV per 100 K in the gap difference, i.e. ~{:.1f}-{:.1f} meV in Delta E_c over |T - T_chi| = "
-        "{:.4g} K (gamma_chi = 1/2 .. 1); larger for Si/SiGe-type pairs. Set TransportModel.chi_reference_T_K "
-        "= {:.6g} once chi_eV is validated at T.".format(
+        "{}: the heterostack runs at T = {:.6g} K with the electron affinities of {} used unchanged (no "
+        "band-temperature model; on_chi_temperature='warn'). Size of the assumption: Delta E_c(T) moves by "
+        "gamma_chi x the mismatch of the two gaps' temperature slopes -- for Al0.3Ga0.7As/GaAs (Vurgaftman et "
+        "al. 2001 Varshni) {:.2f} meV per 100 K in the gap difference, i.e. ~{:.1f}-{:.1f} meV in Delta E_c over "
+        "|T - T_chi| = {:.4g} K (gamma_chi = 1/2 .. 1); larger for Si/SiGe-type pairs. Set "
+        "TransportModel.chi_reference_T_K = {:.6g} once chi_eV is validated at T, or give the materials a "
+        "TransportModel.band_temperature model (chi evaluated at T).".format(
             owner, T, which, _ALGAAS_GAAS_DEG_MEV_PER_100K,
             0.5 * _ALGAAS_GAAS_DEG_MEV_PER_100K * dT / 100.0, _ALGAAS_GAAS_DEG_MEV_PER_100K * dT / 100.0,
             dT, T),
         AdvisoryWarning, stacklevel=3)
+
+
+def affinity_temperature_tags(transports: Mapping[str, object], T_K: float) -> Dict[str, Optional[float]]:
+    """{material: the temperature its chi_eV holds at} for check_affinity_temperature -- the ONE place the
+    v0.15 band-temperature model meets the v0.14 guard: a material with TransportModel.band_temperature has
+    its chi evaluated AT T_K (materials.band_data_at_T), so its tag is T_K (consistent, whatever the toggle);
+    any other material keeps its chi_reference_T_K (None = unstated = T_REF), exactly as in v0.14."""
+    return {m: (float(T_K) if getattr(t, "band_temperature", None) is not None
+                else getattr(t, "chi_reference_T_K", None))
+            for m, t in transports.items()}
 
 
 # ---- DEVSIM node models: the bulk-consistent log-activity L = (E_F - E_band)/kT of one carrier --------
@@ -365,6 +388,107 @@ def setup_log_activity(device: str, region: str, carrier: str, dos_param: str, *
         dexpr = "1.0/{}".format(carrier)
     ds.node_model(device=device, region=region, name="{}:{}".format(name, carrier), equation=dexpr)
     return name
+
+
+def fd_delta_derivative(device: str, region: str, carrier: str, dos_param: str) -> str:
+    """Install (idempotently) the FD log activity (setup_log_activity, fd=True) and the node model
+    HJ_<carrier>_Delta:<carrier> = d Delta/dc = (g - 1)/c = (GA + GC s)/(N (1 + GB s + GD s^2)), s = (c/N)^(1/3)
+    -- the cancellation-free rational form (no g - 1 subtraction). THE one copy of this expression: the FD
+    detailed balance's d ln gamma/dc (bipolar_options.install_fd_detailed_balance) is its negative, and
+    fd_quasi_field_expr carries it to the edges. Returns its name."""
+    setup_log_activity(device, region, carrier, dos_param, fd=True)
+    name = "HJ_{c}_Delta:{c}".format(c=carrier)
+    if name not in ds.get_node_model_list(device=device, region=region):
+        s = "HJ_{}_s".format(carrier)
+        ds.node_model(device=device, region=region, name=name,
+                      equation="({a!r} + {c!r}*{s})/({d}*(1.0 + {b!r}*{s} + {dd!r}*{s}*{s}))".format(
+                          a=GA, c=GC, b=GB, dd=GD, s=s, d=dos_param))
+    return name
+
+
+def fd_quasi_field_expr(device: str, region: str, carrier: str, dos_param: str) -> str:
+    """THE thermodynamically consistent Fermi-Dirac term of the SG flux (statistics="fermi_dirac", v0.15
+    completion): the edge difference of the degeneracy potential, (Delta(u1) - Delta(u0)) [V_t units],
+    added to the Bernoulli argument with g = 1 in the prefactor -- the degeneracy enters as a quasi-field,
+    as in the SEDAN scheme (Yu & Dutton) and the "ln gamma" potential correction of commercial TCAD (both
+    cited from memory, not re-read):
+        electrons  v_n = vdiff + (Delta_n1 - Delta_n0),   J_n ~ n1 B(-v_n) - n0 B(v_n)
+        holes      v_p = vdiff - (Delta_p1 - Delta_p0),   J_p ~ p1 B(v_p) - p0 B(-v_p).
+    WHY. The flux vanishes iff ln(c1/c0) + Delta1 - Delta0 = L1 - L0 = -/+ vdiff: the discrete zero-current
+    state IS the activity equilibrium L = ln u + Delta(u) that every detailed-balance term uses (FD SRH /
+    traps / BTBT, the thermionic interface, the contacts). The legacy edge-averaged g (vdiff/g_avg, prefactor
+    g_avg) vanishes iff g_avg ln(c1/c0) = vdiff -- the trapezoid rule for Int g d ln c, off by
+    (d ln c)^3 g''/12 per edge: an O(h^2) zero-bias battery next to every degenerate gradient (MEASURED: a
+    1e9 A/m^2 "zero-bias" current, 0.4 mV, across an n+ 1e26 / n 3e25 m^-3 step at h = 1 nm;
+    docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md).
+    NOISE. Linearised at equilibrium, delta J ~ c0 B(v_n) (delta L1 - delta L0): the edge conductance is
+    q mu n_eff, n_eff = (n0 B(v) + n1 B(-v))/2 with v = vdiff_g -- the noise_analysis edge density -- so the
+    diffusion source is EXACTLY Nyquist (S = 4 kT Re Y) on degenerate edges as well.
+    NEWTON. The divided-difference form g_e = (L1 - L0)/ln(c1/c0) (Bessemoulin-Chatard, Numer. Math. 121
+    (2012); from memory) has the same equilibrium but makes the influx depend on the log of the DOWNSTREAM
+    density (g_e = 1 + Delta1/ln(c1/c0) across a degenerate-to-minority edge): from the usual charge-neutral
+    seed of an abrupt n+ 1e26 m^-3 junction its Newton drove a minority node to 1e-28 and stalled under the
+    positive-variable update (MEASURED). This form is smooth in both densities and converges from that seed.
+    Installs (idempotently) the log activity, d Delta/dc (fd_delta_derivative), the cancellation-free edge
+    difference HJ_<carrier>_dDelta (_fd_delta_difference_models) and its exact derivative edge models
+    (HJ_<carrier>_dDelta:<carrier>@n0/@n1, the names DEVSIM's diff() looks up for an edge-model reference).
+    Returns the edge model name."""
+    delta = "HJ_{}_Delta".format(carrier)
+    ddelta = "{}:{}".format(delta, carrier)
+    diff = "HJ_{}_dDelta".format(carrier)
+    if diff not in ds.get_edge_model_list(device=device, region=region):
+        fd_delta_derivative(device, region, carrier, dos_param)
+        ds.edge_from_node_model(device=device, region=region, node_model=ddelta)
+        _fd_delta_difference_models(device, region, carrier, dos_param, diff)
+        # its EXACT derivatives: d(Delta1 - Delta0)/dc1 = Delta'(c1), /dc0 = -Delta'(c0) (the closed-form node
+        # derivative carried to the edge) -- the difference form is the same function, written without
+        # cancellation, so these are its derivatives too
+        ds.edge_model(device=device, region=region, name="{}:{}@n1".format(diff, carrier),
+                      equation="{}@n1".format(ddelta))
+        ds.edge_model(device=device, region=region, name="{}:{}@n0".format(diff, carrier),
+                      equation="-{}@n0".format(ddelta))
+    return diff
+
+
+def _fd_delta_difference_models(device: str, region: str, carrier: str, dos_param: str, name: str) -> None:
+    """Edge model `name` = Delta(u1) - Delta(u0) WITHOUT the cancellation of the plain difference of the two
+    node values. Delta = K1 s^2 + K2 s + KL ln(1 + b s + d s^2) + KA atan(D s/(2 + b s)), s = u^(1/3), is
+    ~20-40 at the eta ~ 20-30 of an accumulated TCO, and Delta@n1 - Delta@n0 carries eps |Delta| absolute
+    error -- in the FD quasi-field that is an error eps |Delta| in the Bernoulli argument of EVERY degenerate
+    edge (against eps g |d ln c| for the averaged g), a Newton noise floor ~100x higher (MEASURED: the gated
+    ITO bar of tests/_abs_tol_fixtures stalled at relative updates ~1e-8, where the averaged g reaches 1e-10).
+    Written term by term from the EDGE differences instead:
+        ds = s1 - s0 = (u1 - u0)/(s1^2 + s1 s0 + s0^2),   s1^2 - s0^2 = ds (s1 + s0),
+        ln(1 + b s1 + d s1^2) - ln(1 + b s0 + d s0^2) = ln(1 + t),  t = (b ds + d ds (s1 + s0))/(1 + b s0 + d s0^2)
+            (a 5-term series below |t| = 1e-3: remainder < 2e-19),
+        atan(z1) - atan(z0) = atan((z1 - z0)/(1 + z1 z0)),  z1 - z0 = 2 D ds/((2 + b s1)(2 + b s0))   (z >= 0)
+            (the same half-angle reductions + Taylor tail as the node activity's atan),
+    each to a few ulps of ITSELF, so the edge difference is accurate to ~eps of its own size."""
+    c, N = carrier, dos_param
+    pfx = "HJ_{}_e".format(carrier)
+
+    def em(nm, eq):
+        ds.edge_model(device=device, region=region, name=pfx + nm, equation=eq)
+        return pfx + nm
+    s0 = em("s0", "pow({}@n0/{}, {!r})".format(c, N, 1.0 / 3.0))
+    s1 = em("s1", "pow({}@n1/{}, {!r})".format(c, N, 1.0 / 3.0))
+    dsm = em("ds", "(({c}@n1 - {c}@n0)/{N})/({a}*{a} + {a}*{b} + {b}*{b})".format(c=c, N=N, a=s1, b=s0))
+    t = em("t", "({b!r}*{d} + {dd!r}*{d}*({a} + {z}))/(1.0 + {b!r}*{z} + {dd!r}*{z}*{z})".format(
+        b=GB, dd=GD, d=dsm, a=s1, z=s0))
+    series = " + ".join("({:+.17g})*pow({}, {})".format((-1.0) ** (k + 1) / k, t, k) for k in range(1, 6))
+    lg = em("log", "ifelse(abs({t}) < 1e-3, {s}, log(1.0 + {t}))".format(t=t, s=series))
+    z0 = "({D!r}*{s}/(2.0 + {b!r}*{s}))".format(D=_D, b=GB, s=s0)
+    z1 = "({D!r}*{s}/(2.0 + {b!r}*{s}))".format(D=_D, b=GB, s=s1)
+    x = em("x0", "(2.0*{D!r}*{d}/((2.0 + {b!r}*{a})*(2.0 + {b!r}*{z})))/(1.0 + {z1}*{z0})".format(
+        D=_D, b=GB, d=dsm, a=s1, z=s0, z1=z1, z0=z0))
+    for k in range(_ATAN_HALVINGS):
+        x = em("x{}".format(k + 1), "{x}/(1.0 + pow(1.0 + {x}*{x}, 0.5))".format(x=x))
+    terms = " + ".join("({:+.17g})*pow({}, {})".format((-1.0) ** k / (2 * k + 1), x, 2 * k + 1)
+                       for k in range(_ATAN_TERMS))
+    at = em("atan", "{:.17g}*({})".format(2.0 ** _ATAN_HALVINGS, terms))
+    ds.edge_model(device=device, region=region, name=name,
+                  equation="{k1!r}*{d}*({a} + {z}) + {k2!r}*{d} + {kl!r}*{lg} + {ka!r}*{at}".format(
+                      k1=_K1, k2=_K2, kl=_KLOG, ka=_KATAN, d=dsm, a=s1, z=s0, lg=lg, at=at))
 
 
 def temperature_of_V_t(v_t: float) -> float:
@@ -447,6 +571,36 @@ def _bgn_interface_arguments(device: str, side0: HeteroSide, side1: HeteroSide, 
     return "({}@r0 - {})".format(L0, k0), "({}@r1 - {})".format(L1, k1)
 
 
+#: suffix of the PAIR-rate interface model every thermionic flux model carries (noise_analysis reads it)
+TE_PAIR_SUFFIX = "_pair"
+
+
+def pair_model_name(flux_model: str) -> str:
+    """Name of the pair-rate interface model of the fluxterm interface model `flux_model`: the
+    convention noise_analysis looks the model up by (a fluxterm on a continuity equation WITHOUT it makes
+    noise_spectrum refuse the device -- it would be silently noiseless)."""
+    return flux_model + TE_PAIR_SUFFIX
+
+
+def thermionic_flux_and_pair(pref: float, w0: str, w1: str) -> Tuple[str, str]:
+    """THE thermionic-emission strings, ONE source of truth for the flux and its noise (v0.15, plan 4.3.1):
+    (flux, pair) with
+
+        flux = pref (exp(w0) - exp(w1))       [A/m^2, conventional current r0 -> r1, the fluxterm model]
+        pair = |pref| (exp(w0) + exp(w1))     [A/m^2, J_01 + J_10, both Richardson streams counted]
+
+    built from the same w0 = (E_F,0 - E_top)/kT and w1 strings (BGN-effective edges included), so the pair
+    rate can never drift from the flux it belongs to. Each direction is an independent Poisson stream of
+    carriers over the barrier, so the interface current noise is S_J = 2 q pair / A (noise_analysis,
+    mechanisms te_n / te_p): 4kT G_int at zero bias, 2 q J in strong forward bias. Like the flux, the pair
+    rate uses the Maxwell-Boltzmann Richardson tail (exact equilibrium either way; on a DEGENERATE emitting
+    side the off-equilibrium shot magnitude is as approximate as the current, module LIMITS)."""
+    p = float(pref)
+    flux = "{p}*(exp({w0}) - exp({w1}))".format(p="{!r}".format(p), w0=w0, w1=w1)
+    pair = "{a}*(exp({w0}) + exp({w1}))".format(a="{!r}".format(abs(p)), w0=w0, w1=w1)
+    return flux, pair
+
+
 def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSide, side1: HeteroSide,
                                    *, model: str = "thermionic") -> None:
     """Wire the carrier-continuity coupling of one semiconductor/semiconductor interface (Potential is
@@ -454,7 +608,9 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
     Holes when BOTH sides carry them (a unipolar side next to a bipolar one is refused by the builders).
 
     model='thermionic': fluxterm J(0->1) = -/+ A*T^2 [exp(L_0 - k_0) - exp(L_1 - k_1)] (electrons /
-    holes, conventional current), the Horio-Yanai/Yang-East-Haddad interface condition.
+    holes, conventional current), the Horio-Yanai/Yang-East-Haddad interface condition, plus its pair-rate
+    model <name>_pair = A*T^2 [exp(L_0 - k_0) + exp(L_1 - k_1)] (thermionic_flux_and_pair; not referenced by
+    any equation, so the DC / ssac system is unchanged -- it is the te_n / te_p noise source).
     model='continuous': (L_0 - k_0) - (L_1 - k_1) = 0, continuous quasi-Fermi level.
     side0/side1 MUST be region0/region1 of `interface` (checked against DEVSIM)."""
     if model not in HETERO_MODELS:
@@ -489,8 +645,10 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
         name = "{}_HJ{}".format(interface, tag)
         if model == "thermionic":
             pref = "{!r}".format(qsign * at2)
-            ds.interface_model(device=device, interface=interface, name=name,
-                               equation="{p}*(exp({w0}) - exp({w1}))".format(p=pref, w0=w0, w1=w1))
+            flux, pair = thermionic_flux_and_pair(qsign * at2, w0, w1)
+            ds.interface_model(device=device, interface=interface, name=name, equation=flux)
+            # the noise pair rate J_01 + J_10 (noise_analysis' te_n / te_p source), from the SAME w0 / w1
+            ds.interface_model(device=device, interface=interface, name=pair_model_name(name), equation=pair)
             ds.interface_model(device=device, interface=interface, name="{}:{}@r0".format(name, var),
                                equation="{p}*exp({w0})*{L}:{v}@r0".format(p=pref, w0=w0, L=L0, v=var))
             ds.interface_model(device=device, interface=interface, name="{}:{}@r1".format(name, var),

@@ -353,24 +353,36 @@ CHARGED_TRAP = PT.TrapLevel(energy_eV=0.15, density_m3=2e21, kind="acceptor", ta
 def test_noise_fdt_with_a_charged_trap_level_quasi_static(noise_mod):
     """The same diode with an ACCEPTOR level (N_t 2e21 = 20 % of the doping; trap-aware contacts):
     in the quasi-static regime (1 Hz) S_I = 4kT Re Y to 1e-4 (MEASURED 1.4e-6), load-bearing (Re Y
-    1.57x). Above it see the strict xfail below."""
+    1.57x). Above it see the strict xfail below. v0.15 (decision 39): the noise and ssac solves with this
+    QUASI-STATIC charged level raise the AdvisoryWarning that they are not charge-conserving above the
+    capture rate (asserted; the kinetic twin is tests/test_trap_kinetics.py)."""
+    from dynameta.warning_types import AdvisoryWarning
     V = noise_mod
-    r_on, sn, Y_on = V.gate_b_fdt(open_circuit=False, freqs=[1.0], traps=(CHARGED_TRAP,),
-                                  srh_trap_energy_eV=-0.1)
+    with pytest.warns(AdvisoryWarning, match="QUASI-STATIC CHARGED traps"):
+        r_on, sn, Y_on = V.gate_b_fdt(open_circuit=False, freqs=[1.0], traps=(CHARGED_TRAP,),
+                                      srh_trap_energy_eV=-0.1)
     assert abs(r_on[0] - 1) < 1e-4, r_on
     _, _, Y_off = V.gate_b_fdt(open_circuit=False, freqs=[1.0])
     assert abs(Y_on.real[0] / Y_off.real[0] - 1) > 0.2
 
 
-@pytest.mark.xfail(strict=True, reason="D1c limit: CHARGED traps are quasi-static (no trap-occupancy "
-                   "variable), so the ssac linear response is not charge-conserving above the "
-                   "quasi-static regime and the FDT cannot hold there (MEASURED S/4kT Re Y - 1 = "
-                   "5.6e-3 at 100 kHz, 6.6e-2 at 10 MHz). Turns green when trap kinetics land.")
 def test_noise_fdt_with_a_charged_trap_level_high_frequency(noise_mod):
+    """The former strict xfail (D1c limit), FLIPPED by the v0.15 kinetic traps (plan 4.3.2 K3/K4,
+    decision 39): with CHARGED_TRAP made kinetic (TrapLevel(dynamic=True), its capture / emission events the
+    trap_n / trap_p noise sources) S_I = 4kT Re Y holds at 100 kHz and 10 MHz to 1e-4 (MEASURED 9.6e-7 and
+    7.8e-9). The quasi-static level still misses (it is the default; MEASURED 5.6e-3 at 100 kHz, 6.6e-2 at
+    10 MHz -- the old xfail's numbers) and raises the decision-39 advisory. Full sweep and load-bearing
+    checks: tests/test_trap_noise.py."""
+    import dataclasses
+    from dynameta.warning_types import AdvisoryWarning
     V = noise_mod
-    r_on, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(CHARGED_TRAP,),
-                              srh_trap_energy_eV=-0.1)
-    assert np.max(np.abs(r_on - 1)) < 1e-4, r_on
+    kin = dataclasses.replace(CHARGED_TRAP, dynamic=True)
+    r_k, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(kin,), srh_trap_energy_eV=-0.1)
+    assert np.max(np.abs(r_k - 1)) < 1e-4, r_k
+    with pytest.warns(AdvisoryWarning, match="QUASI-STATIC CHARGED traps"):    # v0.15 decision 39
+        r_on, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(CHARGED_TRAP,),
+                                  srh_trap_energy_eV=-0.1)
+    assert np.min(np.abs(r_on - 1)) > 1e-3, r_on
 
 
 # BTBT params chosen so the 0.36 V built-in field (~2e6 V/m) of the FDT diode tunnels at a rate
@@ -589,14 +601,17 @@ def test_noise_fdt_on_a_continuous_qfl_heterointerface(noise_mod):
     assert abs(Y.real[0] / 6.78 - 1) > 0.3
 
 
-@pytest.mark.xfail(strict=True, reason="LIMIT (documented): the thermionic-emission interface flux is a "
-                   "DEVSIM fluxterm with no noise source -- its shot noise 2q(J_0->1 + J_1->0) is not in "
-                   "noise_analysis' source set, so wherever the interface resistance matters the FDT "
-                   "misses (MEASURED S/4kT Re Y - 1 = -0.69 at 1 Hz with A* x 1e-6). Turns green when an "
-                   "interface TE source is added.")
 def test_noise_fdt_on_a_thermionic_heterointerface(noise_mod):
+    """The same heterojunction FDT diode with D1a's THERMIONIC-emission interface at A* x 1e-6, where the
+    interface carries ~70 % of the noise: S_I = 4kT Re Y to 1e-4 over 1 Hz - 1 GHz (the D2a gate B budget;
+    MEASURED 3.0e-5 at 1 Hz -- the ssac low-frequency floor --, 2.8e-5, 2.2e-8, 3.4e-11). It was a strict xfail
+    through v0.14 (the fluxterm had no noise source: MEASURED -0.69 at 1 Hz); since v0.15 (plan 4.3.1) the
+    two opposed Richardson streams are a two-point source, S = 2q(J_01 + J_10) A |y_r0 - y_r1|^2 per pair
+    (noise_analysis te_n / te_p, on by default). Load-bearing: dropping te_n / te_p breaks it by -0.69."""
     V = noise_mod
     V.hetero_two_region("thermionic", astar_scale=1e-6)
-    sn = V.noise(FDT_FREQS[:2])
-    Y = V.ssac_Y(FDT_FREQS[:2])
+    sn = V.noise(FDT_FREQS)
+    Y = V.ssac_Y(FDT_FREQS)
     assert np.max(np.abs(sn.S / (4 * V.KT * Y.real) - 1)) < 1e-4
+    te = sn.by_mechanism["te_n"] + sn.by_mechanism["te_p"]
+    assert ((sn.S - te) / (4 * V.KT * Y.real) - 1)[0] < -0.5
