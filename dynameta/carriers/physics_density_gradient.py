@@ -482,7 +482,9 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
       anisotropic Schrodinger-Poisson oracle (p-Si 1e23 .. 1e24 m^-3, 1.00 .. 1.30 V, FD, GAMMA_WALL, closure;
       validation/valley_density_gradient.py GATE VA): N_inv +2.9 .. +7.9 % for N_inv >= 1e16 m^-2 (up to +14.5 %
       near threshold), centroid -1.2 .. -5.2 %, 2-fold share within 0.02 .. 0.08 of the SP's; the isotropic model
-      against the same oracle: -8.7 .. -39 %. Cost: +2 unknowns per node per extra set (1-D ramp ~1.7x the time).
+      against the same oracle: -8.7 .. -39 %. Cost: +2 unknowns per node per extra set; MEASURED per Newton
+      iteration 1.9x the isotropic DG's in 1-D with electron DG only, but 0.1-0.8x in 1-D with the hole DG and in 2-D
+      (there the isotropic system factorizes slowly; audit note sec. 6); Newton iterations equal or fewer.
       gamma_n = GAMMA_SI100_SP_CALIBRATED (= 1.88, a FIT to that oracle; its comment in density_gradient states
       fit range and residuals: N_inv -1.3 .. +0.9 %, centroid -2.8 .. +1.5 %) is the opt-in calibration; the
       default stays gamma = 1 and GAMMA_WALL stays the a-priori wall value.
