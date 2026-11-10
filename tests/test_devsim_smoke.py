@@ -137,7 +137,7 @@ def test_c10_fd_potential_shift_matches_the_exact_fermi_dirac_offset():
     assert np.all(np.diff(fd_potential_shift(np.array([0.0, 0.1, 1.0, 10.0, 100.0]))) > 0.0)
 
 
-def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16, contacts=("lo",)):
+def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16, contacts=("lo",), statistics=None):
     """Smallest 1-D bipolar device: uniform n-type bar with one ohmic contact.
 
     `contacts` selects which mesh contacts get the ohmic bipolar recipe; the default ("lo",) is the
@@ -165,7 +165,8 @@ def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16, cont
                       equation="{:.10e}".format(nd_m3))
     BP.setup_bipolar_region(dev, "bulk", eps_static=11.7, n_dos_m3=n_dos_m3, n_i_m3=n_i_m3,
                             mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-7,
-                            tau_p_s=1e-7, fd_enhancement=fd_enhancement)
+                            tau_p_s=1e-7, fd_enhancement=fd_enhancement,
+                            **({} if statistics is None else {"statistics": statistics}))
     BP.setup_equilibrium_seed_models(dev, "bulk")
     for _c in contacts:
         BP.setup_contact_ohmic_bipolar(dev, _c)
@@ -196,13 +197,16 @@ def test_c10_degenerate_contact_carries_the_fermi_dirac_built_in_offset():
     own docstring invites) must pin the built-in potential with the FD offset its FD interior
     implies. Measured on the SHIPPED contact model, against the same device built with
     fd_enhancement=False: the difference is the 0.178 V the audit predicted, and it agrees with the
-    EXACT Fermi-Dirac offset V_t (eta - ln u) to 1 %."""
+    EXACT Fermi-Dirac offset V_t (eta - ln u) to 1 %. REVISED 2026-11-07 (v0.15.0 default statistics
+    'fermi_dirac'): the FDContactShift field is the LEGACY statistics' contact (statistics='legacy', checked as
+    before); the default pins the FD detailed-balance root's EquilibriumPotential, which must carry the SAME
+    offset (V_t [ln(n0/n_i) + Delta(n0/N_c)]; n0 differs by p0 ~ 1e-10 relative) -- MEASURED equal to 1e-15."""
     from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
     from dynameta.carriers.physics_equilibrium import invert_F12
     N_c, n0, n_i = 1.0e25, 2.41022e26, 1.0e16                 # u = n0/N_c = 24.1022 -> eta = 10
     u = n0 / N_c                                              # the n_i^2 / +1 terms are negligible
     dev, dev_b = "c10_fd", "c10_fd_bz"
-    mesh = _bipolar_1d_device(dev, True, n0, N_c, n_i)
+    mesh = _bipolar_1d_device(dev, True, n0, N_c, n_i, statistics="legacy")
     try:
         off_fd = _pinned_offset_V(dev)
         assert "FDContactShift" in devsim.get_node_model_list(device=dev, region="bulk")
@@ -216,6 +220,12 @@ def test_c10_degenerate_contact_carries_the_fermi_dirac_built_in_offset():
         off_bz = _pinned_offset_V(dev_b)
     finally:
         _cleanup(dev_b, mesh_b)
+    mesh_d = _bipolar_1d_device("c10_fd_df", True, n0, N_c, n_i)   # the v0.15.0 default ('fermi_dirac')
+    try:
+        assert "EquilibriumPotential" in devsim.get_node_model_list(device="c10_fd_df", region="bulk")
+        assert _pinned_offset_V("c10_fd_df") == pytest.approx(off_fd, rel=1e-12)
+    finally:
+        _cleanup("c10_fd_df", mesh_d)
     assert off_bz == pytest.approx(-V_T_SI * np.log(u * N_c / n_i), rel=1e-9)   # the legacy value
     d_fd = off_fd - off_bz
     assert d_fd == pytest.approx(-V_T_SI * fd_potential_shift(u), rel=1e-9)
@@ -238,7 +248,7 @@ def test_c10_boltzmann_region_and_nondegenerate_contact_are_unchanged():
     finally:
         _cleanup(dev, mesh)
     dev2 = "c10_si"
-    mesh2 = _bipolar_1d_device(dev2, True, 1.0e24, 2.8e25)     # the shipped Si diode doping
+    mesh2 = _bipolar_1d_device(dev2, True, 1.0e24, 2.8e25, statistics="legacy")   # the shipped Si diode doping
     try:
         vals = np.asarray(devsim.get_node_model_values(device=dev2, region="bulk",
                                                        name="FDContactShift"), dtype=float)
@@ -268,7 +278,7 @@ def test_c10_equilibrium_seed_matches_the_pinned_contact_on_BOTH_polarities():
     u = 24.0847                                               # eta = 10 on either side
     for tag, nd in (("n", +u * N_c), ("p", -u * N_c)):
         dev = "c10_seed_" + tag
-        mesh = _bipolar_1d_device(dev, True, nd, N_c, n_i)
+        mesh = _bipolar_1d_device(dev, True, nd, N_c, n_i, statistics="legacy")   # the legacy contact frame
         try:
             shift = BP.fd_shift_model(dev, "bulk")
             assert shift == "FDContactShift"                  # the FD frame is live on both sides
@@ -279,6 +289,10 @@ def test_c10_equilibrium_seed_matches_the_pinned_contact_on_BOTH_polarities():
             pinned = -_pinned_offset_V(dev)                   # contact pins Potential = bias - offset
             assert seed == pytest.approx(pinned, abs=1e-12), tag
             # and it agrees with the single-source scalar the 3-D gate reference uses
+            assert seed == pytest.approx(
+                BP.ohmic_built_in_offset_V(nd, n_i_m3=n_i, n_dos_m3=N_c, n_dos_p_m3=N_c, statistics="legacy"),
+                abs=1e-12)
+            # the v0.15.0 default ('fermi_dirac') frame: the FD root's psi_eq, the same value (MEASURED 1e-15)
             assert seed == pytest.approx(
                 BP.ohmic_built_in_offset_V(nd, n_i_m3=n_i, n_dos_m3=N_c, n_dos_p_m3=N_c), abs=1e-12)
             # the pre-fix expression is reproduced as the BUG on the p side (+2 V_t Delta) and is

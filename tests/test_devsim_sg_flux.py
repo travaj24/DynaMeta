@@ -203,10 +203,15 @@ def test_every_flux_family_is_built_by_the_one_sg_kernel(monkeypatch):
 
 # ---- (c) the cross-version numeric guard ---------------------------------------------------------
 
-def _solve_in_child(perturb=None):
+def _solve_in_child(perturb=None, statistics="legacy"):
     """REF.solve_fixtures() in a child process (the cl_bz circuit cannot be removed from this one --
-    tests/_bipolar_calllog.py), on this tree."""
+    tests/_bipolar_calllog.py), on this tree. statistics (v0.15.0): 'legacy' -- the path the 6595bde arrays
+    pin (the pre-v0.15.0 default); None = this tree's default ('fermi_dirac')."""
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
+    if statistics:
+        env["SGFLUX_STATISTICS"] = statistics
+    else:
+        env.pop("SGFLUX_STATISTICS", None)
     if perturb:
         env["SGFLUX_PERTURB"] = perturb
     else:
@@ -234,11 +239,26 @@ def test_defaults_off_fixtures_equal_6595bde_to_flux_round_off(solved):
     against the arrays recorded on 6595bde (kahan3 everywhere, tests/data/sgflux_6595bde.json).
     The definition digests were RE-RECORDED for the two-Bernoulli flux (2026-11-04), so this is the
     gate that still pins the physics: every field and terminal current within REF.TOL of the old
-    tree -- the measured round-off of the flux change times ~10 (REF module docstring)."""
+    tree -- the measured round-off of the flux change times ~10 (REF module docstring). REVISED 2026-11-07
+    (v0.15.0 default statistics 'fermi_dirac'): the gate pins statistics='legacy', the path the arrays were
+    recorded on; the default's move is measured by test_v0150_default_moves_the_fd_and_dg_fixtures."""
     rows = REF.compare(REF.load_reference(), solved)
     bad = [r for r in rows if not r[3]]
     assert not bad, bad
     assert len(rows) == REF.N_COMPARED
+
+
+def test_v0150_default_moves_the_fd_and_dg_fixtures():
+    """MEASUREMENT of the v0.15.0 default change on these fixtures (statistics unset = 'fermi_dirac' vs the
+    6595bde arrays = the legacy statistics): the Boltzmann (bz) rows are untouched -- they are within the
+    gate (their statistics did not change) -- and the FD (fd) and DG ITO (dg) rows move by physics (the FD
+    detailed balance, the quasi-field transport). MEASURED values: audit note
+    2026-11-06-v0.15-fermi-dirac-mode-complete.md, section 10."""
+    rows = REF.compare(REF.load_reference(), _solve_in_child(statistics=None))
+    moved = {r[0] for r in rows if not r[3]}
+    assert all(not k.startswith("bz") for k in moved), moved
+    assert any(k.startswith("fd") for k in moved) and any(k.startswith("dg") for k in moved), rows
+    print("\n".join("{} {:.3e} (tol {:.0e})".format(k, m, t) for k, m, t, ok in rows))
 
 
 def test_cross_version_gate_still_catches_physics():

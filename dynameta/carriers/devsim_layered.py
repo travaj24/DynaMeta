@@ -18,8 +18,8 @@ Contacts:
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home
@@ -43,8 +43,11 @@ from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers import extended_precision as XP
 from dynameta.carriers import devsim_geometry as GEO
+from dynameta.carriers import noise_analysis as NA
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
+from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
+from dynameta.carriers.tunneling import btbt_for_material as _btbt_for_material
 from dynameta.geometry.guards import require_supported_geometry
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
@@ -56,6 +59,10 @@ from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 # the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
 # eps there.
 _EDGE_METAL_W_M = 1.5e-9
+
+# the circuit solutions a DC solve writes (DEVSIM creates both on the first circuit solve, values 0.0);
+# noise_spectrum restores them with the node solutions
+_DC_CIRCUIT_SOLUTIONS = ("dcop", "dcop_prev")
 
 
 @dataclass
@@ -77,6 +84,39 @@ _HJ_ZERO_OFFSET_V = 1e-9
 _HJ_EG_TOL_EV = 5e-3
 
 
+class OhmicContactNoiseError(NotImplementedError):
+    """LayeredDevsimBuilder.noise_spectrum / terminal_noise on an electrode that is an OHMIC carrier contact
+    (it pins Electrons / Holes as well as Potential). v0.15 drives dielectric (Potential-only) gates only
+    (plan 4.2.5, user decision 35): repointing an ohmic contact circuit-driven would move only its Potential
+    Dirichlet and leave the carrier pins at the old bias. The follow-on is a set_ssac_contact built on
+    physics_bipolar_dd.setup_contact_ohmic_bipolar_circuit (decision D10b)."""
+
+
+@dataclass(frozen=True)
+class LayeredNoiseSpectrum(NA.NoiseSpectrum):
+    """noise_analysis.NoiseSpectrum of a LayeredDevsimBuilder gate, in the units it was scaled to.
+
+    units    "A^2/Hz per cell" (per_cell=True: S, every breakdown and every map multiplied by depth_m =
+             UnitCell.period_y_m) or "A^2/Hz/m per unit depth" (per_cell=False: DEVSIM's 2-D result as is).
+    depth_m  the factor applied (period_y_m, or 1.0).
+    gate, vg_V, voltages  the circuit-driven electrode, its bias, and every electrode's bias of the state
+             the noise was computed at."""
+    units: str = "A^2/Hz/m per unit depth"
+    depth_m: float = 1.0
+    gate: str = ""
+    vg_V: float = 0.0
+    voltages: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LayeredTerminalNoise(NA.TerminalNoise):
+    """noise_analysis.TerminalNoise of a LayeredDevsimBuilder gate: S_I and Y = G + i omega C both scaled by
+    depth_m (per cell: A^2/Hz and S), S_V = S_I / |Y|^2 from the scaled values (V^2/Hz per cell; it scales
+    as 1/depth_m). `current` is the LayeredNoiseSpectrum."""
+    units: str = "A^2/Hz/m per unit depth"
+    depth_m: float = 1.0
+
+
 class LayeredDevsimBuilder:
     """2-D (x, z) DEVSIM builder over a layered Design.
 
@@ -93,8 +133,10 @@ class LayeredDevsimBuilder:
 
     on_chi_temperature (v0.14 row 3.2-10, user decision 3): what a HETEROSTACK (two or more different
     semiconductor materials) does when the device temperature (BipolarOptions.T_K; T_REF otherwise) differs
-    from the temperature its affinities were quoted at (TransportModel.chi_reference_T_K, None = T_REF).
-    chi_eV is used unchanged either way -- there is no chi(T) model in v0.14.
+    from the temperature its affinities were quoted at (TransportModel.chi_reference_T_K, None = T_REF), for
+    the materials WITHOUT a band-temperature model (their chi_eV is used unchanged at the device T). A
+    material with TransportModel.band_temperature (v0.15, materials.BandTemperature) has chi, E_g and,
+    optionally, n_i evaluated at the device T (materials.band_data_at_T) and is never subject to the toggle.
       "refuse" (default): raise physics_heterojunction.AffinityTemperatureError naming the materials, this
                toggle and the field. Use it unless you know your affinities; if chi_eV IS your value at the
                device T, tag the materials (chi_reference_T_K = T_K) instead of switching the check off.
@@ -107,7 +149,7 @@ class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
-                  extended_precision: bool = False, on_chi_temperature: str = "refuse",
+                  extended_precision: Optional[bool] = None, on_chi_temperature: str = "refuse",
                   exact_geometry=True) -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
@@ -127,6 +169,11 @@ class LayeredDevsimBuilder:
         # None (default) -> nothing is computed and CarrierField.extras is unchanged. When set, every
         # solve adds extras["oxide_tunneling"] = {dielectric_region: summary} for each dielectric region
         # sharing an interface with a semiconductor region (the converged field; no feedback).
+        # v0.15 (plan 4.1.1): OxideTunnelingParams(coupling="self_consistent", ...) instead INSTALLS the
+        # self-consistent term (tunneling.setup_oxide_tunneling) at build_device(), from every bipolar
+        # semiconductor region to every gate electrode it reaches through dielectric regions only; the
+        # extras then report the term's own kernel call (+ "coupling", "gate", "I_gate_A") and
+        # extras["contact_currents_A"] carries the gate's DC tunnelling current.
         self.oxide_tunneling = oxide_tunneling
         # D1c (2026-11-03): interface traps, {key: physics_traps.InterfaceTraps (or a list)} with key an
         # interface name ("<lower region>__<upper region>") or a 2-tuple of region names (any order).
@@ -140,7 +187,11 @@ class LayeredDevsimBuilder:
         # evaluation + equation assembly and solves it with the mixed-precision Newton (128-bit
         # residual, double factorization) -- carriers/extended_precision.py. Device-scoped (it never
         # reaches a later default device); False (default) leaves every solve byte-identical.
-        self.extended_precision = bool(extended_precision)
+        # v0.15 (plan 4.2.6, decision 37): None (default) follows Design.carriers.extended_precision
+        # (unstated = off); an explicit bool wins, with ONE AdvisoryWarning when it contradicts a stated
+        # design value (XP.resolve_design_flag; geometry.specs.CarrierSpec says when to use it).
+        self.extended_precision = XP.resolve_design_flag(design, extended_precision,
+                                                         "LayeredDevsimBuilder")
         # v0.14.0 (user decision 2026-11-06): DEVSIM's box-method geometry is corrected right after
         # create_device (devsim_geometry.correct_device_geometry; True = negative policy 'warn', or
         # 'raise' / 'clip' / False -- resolve_policy). This builder's rectilinear right-triangle mesh is
@@ -153,6 +204,7 @@ class LayeredDevsimBuilder:
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
         # electrode -> circuit source that drives it, once set_ssac_gate repointed it (see _drive)
         self._circuit_gates: Dict[str, str] = {}
+        self._circuit_gate_nodes: Dict[str, str] = {}        # electrode -> its circuit node (set_ssac_gate)
         self._built = False
 
     # ---- region planning ----
@@ -483,12 +535,13 @@ class LayeredDevsimBuilder:
                             "ground (only a weak 2-node edge ground) -- a gated device may not "
                             "converge; add an edge GROUND electrode on this layer, or use the "
                             "equilibrium physics mode for DC gate accumulation.".format(s.name), AdvisoryWarning, stacklevel=2)
+                    _st = getattr(tr, "carrier_statistics", None)     # v0.15: "fermi_dirac" -> quasi-field
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
                         mobility_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
                         field_mobility=tr.field_dependent_mobility, v_sat_ms=tr.v_sat_ms,
-                        ct_beta=tr.ct_beta)
+                        ct_beta=tr.ct_beta, **({"statistics": _st} if _st is not None else {}))
                     self._dd_regions.add(s.name)
                 else:
                     PE.setup_semiconductor_region(
@@ -518,7 +571,35 @@ class LayeredDevsimBuilder:
                 DD.setup_contact_ohmic_dd(self.device, c, psi_offset_V=off)   # Potential + Electrons (=N_D)
             else:
                 PE.setup_contact(self.device, c, psi_offset_V=off)            # Potential only
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            self._install_oxide_tunneling()
         self._built = True
+
+    def _install_oxide_tunneling(self) -> None:
+        """v0.15: the self-consistent oxide-tunnelling term from each bipolar semiconductor region to each
+        gate electrode it reaches through dielectric regions only (tunneling.dielectric_column), in the
+        builder's Anderson frame (band_frames) with the materials' affinities."""
+        from dynameta.carriers import tunneling as TN
+        mats = {sp.name: sp.material for sp in self._specs}
+        chi = {}
+        for sp in self._specs:
+            if sp.role == "semiconductor":
+                tr = self.design.materials.get(sp.material).transport
+                chi[sp.material] = tr.chi_eV
+        n = 0
+        for E in self.design.electrodes:
+            if E.is_edge or self._contact_region.get(E.name) in self._bipolar_regions | self._dd_regions:
+                continue
+            for semi in sorted(self._bipolar_regions):
+                if TN.dielectric_column(self.device, semi, E.name) is None:
+                    continue
+                TN.setup_oxide_tunneling(self.device, semi, E.name, self.oxide_tunneling,
+                                         semiconductor_material=mats[semi], chi_eV=chi,
+                                         phi_c_V=self._frames[semi][0])
+                n += 1
+        if n == 0:
+            raise ValueError("LayeredDevsimBuilder(oxide_tunneling=...coupling='self_consistent'): no gate "
+                             "electrode reaches a bipolar_dd semiconductor through dielectric regions")
 
     def _install_interface_traps(self) -> None:
         """D1c: attach the requested interface traps (physics_traps.install_interface_traps)."""
@@ -583,7 +664,9 @@ class LayeredDevsimBuilder:
                 continue
             tr = self.design.materials.get(sp.material).transport
             own[sp.name] = self._own_phi_c(sp.name, tr)
-            chi[sp.name] = float(tr.chi_eV) if tr.chi_eV is not None else None
+            # v0.15: chi at the region's T (TransportModel.band_temperature); no model -> chi_eV unchanged
+            chi_T = band_data_at_T(tr, transport_temperature_K(tr)).chi_eV
+            chi[sp.name] = float(chi_T) if chi_T is not None else None
             mats[sp.name] = sp.material
         # v0.14 (user decision 2026-11-04): TransportModel.chi_eV defaults to None. Regions of ONE material
         # align with zero offset whatever chi is (bit-identical to the old 4.5 - 4.5 = 0.0); two different
@@ -599,12 +682,12 @@ class LayeredDevsimBuilder:
         # quoted there (after the chi_eV-is-None refusal above). Only a HETEROstack is checked: materials
         # whose (chi_eV, band_gap_eV) all agree are one semiconductor at different dopings (doping lives
         # in TransportModel, so a p/n homojunction is two material names), with no offset to drift.
+        # v0.15: a material with a band-temperature model has chi evaluated at T -> consistent (the tags).
         trs = {m: self.design.materials.get(m).transport for m in set(mats.values())}
         if len({(t.chi_eV, t.band_gap_eV) for t in trs.values()}) > 1:
-            HJ.check_affinity_temperature(
-                {m: getattr(t, "chi_reference_T_K", None) for m, t in trs.items()},
-                HJ.temperature_of_V_t(vts[semis[0]]), mode=self.on_chi_temperature,
-                owner="LayeredDevsimBuilder")
+            T_dev = HJ.temperature_of_V_t(vts[semis[0]])
+            HJ.check_affinity_temperature(HJ.affinity_temperature_tags(trs, T_dev), T_dev,
+                                          mode=self.on_chi_temperature, owner="LayeredDevsimBuilder")
         for r, (phi_c, s_v) in frames.items():
             if s_v == 0.0:
                 continue
@@ -655,7 +738,9 @@ class LayeredDevsimBuilder:
             sd0, sd1 = self._hetero_side(r0), self._hetero_side(r1)
             if sd0.holes and mat[r0] != mat[r1]:
                 for sd, t, nm in ((sd0, t0, mat[r0]), (sd1, t1, mat[r1])):
-                    if t.band_gap_eV is None:            # v0.14: no default gap (user decision 2026-11-04)
+                    # the gap AT the region's T: band_gap_eV as given, or the band-temperature model's E_g(T)
+                    eg_T = band_data_at_T(t, transport_temperature_K(t)).E_g_eV
+                    if eg_T is None:                     # v0.14: no default gap (user decision 2026-11-04)
                         raise ValueError(
                             "LayeredDevsimBuilder: bipolar heterojunction '{}'/'{}': material '{}' has no "
                             "band_gap_eV. The valence-band offset of a bipolar heterojunction needs both "
@@ -663,13 +748,16 @@ class LayeredDevsimBuilder:
                             "defaults to None since v0.14 so an offset is never set by a default.".format(
                                 r0, r1, nm))
                     eg = sd.phi_c_V - sd.phi_v_V
-                    if abs(eg - float(t.band_gap_eV)) > _HJ_EG_TOL_EV:
+                    if abs(eg - float(eg_T)) > _HJ_EG_TOL_EV:
                         raise ValueError(
                             "LayeredDevsimBuilder: bipolar heterojunction material '{}' has band_gap_eV = "
-                            "{:.4f} but its statistics give E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV at T = {:.6g} K (n_i_m3 must be the intrinsic density AT that temperature; N_c, N_v follow the DOS masses at T); the "
+                            "{:.4f} at T (as given, or from its band_temperature model) but its statistics give "
+                            "E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV at T = {:.6g} K (n_i_m3 must be the intrinsic "
+                            "density AT that temperature; N_c, N_v follow the DOS masses at T); the "
                             "valence offset would follow the statistics, not the stated gap. Set n_i_m3 = "
-                            "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV).".format(
-                                nm, float(t.band_gap_eV), eg,
+                            "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV; with a band_temperature model, "
+                            "derive_n_i=True derives n_i(T) from the n_i at chi_reference_T_K).".format(
+                                nm, float(eg_T), eg,
                                 HJ.temperature_of_V_t(HJ.region_V_t(self.device, sd.region))))
             model = self.heterointerface
             if model == "auto":
@@ -715,13 +803,21 @@ class LayeredDevsimBuilder:
         # ONE helper shared with the 3-D builder (v0.14 row 3.2-7).
         from dynameta.carriers.bipolar_options import band_dos_at_T
         Nc, Nv = band_dos_at_T(dos, tr.dos_mass_p_kg, getattr(tr, "bipolar_options", None))
+        # carrier statistics (TransportModel.carrier_statistics): None -> "fermi_dirac" (v0.15.0 default: FD
+        # transport + FD detailed balance); "boltzmann" -> g == 1; "legacy" -> the v0.14 default, byte-identical.
+        stats = getattr(tr, "carrier_statistics", None)
+        # n_i at the region's T: n_i_m3 as given, or derived by the band-temperature model (derive_n_i=True)
+        n_i = band_data_at_T(tr, transport_temperature_K(tr)).n_i_m3
         BP.setup_bipolar_region(
-            self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
+            self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(n_i),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
-            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s),
+            fd_enhancement=stats != "boltzmann", statistics=stats, n_dos_p_m3=Nv,
             options=getattr(tr, "bipolar_options", None),       # audit R26/R27 (None -> SRH only)
-            btbt=getattr(tr, "btbt", None),                 # D1d: None -> no BTBT (byte-identical)
+            # D1d: None -> no BTBT (byte-identical). v0.15: a set with scale_B_with_gap gets B at the region T
+            # from the material's band-temperature model (tunneling.btbt_for_material; others pass unchanged)
+            btbt=_btbt_for_material(getattr(tr, "btbt", None), tr),
             srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
             traps=tuple(getattr(tr, "srh_traps", ())) or None)
         BP.setup_equilibrium_seed_models(self.device, s.name)
@@ -762,7 +858,10 @@ class LayeredDevsimBuilder:
         d = self.design
         method = d.mesh_2d.dc_method
         semi = sorted(self._dd_regions)
-        abs_tol = self._dc_abs_tol() if abs_tol is None else abs_tol
+        # abs_tol=None reaches solve_dc, which resolves dc_solve.default_abs_tol() -- over EVERY live
+        # device, as DEVSIM's joint Newton requires -- on every solve's pre-solve state (v0.15 decision
+        # 59: the builder's own n_bg * 1e-12 rule is retired -- one kernel; see default_abs_tol for
+        # when to pass an explicit float)
 
         def _targets():
             return {E.name: bias.voltages.get(
@@ -815,10 +914,10 @@ class LayeredDevsimBuilder:
         (2) coupled 3-variable Newton at 0 bias DIRECTLY from that seed; (3) ramp the biased electrodes.
         The good built-in seed makes the coupled Newton converge without the 1D diode's separate frozen
         Poisson pre-solve -- which is under-determined on the 2D mesh with the inert edge-metal strips
-        (no Potential variable there) and diverges. The abs_tol is density-scaled (the _dc_abs_tol
-        lesson: the continuity residual is in carrier-density units ~n_bg)."""
+        (no Potential variable there) and diverges. abs_tol=None resolves dc_solve.default_abs_tol per
+        solve (the continuity residual is in carrier-density units ~n_bg; v0.15 decision 59 retired the
+        builder's max(n_bg * 1e-12, 1e13) rule)."""
         d = self.design
-        abs_tol = max(self._dc_abs_tol(), 1.0e13) if abs_tol is None else abs_tol
 
         # KNOWN LIMITATION (library audit): a GATE electrode on a non-semiconductor layer (a Potential-only
         # Dirichlet on an oxide) does NOT inject the bipolar built-in-potential offset phi_bi the way an
@@ -868,6 +967,7 @@ class LayeredDevsimBuilder:
             ds.set_node_values(device=self.device, region=s, name="Holes",
                                values=ds.get_node_model_values(device=self.device, region=s,
                                                                name="IntrinsicHoles"))
+        PT.seed_kinetic_traps(self.device, sorted(self._bipolar_regions))   # v0.15: no-op without kinetic traps
         for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
             self._drive(E.name, v)
@@ -891,6 +991,9 @@ class LayeredDevsimBuilder:
                          max_iter=max_iter)
         if verbose:
             print("[carriers] bipolar staged solve done (bias={})".format(bias.voltages), flush=True)
+        # the solved bias (read by noise_spectrum; the bipolar path itself always ramps from 0)
+        self._last_converged_bias = {E.name: bias.voltages.get(
+            E.name, E.fixed_voltage_V if E.role == "ground" else 0.0) for E in d.electrodes}
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)
 
     def _drive(self, electrode: str, v: float) -> None:
@@ -922,27 +1025,6 @@ class LayeredDevsimBuilder:
                 "would return a stale operating point. Use set_ssac_gate(name, source_name=...) or set "
                 "the bias with ds.circuit_alter + a direct DC solve.".format(unknown))
 
-    def _dc_abs_tol(self) -> float:
-        """Absolute Newton tolerance, scaled to the carrier density for DD.
-
-        In SI the electron-continuity residual is in carrier-density units
-        (~n_bg, ~1e26 m^-3). The absolute Newton update floors near
-        n_bg*machine_eps (~1e11 for n_bg~1e26), so the Boltzmann-era abs_tol=1e10
-        sits BELOW that precision floor and can never be satisfied -- the solve
-        spins to max_iter and raises Convergence failure even though the relative
-        update is ~1e-9. Scaling abs_tol to the carrier density puts it safely
-        above the floor so rel_tol becomes the binding (meaningful) gate.
-        Equilibrium mode (Poisson-only, V-unit residual) keeps the tight 1e10.
-        """
-        if not self._dd_regions:
-            return 1e10
-        n_scale = 0.0
-        for s in self._specs:
-            if s.name in self._dd_regions:
-                t = self.design.materials.get(s.material).transport
-                n_scale = max(n_scale, float(t.n_bg_m3))
-        return max(1e10, n_scale * 1e-12)
-
     def set_ssac_gate(self, electrode_name: str, *, source_name: str = "V1",
                       node_name: str = "vac") -> Tuple[str, str]:
         """Repoint an already-built electrode from its bias-parameter Dirichlet to a CIRCUIT-DRIVEN
@@ -962,7 +1044,13 @@ class LayeredDevsimBuilder:
         bias-contact record and records the circuit one -- so a later Gummel/staged solve restores the
         AC drive, not the bias Dirichlet. Intended for the modulating GATE (a dielectric contact); on
         a drift-diffusion ohmic ground it would repoint only Potential and leave the Electrons pin, so
-        a warning is issued in that case."""
+        a warning is issued in that case.
+
+        For gate NOISE use noise_spectrum / terminal_noise, which call this once and re-settle through the
+        library solver. DEVSIM circuits are process-global and cannot be deleted in-process: since v0.15 a
+        second call for the same electrode, or a source / node name another circuit already uses, raises
+        ValueError BEFORE the bias Dirichlet is removed, and a circuit DEVSIM refuses raises RuntimeError
+        naming the fresh-process remedy."""
         if not self._built:
             raise RuntimeError(
                 "set_ssac_gate('{}') requires a built device; call build_device() or solve() first "
@@ -977,15 +1065,252 @@ class LayeredDevsimBuilder:
                 "Electrons pin in place. Drive the modulating GATE (a dielectric contact), not the "
                 "carrier ground.".format(electrode_name), AdvisoryWarning, stacklevel=2)
         from dynameta.carriers import ac_analysis as _AC
+        # v0.15 (plan 4.2.5, fix (b)): DEVSIM circuits are process-global and cannot be deleted in-process
+        # (tests/_bipolar_calllog.py). Refuse a name clash BEFORE the bias Dirichlet is removed, so the
+        # device is never left without a gate equation.
+        taken = sorted({node_name, "{}.I".format(source_name)} & set(ds.get_circuit_node_list()))
+        if electrode_name in self._circuit_gates or taken:
+            raise ValueError(
+                "set_ssac_gate('{}'): {} -- DEVSIM circuits are process-global and cannot be removed "
+                "in-process; pass another source_name / node_name, or reuse the existing circuit-driven "
+                "gate.".format(electrode_name, "this electrode is already circuit-driven by source {!r}"
+                               .format(self._circuit_gates.get(electrode_name))
+                               if electrode_name in self._circuit_gates
+                               else "circuit node(s) {} already exist".format(taken)))
         # drop the bias-Dirichlet contact equation (live) and its stale registry record, then attach
         # the circuit-driven replacement (setup_circuit_contact records the new one).
         ds.delete_contact_equation(device=self.device, contact=electrode_name,
                                    name="PotentialEquation")
         _R.forget(self.device, "PotentialEquation", loc=electrode_name)
-        out = _AC.setup_circuit_contact(self.device, electrode_name, source_name=source_name,
-                                        node_name=node_name)
+        try:
+            out = _AC.setup_circuit_contact(self.device, electrode_name, source_name=source_name,
+                                            node_name=node_name)
+        except ds.error as e:
+            raise RuntimeError(
+                "set_ssac_gate('{}'): DEVSIM refused the circuit ({}). DEVSIM circuits are process-global: "
+                "a circuit node cannot be added once an analysis has run with a circuit present, and none "
+                "can be deleted. The electrode's bias Dirichlet is already removed, so rebuild the device "
+                "in a fresh process.".format(electrode_name, e)) from e
         self._circuit_gates[electrode_name] = source_name    # solve() now drives this source
+        self._circuit_gate_nodes[electrode_name] = node_name
         return out
+
+    # ---- one-call gate noise (v0.15 plan 4.2.5, user decision 35) ----
+    def noise_spectrum(self, frequencies, *, gate: str, vg: Optional[float] = None,
+                       source_name: str = "V1", node_name: str = "vac",
+                       mechanisms: Optional[Sequence[str]] = None,
+                       hooge: Union[None, str, float, Mapping] = None,
+                       external_generation_shot: bool = True, regions: Optional[Sequence[str]] = None,
+                       maps: bool = False, per_cell: bool = True, rel_tol: float = 1e-5,
+                       abs_tol: Optional[float] = None, max_iter: int = 60,
+                       v_step: float = 0.25) -> LayeredNoiseSpectrum:
+        """Short-circuit current noise S_I(f) of the dielectric GATE `gate` (noise_analysis.noise_spectrum
+        on '<source_name>.I') at gate bias `vg`, in ONE call. It is the hand recipe (solve, set_ssac_gate,
+        circuit_alter, a DC re-settle, noise_analysis.noise_spectrum; validation/devsim_noise.py gate G)
+        with its traps removed:
+          * the gate is made circuit-driven ONCE (set_ssac_gate, recorded); later calls reuse it. DEVSIM
+            circuits are process-global and cannot be removed in-process, so the same gate under another
+            source_name, or a name another circuit already uses, raises ValueError.
+          * the bias is re-settled through the LIBRARY solver (dc_solve.solve_dc with the bipolar / DD
+            branch, tolerances and step solve() uses: extended precision, the density-scaled default
+            abs_tol and the well-posedness check all apply), ramping the gate's circuit source from its
+            last converged bias to vg in steps of v_step (bipolar: min(v_step, 0.05)). A raw ds.solve
+            re-settle bypasses all three.
+          * the builder's operating point is LEFT AS IT WAS: every node solution and circuit value is
+            restored afterwards, so a result depends only on (state, vg) -- calls at 0, +1, 0 V give a
+            third result bitwise equal to the first -- and solve() continues from where it was. (On an
+            extended-precision builder the restore is to the double-rounded values.)
+          * results are PER CELL (per_cell=True, the default): S, every breakdown and every map times
+            UnitCell.period_y_m, the convention of CarrierField.extras["contact_currents_A"]. Exact for
+            this builder's device, which is invariant along y: the Green's function is y-independent and
+            the sources are spatially white, so they add incoherently along the cell depth,
+            S_cell = W S_2D. It is NOT the noise of a cell whose geometry varies along y (a square patch
+            modelled by its x-z section: the answer is the y-extruded device's), nor of a source
+            correlated over lengths ~W. per_cell=False returns DEVSIM's per-unit-depth result (A^2/Hz/m)
+            unscaled, bit for bit the hand recipe's.
+        The returned LayeredNoiseSpectrum records units, depth_m, gate, vg_V and voltages.
+
+        Which options: keep mechanisms=None -- it is noise_analysis.DEFAULT_MECHANISMS, read at call
+        time, so every default-on source (the thermionic interfaces te_n / te_p since v0.15) is included
+        and the total obeys the FDT; name a subset only to split S. hooge: None (default, no 1/f source);
+        "material" = each carrier region's TransportModel.hooge_alpha_n / hooge_alpha_p (a region without
+        one carries no Hooge source; none set anywhere = no Hooge at all); a float or a {region: alpha |
+        (alpha_n, alpha_p)} mapping goes to noise_analysis.noise_spectrum's hooge_alpha unchanged. A
+        dielectric gate draws no DC current, so its Hooge noise is that of the round-off equilibrium
+        current. external_generation_shot, regions and maps are noise_analysis.noise_spectrum's.
+
+        Scope (decision 35): `gate` must be a Potential-only (dielectric) contact; an OHMIC carrier contact
+        raises OhmicContactNoiseError (a NotImplementedError). The builder must be built AND solved
+        (RuntimeError otherwise). A bipolar builder at vg != 0 warns UnreliableResultWarning (the gated
+        bipolar 2-D device lacks the built-in-potential offset; see solve())."""
+        w, units = self._noise_depth(per_cell)
+        hooge_alpha = self._resolve_hooge(hooge)
+        mech = NA.DEFAULT_MECHANISMS if mechanisms is None else tuple(mechanisms)
+
+        def run():
+            return NA.noise_spectrum(self.device, frequencies, output_node="{}.I".format(source_name),
+                                     regions=regions, mechanisms=mech, hooge_alpha=hooge_alpha,
+                                     external_generation_shot=external_generation_shot, maps=maps)
+        sn, v, volts = self._at_gate_bias(gate, vg, source_name, node_name, rel_tol, abs_tol, max_iter,
+                                          v_step, run)
+        return _scaled_noise(sn, w, units, gate, v, volts)
+
+    def terminal_noise(self, frequencies, *, gate: str, vg: Optional[float] = None,
+                       source_name: str = "V1", node_name: str = "vac",
+                       mechanisms: Optional[Sequence[str]] = None,
+                       hooge: Union[None, str, float, Mapping] = None,
+                       external_generation_shot: bool = True, regions: Optional[Sequence[str]] = None,
+                       maps: bool = False, per_cell: bool = True, rel_tol: float = 1e-5,
+                       abs_tol: Optional[float] = None, max_iter: int = 60,
+                       v_step: float = 0.25) -> LayeredTerminalNoise:
+        """noise_spectrum (same arguments, same state handling) plus the gate's ssac admittance
+        Y = G + i omega C at the SAME operating point (ac_analysis.ssac_admittance, a separate linear
+        solve) and the open-circuit S_V = S_I / |Y|^2. Per cell, S_I and Y are both multiplied by
+        period_y_m (so S_V scales as 1/period_y_m). The FDT check of an equilibrium gate is
+        S_I = 4 kT Re Y."""
+        from dynameta.carriers.ac_analysis import ssac_admittance
+        w, units = self._noise_depth(per_cell)
+        hooge_alpha = self._resolve_hooge(hooge)
+        mech = NA.DEFAULT_MECHANISMS if mechanisms is None else tuple(mechanisms)
+
+        def run():
+            sn = NA.noise_spectrum(self.device, frequencies, output_node="{}.I".format(source_name),
+                                   regions=regions, mechanisms=mech, hooge_alpha=hooge_alpha,
+                                   external_generation_shot=external_generation_shot, maps=maps)
+            f, C, G = ssac_admittance(sn.frequencies, source_name=source_name)
+            return sn, G + 1j * 2.0 * np.pi * f * C
+        (sn, Y), v, volts = self._at_gate_bias(gate, vg, source_name, node_name, rel_tol, abs_tol,
+                                               max_iter, v_step, run)
+        cur = _scaled_noise(sn, w, units, gate, v, volts)
+        Yc = Y if w is None else Y * w
+        return LayeredTerminalNoise(frequencies=cur.frequencies, S_I=cur.S, S_V=cur.S / np.abs(Yc) ** 2,
+                                    Y=Yc, current=cur, units=units, depth_m=1.0 if w is None else w)
+
+    def _noise_depth(self, per_cell: bool):
+        """(scale, units) of the gate-noise results: (period_y_m, per cell) or (None, per unit depth)."""
+        if per_cell:
+            return float(self.design.unit_cell.period_y_m), "A^2/Hz per cell"
+        return None, "A^2/Hz/m per unit depth"
+
+    def _resolve_hooge(self, hooge):
+        """noise_spectrum's `hooge` -> noise_analysis hooge_alpha. "material" maps every carrier region
+        to its material's (TransportModel.hooge_alpha_n, hooge_alpha_p); regions with neither are left
+        out (no Hooge source) and an all-empty result is None (no Hooge at all: bit-identical to the
+        no-Hooge call). The ONE reader of those TransportModel fields."""
+        if not isinstance(hooge, str):
+            return hooge
+        if hooge != "material":
+            raise ValueError("noise_spectrum: hooge must be None, 'material', a float or a mapping; got "
+                             "{!r}".format(hooge))
+        if not self._built:
+            raise RuntimeError("noise_spectrum: the builder must be built AND solved first (call solve(bias))")
+        out = {}
+        for s in self._specs:
+            if s.name not in self._dd_regions and s.name not in self._bipolar_regions:
+                continue
+            tr = self.design.materials.get(s.material).transport
+            pair = (tr.hooge_alpha_n, tr.hooge_alpha_p if s.name in self._bipolar_regions else None)
+            if pair != (None, None):
+                out[s.name] = pair
+        return out or None
+
+    def _check_noise_gate(self, gate: str, source_name: str) -> None:
+        if not self._built or getattr(self, "_last_converged_bias", None) is None:
+            raise RuntimeError("noise_spectrum: the builder must be built AND solved first (call "
+                               "solve(bias)); the noise is taken about a converged DC operating point.")
+        if gate not in self._contact_region:
+            raise ValueError("noise_spectrum: unknown electrode {!r}; built contacts are {}.".format(
+                gate, sorted(self._contact_region)))
+        have = self._circuit_gates.get(gate)
+        if have is not None and have != source_name:
+            raise ValueError("noise_spectrum: electrode {!r} is already circuit-driven by source {!r}; "
+                             "DEVSIM circuits cannot be removed in-process, so it cannot be repointed to "
+                             "{!r} (pass source_name={!r}).".format(gate, have, source_name, have))
+        carrier = sorted(set(ds.get_contact_equation_list(device=self.device, contact=gate))
+                         - {"PotentialEquation"})
+        region = self._contact_region[gate]
+        if carrier or region in self._dd_regions or region in self._bipolar_regions:
+            raise OhmicContactNoiseError(
+                "noise_spectrum: electrode {!r} is an OHMIC carrier contact on region {!r} (contact "
+                "equations {} besides Potential); v0.15 drives dielectric (Potential-only) gates only "
+                "(plan 4.2.5, decision 35) -- repointing it would move its Potential and leave the carrier "
+                "pins. The ohmic drive is the planned set_ssac_contact follow-on.".format(
+                    gate, region, carrier))
+        self._check_circuit_contacts()
+
+    def _resettle(self, rel_tol, abs_tol, max_iter) -> None:
+        """ONE DC solve through dc_solve.solve_dc with the branch solve() uses (bipolar / DD)."""
+        if self._bipolar_regions:
+            solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol, max_iter=max_iter)
+        else:
+            solve_dc(self.device, method=self.design.mesh_2d.dc_method, abs_tol=abs_tol, rel_tol=rel_tol,
+                     max_iter=max_iter, semiconductor_regions=sorted(self._dd_regions))
+
+    def _solution_state(self):
+        """Every node solution a DC solve can change (each region equation's variable) and the circuit
+        'dcop' / 'dcop_prev' values -- what noise_spectrum restores."""
+        nodes = {}
+        for r in ds.get_region_list(device=self.device):
+            for eq in ds.get_equation_list(device=self.device, region=r):
+                var = ds.get_equation_command(device=self.device, region=r, name=eq)["variable_name"]
+                nodes[(r, var)] = list(ds.get_node_model_values(device=self.device, region=r, name=var))
+        circ = {}
+        for sol in _DC_CIRCUIT_SOLUTIONS:
+            if sol in ds.get_circuit_solution_list():
+                for nm in ds.get_circuit_node_list():
+                    circ[(sol, nm)] = float(ds.get_circuit_node_value(node=nm, solution=sol))
+        return nodes, circ
+
+    def _reset_gate_circuit(self, gate: str, source_name: str, keep: dict) -> None:
+        """Every circuit value saved in `keep` back; the gate's own circuit unknowns (its node and source
+        current) not in `keep` to 0.0, the value DEVSIM gives a new circuit node."""
+        mine = {self._circuit_gate_nodes.get(gate), "{}.I".format(source_name)}
+        for sol in _DC_CIRCUIT_SOLUTIONS:
+            if sol not in ds.get_circuit_solution_list():
+                continue
+            for nm in ds.get_circuit_node_list():
+                if (sol, nm) in keep:
+                    ds.set_circuit_node_value(solution=sol, node=nm, value=keep[(sol, nm)])
+                elif nm in mine:
+                    ds.set_circuit_node_value(solution=sol, node=nm, value=0.0)
+
+    def _at_gate_bias(self, gate, vg, source_name, node_name, rel_tol, abs_tol, max_iter, v_step, fn):
+        """fn() with `gate` circuit-driven and re-settled at vg (noise_spectrum's state handling);
+        returns (fn(), vg, voltages) and leaves the operating point exactly as found."""
+        self._check_noise_gate(gate, source_name)
+        start = dict(self._last_converged_bias)
+        v0 = float(start[gate])
+        v = v0 if vg is None else float(vg)
+        if not np.isfinite(v):
+            raise ValueError("noise_spectrum: vg must be finite, got {!r}".format(vg))
+        if self._bipolar_regions and v != 0.0:
+            warnings.warn("LayeredDevsimBuilder.noise_spectrum: gate {!r} at {} V on a bipolar 2-D device "
+                          "-- the gated bipolar device does not carry the built-in-potential offset and "
+                          "under-accumulates (see solve()); use the 3-D builder for a quantitative result."
+                          .format(gate, v), UnreliableResultWarning, stacklevel=3)
+        nodes, circ = self._solution_state()
+        if gate not in self._circuit_gates:
+            self.set_ssac_gate(gate, source_name=source_name, node_name=node_name)
+        try:
+            # the same starting point on every call: the saved device state, the gate's circuit at 0
+            self._reset_gate_circuit(gate, source_name, {})
+            step = min(v_step, 0.05) if self._bipolar_regions else v_step
+            n_steps = max(1, int(abs(v - v0) / step + 0.5))
+            dv = (v - v0) / n_steps
+            v_now = v0
+            for k in range(n_steps):
+                v_now = v if k == n_steps - 1 else v_now + dv
+                self._drive(gate, v_now)
+                self._resettle(rel_tol, abs_tol, max_iter)
+            out = fn()
+        finally:
+            for (r, var), vals in nodes.items():
+                ds.set_node_values(device=self.device, region=r, name=var, values=vals)
+            self._reset_gate_circuit(gate, source_name, circ)
+            self._drive(gate, v0)
+        volts = dict(start)
+        volts[gate] = v
+        return out, v, volts
 
     def _to_carrier_field(self, bias, grid_n_x, grid_n_z) -> CarrierField:
         d = self.design
@@ -1026,6 +1351,8 @@ class LayeredDevsimBuilder:
                           AdvisoryWarning, stacklevel=2)
         if self.oxide_tunneling is not None:                  # D1d: opt-in; None adds no key
             extras["oxide_tunneling"] = self._oxide_tunneling_extras()
+        if self.extended_precision:                           # v0.15 provenance; off adds no key
+            extras["extended_precision"] = True
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=self._device_temperature_K(), regions=regions, n_bg_by_region=n_bg_by_region,
@@ -1036,9 +1363,20 @@ class LayeredDevsimBuilder:
         interface with a semiconductor region (carriers.tunneling.oxide_tunneling_current), as scalar
         summaries per dielectric region: I_A (scaled by period_y to amperes), J_max_A_m2 (signed, at
         the node of largest |J|), E_ox_max_V_m, V_ox_max_V, t_ox_m."""
-        from dynameta.carriers.tunneling import oxide_tunneling_current
+        from dynameta.carriers.tunneling import oxide_tunneling_current, oxide_tunneling_terms
         roles = {s.name: s.role for s in self._specs}
         out: Dict[str, Dict[str, float]] = {}
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            for t in oxide_tunneling_terms(self.device):           # the term's own kernel call
+                res = oxide_tunneling_current(self.device, t.chain[0], t.semi, self.oxide_tunneling,
+                                              depth_m=self.design.unit_cell.period_y_m)
+                k = int(np.argmax(np.abs(res["J_A_m2"])))
+                out[t.chain[0]] = {"I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
+                                   "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])),
+                                   "V_ox_max_V": float(np.max(res["V_ox_V"])), "t_ox_m": float(res["t_ox_m"]),
+                                   "semiconductor_region": t.semi, "model": res["model"],
+                                   "coupling": "self_consistent", "gate": t.gate, "I_gate_A": float(res["I_gate"])}
+            return out
         for r0, r1 in self._iface_pairs:
             for ox, semi in ((r0, r1), (r1, r0)):
                 if roles.get(ox) == "dielectric" and roles.get(semi) == "semiconductor":
@@ -1058,4 +1396,24 @@ class LayeredDevsimBuilder:
         for m in list(ds.get_mesh_list()):
             ds.delete_mesh(mesh=m)
         self._circuit_gates = {}
+        self._circuit_gate_nodes = {}
         self._built = False
+
+
+def _scaled_noise(sn, w, units, gate, vg, voltages) -> LayeredNoiseSpectrum:
+    """`sn` as a LayeredNoiseSpectrum with every spectral quantity times w (None: unscaled -- the same
+    arrays). Node coordinates in maps are not scaled."""
+    def sc(a):
+        return a if w is None else a * w
+    maps = None
+    if sn.maps is not None:
+        maps = {r: {k: (v if k in ("x", "y", "z") else sc(v)) for k, v in mm.items()}
+                for r, mm in sn.maps.items()}
+    return LayeredNoiseSpectrum(
+        frequencies=sn.frequencies, S=sc(sn.S), output_node=sn.output_node, kind=sn.kind,
+        by_mechanism={m: sc(v) for m, v in sn.by_mechanism.items()},
+        by_region={r: sc(v) for r, v in sn.by_region.items()},
+        by_region_mechanism={r: {m: sc(v) for m, v in d.items()} for r, d in sn.by_region_mechanism.items()},
+        temperature_K=dict(sn.temperature_K), maps=maps,
+        by_interface={i: {m: sc(v) for m, v in d.items()} for i, d in sn.by_interface.items()},
+        units=units, depth_m=1.0 if w is None else w, gate=gate, vg_V=float(vg), voltages=dict(voltages))

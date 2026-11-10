@@ -28,8 +28,15 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 # Bern_g_dg's clamp, the new Bern_g_m / Bern_g_dg_m and their derivatives; +12 calls). What the old
 # digest pinned numerically is kept by tests/test_devsim_sg_flux.py's cross-version gate (the fixture
 # SOLVED vs 6595bde, to the flux change's measured round-off).
-_DG_CALLLOG_DIGEST = "bc52c7927c657f04917d1c2d792ba5cfe8a7365ae10fb4f7352cc73537ff480a"
-_DG_CALLLOG_CALLS = 139
+# RE-RECORDED 2026-11-06 (133 calls; v0.15 item 4.4.4, decision 53): the fixture's wall is now
+# setup_dg_insulator_wall (setup_dg_hard_wall is a deprecated shim onto it -- its log is gated EQUAL in
+# tests/test_density_gradient.py) and the seed passes walls=("wall",). Diffed against the 139-call log of
+# 48cfbc9: the ONLY differences are the wall rows (no wall_lambda_pin / _full parameters and their two
+# set_dg_gamma co-ramp sets; the Lambda row 'Electrons - QSqrtN*QSqrtN' replaces 'QLambda +
+# wall_lambda_pin'; no pinned ElectronContinuityEquation contact row) and the seed's node values (plus
+# the seeded Electrons). Every region model, edge model and flux string is unchanged.
+_DG_CALLLOG_DIGEST = "44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374"
+_DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
 # RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
 # e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
@@ -37,6 +44,13 @@ _DG_CALLLOG_CALLS = 139
 # Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
 _BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 _BIPOLAR_CALLLOG_CALLS = 237
+# v0.15.0 (2026-11-07, the default statistics 'fermi_dirac'): the two digests above are now those of the
+# EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
+# tests: default == explicit 'fermi_dirac').
+_DG_CALLLOG_DIGEST_V0150, _DG_CALLLOG_CALLS_V0150 = (
+    "89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded", 157)
+_BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
+    "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d", 302)
 
 
 # ---- (e) defaults off: byte-identical ---------------------------------------------------------
@@ -47,9 +61,12 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
     2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST)."""
     import _dg_calllog as CL
+    legacy = CL.record_call_log(statistics="legacy")
+    assert len(legacy) == _DG_CALLLOG_CALLS
+    assert CL.digest(legacy) == _DG_CALLLOG_DIGEST
     log = CL.record_call_log()
-    assert len(log) == _DG_CALLLOG_CALLS
-    assert CL.digest(log) == _DG_CALLLOG_DIGEST
+    assert (len(log), CL.digest(log)) == (_DG_CALLLOG_CALLS_V0150, _DG_CALLLOG_DIGEST_V0150)
+    assert log == CL.record_call_log(statistics="fermi_dirac")
 
 
 def test_bipolar_dd_without_dg_is_byte_identical():
@@ -57,9 +74,11 @@ def test_bipolar_dd_without_dg_is_byte_identical():
     the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
     `scale` keyword defaults to None)."""
     import _bipolar_calllog as CL
+    legacy = CL.record_call_log(statistics="legacy")
+    assert len(legacy) == _BIPOLAR_CALLLOG_CALLS
+    assert CL.digest(legacy) == _BIPOLAR_CALLLOG_DIGEST
     log = CL.record_call_log()
-    assert len(log) == _BIPOLAR_CALLLOG_CALLS
-    assert CL.digest(log) == _BIPOLAR_CALLLOG_DIGEST
+    assert (len(log), CL.digest(log)) == (_BIPOLAR_CALLLOG_CALLS_V0150, _BIPOLAR_CALLLOG_DIGEST_V0150)
 
 
 def test_srh_kernel_scale_default_is_the_legacy_string():

@@ -15,7 +15,9 @@ whose 1-D device builders and closed forms this script reuses so the two cannot 
           sweep into inversion onset) and a 2-D LayeredDevsimBuilder bipolar bar, solved on main and
           on this branch with the traps OFF: Potential/Electrons/Holes/USRH/PotentialNodeCharge
           identical to round-off (TOL_F; sha256-identical until the 2026-11-04 two-Bernoulli SG flux,
-          which changed every flux's arithmetic on purpose -- the hashes are still printed).
+          which changed every flux's arithmetic on purpose -- the hashes are still printed). v0.15.0: the
+          bipolar regions of a tree that has statistics='legacy' are pinned to it (main's statistics); a
+          REPORT lists what the default ('fermi_dirac') moves on the same fixtures.
   GATE G  (--3d) 3-D: G1 the Stacked3DSpec(interface_traps=...) weights are exact (sum = lateral^2,
           only on the semi/oxide face); G2 the D_it psi_s shift equals the 1-D cap's (5 %: the 3-D
           z-resolution); G3 (D2c tensor mesh only) the 3-D shift equals a 1-D solve on the 3-D mesh's
@@ -167,6 +169,23 @@ _FIXTURE = textwrap.dedent('''
     import devsim as ds
     from dynameta.carriers import physics_bipolar_dd as BP, physics_equilibrium as PE
     from dynameta.carriers import eq_registry as R
+    # v0.15.0 changed the bipolar default statistics to 'fermi_dirac'; main (the reference) runs the LEGACY
+    # statistics (the v0.14 default), so a tree that knows statistics='legacy' is pinned to it here
+    # (TRP_DEFAULT=1 runs the tree's own default instead -- the REPORT of what the default change moves).
+    import os
+    try:
+        from dynameta.carriers.bipolar_options import resolve_statistics as _rs
+        _rs("legacy", True)
+        _LEGACY = os.environ.get("TRP_DEFAULT") != "1"
+    except (ImportError, ValueError):
+        _LEGACY = False
+    if _LEGACY:
+        _orig_sbr = BP.setup_bipolar_region
+        def _sbr_legacy(*a, **kw):
+            if kw.get("statistics") is None and kw.get("fd_enhancement", True):
+                kw["statistics"] = "legacy"
+            return _orig_sbr(*a, **kw)
+        BP.setup_bipolar_region = _sbr_legacy
     def clear(d):
         for dv in list(ds.get_device_list()): ds.delete_device(device=dv)
         for m in list(ds.get_mesh_list()): ds.delete_mesh(mesh=m)
@@ -271,11 +290,12 @@ _FIXTURE = textwrap.dedent('''
 ''')
 
 
-def _run_fixture(tree):
-    """(rc, {fixture: sha256}, {fixture:field: values}, stderr tail) of _FIXTURE run on `tree`."""
+def _run_fixture(tree, default=False):
+    """(rc, {fixture: sha256}, {fixture:field: values}, stderr tail) of _FIXTURE run on `tree`; default=True
+    runs the tree's own default statistics instead of the pinned legacy path (v0.15.0)."""
     import json
     import tempfile
-    env = dict(os.environ, PYTHONPATH=tree)
+    env = dict(os.environ, PYTHONPATH=tree, TRP_DEFAULT="1" if default else "0")
     fd, path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
@@ -502,6 +522,14 @@ def main():
                and len(rows) == 15 and all(r[2] for r in rows),
                "rc {} / {}, {} arrays, worst {:.2e} <= {:.0e}".format(rc0, rc1, len(rows), worst, TOL_F)
                + ("" if rc0 == rc1 == 0 else " | " + e0 + " | " + e1))
+        if rc1 == 0:                                   # REPORT (v0.15.0): what the default statistics move
+            rcd, _hd, ad, ed = _run_fixture(HERE, default=True)
+            if rcd == 0:
+                for key, m, _ok in cross_version_rows(a1, ad):
+                    print("[trp]   REPORT v0.15.0 default ('fermi_dirac') vs legacy {:28s} {:.2e}".format(key, m),
+                          flush=True)
+            else:
+                print("[trp]   REPORT default-statistics run failed: rc {} {}".format(rcd, ed), flush=True)
     else:
         H.skip("E'/F cross-version", "no main checkout at {} (--main)".format(a.main))
     if a.three_d:

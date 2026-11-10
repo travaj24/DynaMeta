@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.14.0"
+version = "0.15.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -81,6 +81,8 @@ include = ["dynameta*"]
 addopts = "--strict-markers"
 markers = [
     "slow: full validation-suite wrappers excluded from the fast CI legs (covered by the py3.13 smoke tier; run with -m slow)",
+    "devsim_isolated(reason): run this test in a fresh interpreter (tests/conftest.py) -- for a BITWISE comparison of two separate DEVSIM solves, which a device left live by another test would perturb (a DC solve iterates every live device)",
+    "floating_ok(reason): the test solves a deliberately ill-posed (floating-body) DC problem with a raw devsim.solve; skips the tests/conftest.py DC well-posedness hook (solve_dc still checks: use well_posedness.allow_floating there)",
 ]
 # ALLOW-LIST, not a deny-list: every warning is an ERROR unless it is exempted below WITH A REASON.
 # pytest applies these in order and the LAST matching filter wins, so "error" has to come first.

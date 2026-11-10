@@ -260,6 +260,7 @@ def test_two_processes_building_default_path_3d_devices_get_their_own_meshes(tmp
         assert line and line[-1].startswith("BAD 0 OF 25"), out[-2000:]
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_path, monkeypatch):
     """Default msh_path: the tensor mesh reaches DEVSIM in memory (create_gmsh_mesh(coordinates=,
     elements=, physical_names=)) -- no file is written or read -- and the device is BIT-IDENTICAL to the
