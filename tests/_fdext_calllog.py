@@ -18,20 +18,18 @@ math / numpy transcendental the physics calls returns its correctly rounded valu
 digest -- no longer depends on which C library rounded a hard case (the Windows UCRT and glibc differ in
 the last digit of one interface-trap n1: docs/audit/2026-11-08-v0.15-linux-ci-exactness.md). Everything
 else is still recorded bit for bit. canonical=False records with the platform's own libm (the raw log
-the pre-2026-11-08 digest was taken of).
+the pre-2026-11-08 digest was taken of). The interceptor, the canonical context, digest() and skeleton() are
+the shared ones of tests/_calllog.py (2026-11-10).
 
 Re-record (only on an intended change of the legacy definition):
     cd <a checkout of the reference code> && PYTHONPATH=. python <this file>
 """
 from __future__ import annotations
 
-import contextlib
-import hashlib
 import json
-import re
 import sys
 
-import _cr_libm
+from _calllog import digest, intercepting, recording, skeleton  # noqa: F401  (re-exported for the gates)
 
 _RECORDED = ("node_model", "edge_model", "element_model", "contact_node_model", "equation",
              "contact_equation", "set_parameter", "node_solution", "edge_from_node_model",
@@ -60,7 +58,7 @@ def record_call_log(tag="fdcl", canonical=True, **region_kw):
     `region_kw` are extra setup_bipolar_region keywords for BOTH fixtures (the gate passes
     statistics='legacy'). canonical=True (default): recorded with correctly rounded transcendentals (module
     docstring); False: with the platform's libm."""
-    with (_cr_libm.correctly_rounded() if canonical else contextlib.nullcontext()):
+    with recording(canonical):
         return _record(tag, **region_kw)
 
 
@@ -81,20 +79,10 @@ def _record(tag, **region_kw):
              PT.TrapLevel(energy_eV=0.3, kind="neutral", tau_n0_s=1e-8, tau_p0_s=1e-8,
                           energy_reference="valence"))
     its = PT.InterfaceTraps(dit_eV_m2=2e15, band_gap_eV=1.12, fixed_charge_C_m2=1e-4, sigma_n_m2=2e-20)
-    log, saved = [], {}
-
-    def _wrap(name, fn):
-        def inner(*a, **kw):
-            log.append([name, sorted((k, repr(v)) for k, v in kw.items())])
-            return fn(*a, **kw)
-        return inner
-
-    for nm in _RECORDED:
-        saved[nm] = getattr(ds, nm)
-        setattr(ds, nm, _wrap(nm, saved[nm]))
+    log = []
     devs = []
     try:
-        with warnings.catch_warnings():
+        with intercepting(ds, _RECORDED, log), warnings.catch_warnings():
             warnings.simplefilter("ignore")            # the BGN basis / FD-overlap advisories (not logged)
             for dim in (1, 2):
                 dev = "{}_{}d".format(tag, dim)
@@ -132,8 +120,6 @@ def _record(tag, **region_kw):
                     PE.setup_interface(dev, "si_ox")
                     PT.install_interface_traps(dev, "si_ox", its)
     finally:
-        for nm, fn in saved.items():
-            setattr(ds, nm, fn)
         for dev, mesh in devs:
             if dev in ds.get_device_list():
                 ds.delete_device(device=dev)
@@ -141,18 +127,6 @@ def _record(tag, **region_kw):
                 ds.delete_mesh(mesh=mesh)
             _R.clear(dev)
     return log
-
-
-def digest(log) -> str:
-    return hashlib.sha256(json.dumps(log, sort_keys=False).encode("utf-8")).hexdigest()
-
-
-_NUMBER = re.compile(r"(?<![A-Za-z_0-9.])(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
-
-
-def skeleton(log):
-    """The log with every numeric literal replaced by '#': what the libm choice cannot change."""
-    return [[name, [[k, _NUMBER.sub("#", v)] for k, v in kw]] for name, kw in log]
 
 
 if __name__ == "__main__":                                    # pragma: no cover - re-record helper
