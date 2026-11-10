@@ -474,9 +474,11 @@ def _ramp_bias(dev, v, step=0.05):
         _solve()
 
 
-def diode(gamma_fracs=(None,), biases=(0.4, -0.5)):
+def diode(gamma_fracs=(None,), biases=(0.4, -0.5), valleys=None, probe=None):
     """Terminal currents of the diode for each DG fraction (None = classical, no DG installed;
-    0.0 = DG installed at b = 0). Returns {frac: {bias: dict(I, I_sum, arrays, max_lam_Vt)}}."""
+    0.0 = DG installed at b = 0). Returns {frac: {bias: dict(I, I_sum, arrays, max_lam_Vt)}}.
+    valleys (v0.15.1): a density_gradient.ValleySet table -> valley-resolved electrons (holes keep m_p);
+    probe(device) is then called at each bias (result under "probe")."""
     out = {}
     for fr in gamma_fracs:
         dev, mesh = "bdg_diode", "bdg_diode_m"
@@ -484,7 +486,8 @@ def diode(gamma_fracs=(None,), biases=(0.4, -0.5)):
             reg = _diode(dev, mesh)
             if fr is not None:
                 with _quiet():
-                    DG.setup_bipolar_dg(dev, reg, m_eff_n_kg=MN, m_eff_p_kg=MP)
+                    DG.setup_bipolar_dg(dev, reg, m_eff_n_kg=MN if valleys is None else None, m_eff_p_kg=MP,
+                                        electron_valleys=valleys)
                     DG.setup_contact_bipolar_dg(dev, "anode")
                     DG.setup_contact_bipolar_dg(dev, "cathode")
                 DG.set_dg_gamma(dev, reg, fr)
@@ -508,6 +511,8 @@ def diode(gamma_fracs=(None,), biases=(0.4, -0.5)):
                 if fr is not None:
                     rec["max_lam_Vt"] = max(float(np.max(np.abs(_get(dev, reg, k)))) for k in
                                             ("QLambda", "QLambdaP")) / V_T
+                if probe is not None:
+                    rec["probe"] = probe(dev)
                 res[v] = rec
             out[fr] = res
         finally:
@@ -575,7 +580,7 @@ def qe_mesh(h0, length=QE_LEN, ratio=40.0):
 def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN, ext=False,
            rel=1e-5, close=("electrons",), tau=1e-7, step=0.05, dg_holes=False, tag="q",
            closure=True, quantum_srh=True, probe=None, dg_at_target=False, lateral=None, v_ch=None,
-           u_floor_rel=1e-6):
+           u_floor_rel=1e-6, valleys=None):
     """1-D p-type MOS (N_A), fixed surface potential psi_s = psi_b + delta at the wall, body ohmic
     'sub'. Classical solve at flat band; optionally the bipolar DG (electrons; holes too with dg_holes)
     at dg_gamma with setup_dg_insulator_wall, gamma-ramped at flat band; then the quasi-equilibrium
@@ -597,7 +602,10 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
     v_ch: the electron closure gets imref_shift = a device parameter "v_ch" of this value [V] (the
     channel-slice imref split phi_n = phi_body + V_ch).
     Raises the solver error of a failed step. ext: the extended-precision Newton (both criteria as
-    written); abs_tol: dc_solve.default_abs_tol (plan 4.4.1)."""
+    written); abs_tol: dc_solve.default_abs_tol (plan 4.4.1).
+    valleys (v0.15.1): a density_gradient.ValleySet table -> the VALLEY-RESOLVED electron DG
+    (setup_bipolar_dg(electron_valleys=valleys), m_eff_n_kg not passed); the records then carry "n_v"
+    (one density array per valley set, the record's node order) and "lam_n" is the effective Lambda_eff."""
     from dynameta.carriers.dc_solve import default_abs_tol
     dev, mesh = "qe_" + tag, "qe_m_" + tag
     _drop(dev, mesh)
@@ -655,8 +663,9 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
         def install():
             if dg_gamma is not None:
                 with _quiet():
-                    DG.setup_bipolar_dg(dev, "s", m_eff_n_kg=MN, m_eff_p_kg=MP if dg_holes else None,
-                                        gamma_n=dg_gamma, gamma_p=dg_gamma, quantum_srh=quantum_srh)
+                    DG.setup_bipolar_dg(dev, "s", m_eff_n_kg=MN if valleys is None else None,
+                                        m_eff_p_kg=MP if dg_holes else None, gamma_n=dg_gamma,
+                                        gamma_p=dg_gamma, quantum_srh=quantum_srh, electron_valleys=valleys)
                     DG.setup_contact_bipolar_dg(dev, "sub")
                     DG.setup_dg_insulator_wall(dev, "wall", u_floor_rel=u_floor_rel)
                 for k, fr in enumerate((0.1, 0.3, 1.0)):
@@ -710,6 +719,9 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
                                for c in ("wall", "sub")}}
             if dg_gamma is not None:
                 rec["lam_n"] = _get(dev, "s", "QLambda")[o]
+                nvs = DG.valley_densities(dev, "s")
+                if nvs is not None:
+                    rec["n_v"] = [a[o] for a in nvs]
             if lateral is not None:
                 fields = [("n", "Electrons"), ("p", "Holes"), ("psi", "Potential")]
                 if dg_gamma is not None:
@@ -883,6 +895,26 @@ def sp_inversion(N_A, delta_s, *, valleys=None, length=200e-9, h=0.05e-9, box=30
         sheets.append((E, pref * occ))
     return {"z": z, "n": n, "p": p, "delta": d, "N_inv": s, "centroid": float(trapz(z * ex, z)) / s,
             "converged": converged, "top_state_kT": float(top), "subbands": sheets}
+
+
+def sp_valleys(table, *, dos_consistent=True):
+    """sp_inversion's valleys=[(m_z, m_d, g_v), ...] from a density_gradient.ValleySet table (each set needs
+    m_xy_kg and degeneracy). dos_consistent=True (v0.15.1; the 2026-11-08 correction): every g_v is scaled so
+    the oracle's CLASSICAL limit, sum_v 2 g_v m_d sqrt(m_z) (kT/2 pi hbar^2)^(3/2) (one valley's classical
+    density of states in the 2-D-subband x 1-D-quantization form), equals the DD's N_c = nc_model(MN, GVN);
+    the body Fermi level of both sides is set with that N_c, so only quantization separates them. For Si(100)
+    the scale is 1/1.3716 (the raw anisotropic valleys' classical DOS is 1.3716 N_c). False: the raw g_v."""
+    w = [v.degeneracy * v.m_xy_kg * np.sqrt(v.m_z_kg) for v in table]
+    scale = GVN * MN ** 1.5 / float(np.sum(w)) if dos_consistent else 1.0
+    return [(v.m_z_kg, v.m_xy_kg, v.degeneracy * scale) for v in table]
+
+
+def valley_shares(r):
+    """Inversion-charge share of each valley set of a valley-resolved mos_qe record (excess over the body
+    value of each set, trapezoid on the record's nodes; the shares sum to 1)."""
+    x = r["x"]
+    ex = [float(trapz(a - a[-1], x)) for a in r["n_v"]]
+    return [e / sum(ex) for e in ex]
 
 
 def classical_fd_surface_charge(N_A, delta_s):
