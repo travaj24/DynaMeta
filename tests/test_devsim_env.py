@@ -271,3 +271,115 @@ def test_reset_devsim_keeps_the_direct_solver_and_the_answer():
     assert s0 == s1 and s0 in ("custom", "mkl_pardiso"), (s0, s1)   # UMFPACK shim or MKL-PARDISO
     assert same == "True"                                            # bit-identical rebuild
     assert abs(float(vmin)) < 1e-12 and abs(float(vmax) - 1.0) < 1e-12
+
+
+# ------------------------------- v0.15.1: UMFPACK 5.1's obsolete 2-by-2 strategy ----------------
+# devsim_env.umfpack_2by2_guard (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md). Three small
+# matrices on which UMFPACK 5.1's AUTO picks each of its strategies (MEASURED, Info[UMFPACK_STRATEGY_USED]
+# 3 / 2 / 1 = symmetric / 2-by-2 / unsymmetric). The guard must redo ONLY the 2-by-2 one (as symmetric)
+# and leave the other two factorizations bit for bit as devsim's own call makes them. On the pre-guard
+# code the wrapped method does not exist (AttributeError) and AUTO's 2-by-2 stands.
+
+def _umf_test_matrix(m, small, extra):
+    import scipy.sparse as sp
+    n = 2 * m
+    A = sp.lil_matrix((n, n))
+    for k in range(m):
+        u, c = 2 * k, 2 * k + 1
+        A[u, u] = 2.0
+        if k > 0:
+            A[u, u - 2] = -1.0
+        if k < m - 1:
+            A[u, u + 2] = -1.0
+        A[u, c] = 0.5
+        A[c, c] = small
+        A[c, u] = 1.0
+        for e in extra:
+            if 0 <= u + e < n:
+                A[c, u + e] = -0.3
+    return A.tocsc()
+
+
+def _umf_factor_solve(L, symbolic, A):
+    """devsim's own UMFPACK path (umf_control -> symbolic -> numeric -> solve) with `symbolic` as the
+    symbolic step; returns (Info[STRATEGY_USED], x)."""
+    import array
+
+    import numpy as np
+    uc = L.umf_control(L.global_data_instance, "real")
+    M = L.matrix(uc=uc, Ap=array.array("i", A.indptr.astype(np.int32)),
+                 Ai=array.array("i", A.indices.astype(np.int32)), Ax=array.array("d", A.data))
+    S = symbolic(uc, M)
+    strategy = int(uc.Info[18])
+    N = uc.numeric(matrix=M, Symbolic=S)
+    b = array.array("d", (np.arange(A.shape[0]) % 7 + 1.0).tolist())
+    x = array.array("d", b)
+    uc.solve(matrix=M, Numeric=N, b=b, transpose=False, x=x)
+    return strategy, np.asarray(x)
+
+
+@pytest.mark.skipif(not HAVE_DEVSIM, reason="needs devsim")
+def test_umfpack_2by2_guard_redoes_only_the_2by2_choice():
+    import numpy as np
+    ds = E.import_devsim()
+    g = E.umfpack_2by2_guard()
+    if g["mode"] != "symmetric" or "devsim.umfpack.umfshim" not in sys.modules:
+        pytest.skip("guard not active here: {}".format(g["reason"]))
+    import devsim.umfpack.umfpack_loader as L
+    if not L.global_data_instance.is_initialized:
+        info = ds.get_parameter(name="info")
+        L.global_data_instance.initialize_umfpack(info["math_libraries"], info["blas_symbol_prefix"],
+                                                  info["blas_symbol_suffix"])
+    assert g["installed"], g
+    guarded = L.umf_control.symbolic
+    original = guarded.dynameta_original
+    cases = {"symmetric": (_umf_test_matrix(5, 1e-20, ()), 3, 3),
+             "2-by-2": (_umf_test_matrix(6, 1e-20, (-2, 2)), 2, 3),
+             "unsymmetric": (_umf_test_matrix(6, 1e-20, (2, 4, 6)), 1, 1)}
+    for name, (A, auto, want) in cases.items():
+        s0, x0 = _umf_factor_solve(L, lambda uc, M: original(uc, M), A)
+        before = g["replaced"]
+        s1, x1 = _umf_factor_solve(L, lambda uc, M: guarded(uc, M), A)
+        assert (s0, s1) == (auto, want), name                   # AUTO's choice, then the guard's
+        assert g["replaced"] - before == (1 if auto == 2 else 0), name
+        if auto != 2:
+            assert np.array_equal(x0, x1), name                 # untouched: bit for bit
+        r = A @ x1 - (np.arange(A.shape[0]) % 7 + 1.0)
+        assert np.max(np.abs(r)) <= 1e-12 * (abs(A) @ np.abs(x1)).max(), name
+
+
+_GUARD_CHILD = "\n".join([
+    "import json",
+    "from dynameta.carriers import devsim_env as E",
+    "ds = E.import_devsim()",
+    "import devsim.umfpack.umfpack_loader as L",
+    "def wrapped():",
+    "    return hasattr(L.umf_control.symbolic, 'dynameta_original')",
+    "g = dict(E.umfpack_2by2_guard()); w0 = wrapped()",
+    "ds.reset_devsim()",
+    "print('RESULT ' + json.dumps({'guard': g, 'before': w0, 'after_reset': wrapped(),",
+    "                              'solver': ds.get_parameter(name='direct_solver')}))"])
+
+
+@pytest.mark.skipif(not HAVE_DEVSIM, reason="needs devsim")
+@pytest.mark.parametrize("mode", [None, "keep"])
+def test_umfpack_2by2_guard_default_on_keep_off_and_survives_reset(mode):
+    env = {k: v for k, v in os.environ.items() if k != E.UMFPACK_2BY2_ENV}
+    if mode:
+        env[E.UMFPACK_2BY2_ENV] = mode
+    out = subprocess.run([sys.executable, "-c", _GUARD_CHILD], capture_output=True, text=True,
+                         cwd=str(REPO), env=env, timeout=300)
+    assert out.returncode == 0, (out.stdout[-1500:], out.stderr[-1500:])
+    r = json.loads(out.stdout.split("RESULT", 1)[1])
+    if r["solver"] != "custom":
+        pytest.skip("devsim's direct solver is {!r}, not the UMFPACK shim".format(r["solver"]))
+    on = mode is None
+    assert r["guard"]["installed"] is on and r["guard"]["mode"] == (mode or "symmetric"), r
+    assert r["before"] is on and r["after_reset"] is on, r
+
+
+def test_umfpack_2by2_mode_is_validated(monkeypatch):
+    monkeypatch.setattr(E, "_GUARD", None)
+    monkeypatch.setenv(E.UMFPACK_2BY2_ENV, "bogus")
+    with pytest.raises(ValueError, match="expected 'symmetric' or 'keep'"):
+        E.umfpack_2by2_guard()
