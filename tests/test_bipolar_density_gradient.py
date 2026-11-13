@@ -442,7 +442,9 @@ def test_dg_closure_jacobian_factorizes_without_fill_in():
     (Windows, 19 factorizations): max fill 2.0 with dynameta.carriers.devsim_env.umfpack_2by2_guard; 80.5
     without it (DYNAMETA_UMFPACK_2BY2=keep, = the code before the guard), where UMFPACK 5.1's AUTO picks
     the 2-by-2 strategy for the DG + closure Jacobian and its numeric pivoting fills in -- the 10-130x
-    per-iteration cost of the isotropic DG the valley-resolved-DG note had reported. Read from UMFPACK's
+    per-iteration cost of the isotropic DG the valley-resolved-DG note had reported. That one Jacobian is
+    the only 2-by-2 choice of the run; its symbolic nz(L+U) bound is 117x the symmetric strategy's, so the
+    v2 guard (which keeps 2-by-2 unless that bound ratio exceeds 1.15) replaces it, as v1 did. Read from UMFPACK's
     own Info after each numeric factorization (Info[43] / [44] = nz in L / U incl. diagonal, Info[18] =
     strategy used), by wrapping the loader's numeric call (the same instrument works on either code)."""
     L = pytest.importorskip("devsim.umfpack.umfpack_loader")
