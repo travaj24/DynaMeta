@@ -274,11 +274,15 @@ def test_reset_devsim_keeps_the_direct_solver_and_the_answer():
 
 
 # ------------------------------- v0.15.1: UMFPACK 5.1's obsolete 2-by-2 strategy ----------------
-# devsim_env.umfpack_2by2_guard (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md). Three small
-# matrices on which UMFPACK 5.1's AUTO picks each of its strategies (MEASURED, Info[UMFPACK_STRATEGY_USED]
-# 3 / 2 / 1 = symmetric / 2-by-2 / unsymmetric). The guard must redo ONLY the 2-by-2 one (as symmetric)
-# and leave the other two factorizations bit for bit as devsim's own call makes them. On the pre-guard
-# code the wrapped method does not exist (AttributeError) and AUTO's 2-by-2 stands.
+# devsim_env.umfpack_2by2_guard (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md, sections 4 and 12).
+# Three small matrices on which UMFPACK 5.1's AUTO picks each of its strategies (MEASURED,
+# Info[UMFPACK_STRATEGY_USED] 3 / 2 / 1 = symmetric / 2-by-2 / unsymmetric). The 2-by-2 one does NOT fill in
+# (its symbolic nz(L+U) bound equals the symmetric one's), so the v2 guard must KEEP all three bit for bit as
+# devsim's own call makes them; with the bound-ratio threshold forced below 1 the same matrix must be redone
+# as symmetric (the replacement branch; the real threshold on real matrices is gated by
+# test_dg_closure_jacobian_factorizes_without_fill_in and test_umfpack_2by2_guard_keeps_2by2_on_a_2d_diode).
+# On the v1 guard (e29fbd3, always replaces) the 2-by-2 case comes back symmetric; before v0.15.1 the wrapped
+# method does not exist (AttributeError).
 
 def _umf_test_matrix(m, small, extra):
     import scipy.sparse as sp
@@ -302,7 +306,7 @@ def _umf_test_matrix(m, small, extra):
 
 def _umf_factor_solve(L, symbolic, A):
     """devsim's own UMFPACK path (umf_control -> symbolic -> numeric -> solve) with `symbolic` as the
-    symbolic step; returns (Info[STRATEGY_USED], x)."""
+    symbolic step; returns (Info[STRATEGY_USED] after the symbolic step, nz(L) + nz(U), x)."""
     import array
 
     import numpy as np
@@ -315,11 +319,11 @@ def _umf_factor_solve(L, symbolic, A):
     b = array.array("d", (np.arange(A.shape[0]) % 7 + 1.0).tolist())
     x = array.array("d", b)
     uc.solve(matrix=M, Numeric=N, b=b, transpose=False, x=x)
-    return strategy, np.asarray(x)
+    return strategy, uc.Info[43] + uc.Info[44], np.asarray(x)
 
 
 @pytest.mark.skipif(not HAVE_DEVSIM, reason="needs devsim")
-def test_umfpack_2by2_guard_redoes_only_the_2by2_choice():
+def test_umfpack_2by2_guard_keeps_what_does_not_fill_in(monkeypatch):
     import numpy as np
     ds = E.import_devsim()
     g = E.umfpack_2by2_guard()
@@ -333,19 +337,29 @@ def test_umfpack_2by2_guard_redoes_only_the_2by2_choice():
     assert g["installed"], g
     guarded = L.umf_control.symbolic
     original = guarded.dynameta_original
-    cases = {"symmetric": (_umf_test_matrix(5, 1e-20, ()), 3, 3),
-             "2-by-2": (_umf_test_matrix(6, 1e-20, (-2, 2)), 2, 3),
-             "unsymmetric": (_umf_test_matrix(6, 1e-20, (2, 4, 6)), 1, 1)}
-    for name, (A, auto, want) in cases.items():
-        s0, x0 = _umf_factor_solve(L, lambda uc, M: original(uc, M), A)
-        before = g["replaced"]
-        s1, x1 = _umf_factor_solve(L, lambda uc, M: guarded(uc, M), A)
-        assert (s0, s1) == (auto, want), name                   # AUTO's choice, then the guard's
-        assert g["replaced"] - before == (1 if auto == 2 else 0), name
-        if auto != 2:
-            assert np.array_equal(x0, x1), name                 # untouched: bit for bit
+    cases = {"symmetric": (_umf_test_matrix(5, 1e-20, ()), 3),
+             "2-by-2": (_umf_test_matrix(6, 1e-20, (-2, 2)), 2),
+             "unsymmetric": (_umf_test_matrix(6, 1e-20, (2, 4, 6)), 1)}
+    for name, (A, auto) in cases.items():
+        s0, f0, x0 = _umf_factor_solve(L, lambda uc, M: original(uc, M), A)
+        before = dict(g)
+        s1, f1, x1 = _umf_factor_solve(L, lambda uc, M: guarded(uc, M), A)
+        assert (s0, s1) == (auto, auto), name                   # AUTO's choice stands
+        assert g.get("auto_2by2", 0) - before.get("auto_2by2", 0) == (1 if auto == 2 else 0), name
+        assert g.get("kept", 0) - before.get("kept", 0) == (1 if auto == 2 else 0), name
+        assert g["replaced"] == before["replaced"], name
+        assert f1 == f0 and np.array_equal(x0, x1), name        # untouched: bit for bit
         r = A @ x1 - (np.arange(A.shape[0]) % 7 + 1.0)
         assert np.max(np.abs(r)) <= 1e-12 * (abs(A) @ np.abs(x1)).max(), name
+    # the replacement branch: same 2-by-2 matrix, threshold forced below any bound ratio
+    monkeypatch.setattr(E, "_UMF_2BY2_BOUND_RATIO", 0.5)
+    A = cases["2-by-2"][0]
+    before = dict(g)
+    s2, _, x2 = _umf_factor_solve(L, lambda uc, M: guarded(uc, M), A)
+    assert s2 == 3 and g["replaced"] - before["replaced"] == 1 and g["kept"] == before["kept"]
+    r = A @ x2 - (np.arange(A.shape[0]) % 7 + 1.0)
+    assert np.max(np.abs(r)) <= 1e-12 * (abs(A) @ np.abs(x2)).max()
+    assert g["auto_2by2"] == g["replaced"] + g["kept"]
 
 
 _GUARD_CHILD = "\n".join([
@@ -383,3 +397,66 @@ def test_umfpack_2by2_mode_is_validated(monkeypatch):
     monkeypatch.setenv(E.UMFPACK_2BY2_ENV, "bogus")
     with pytest.raises(ValueError, match="expected 'symmetric' or 'keep'"):
         E.umfpack_2by2_guard()
+
+
+# A device without the density gradient on which UMFPACK 5.1's AUTO picks 2-by-2 and 2-by-2 does NOT fill in:
+# validation/bipolar_diode_2d's lateral p-n diode (bipolar DD + SRH, no DG, no closure) on a coarse mesh
+# (1081 nodes, 2970 unknowns; one forward bias, ~3 s). MEASURED (Windows, unguarded + a symmetric twin of every
+# factorization): AUTO picks 2-by-2 for all 10 fresh symbolic steps (51 numeric), its symbolic nz(L+U) bound
+# equals the symmetric one's (ratio 1.000) and so does the actual fill. The v2 guard must keep every one of them:
+# the guarded run is compared with an unguarded child (DYNAMETA_UMFPACK_2BY2=keep), factorization by
+# factorization (strategy used, nz(L) + nz(U)) and in the converged state bit for bit. On the v1 guard
+# (e29fbd3), which redid every 2-by-2 choice as symmetric, the strategies read 3 and the states differ.
+_DIODE_CHILD = "\n".join([
+    "import dataclasses, json",
+    "import validation.bipolar_diode_2d as D",
+    "from dynameta.carriers import devsim_env as E",
+    "from dynameta.carriers.devsim_layered import LayeredDevsimBuilder",
+    "from dynameta.geometry.specs import Mesh2DSpec",
+    "from dynameta.sweep import BiasPoint",
+    "ds = D.ds",
+    "solver = ds.get_parameter(name='direct_solver')",
+    "seen = []",
+    "if solver == 'custom':",
+    "    import devsim.umfpack.umfpack_loader as L",
+    "    numeric = L.umf_control.numeric",
+    "    def spy(self, matrix, Symbolic):",
+    "        out = numeric(self, matrix, Symbolic)",
+    "        seen.append([int(self.Info[18]), self.Info[43] + self.Info[44], len(matrix.Ax)])",
+    "        return out",
+    "    L.umf_control.numeric = spy",
+    "m2 = Mesh2DSpec(x_spacing_feature_mid_m=10e-9, x_spacing_feature_edge_m=5e-9, coarse_ps_m=2e-9,",
+    "                interface_ps_m=5e-10)",
+    "b = LayeredDevsimBuilder(dataclasses.replace(D.build_diode_design(), mesh_2d=m2), mesh_name='g2_m',",
+    "                         device_name='g2_d')",
+    "b.solve(BiasPoint({'anode': 0.4}, 'fwd'))",
+    "sol = {}",
+    "for r in ds.get_region_list(device=b.device):",
+    "    for eq in ds.get_equation_list(device=b.device, region=r):",
+    "        v = ds.get_equation_command(device=b.device, region=r, name=eq)['variable_name']",
+    "        sol[r + '/' + v] = [x.hex() for x in ds.get_node_model_values(device=b.device, region=r, name=v)]",
+    "print('RESULT ' + json.dumps({'guard': dict(E.umfpack_2by2_guard()), 'seen': seen, 'sol': sol,",
+    "                              'I': D._terminal_current(b.device, 'anode').hex(), 'solver': solver}))"])
+
+
+@pytest.mark.skipif(not HAVE_DEVSIM, reason="needs devsim")
+def test_umfpack_2by2_guard_keeps_2by2_on_a_2d_diode():
+    runs = {}
+    for mode in (None, "keep"):
+        env = {k: v for k, v in os.environ.items() if k != E.UMFPACK_2BY2_ENV}
+        if mode:
+            env[E.UMFPACK_2BY2_ENV] = mode
+        out = subprocess.run([sys.executable, "-c", _DIODE_CHILD], capture_output=True, text=True,
+                             cwd=str(REPO), env=env, timeout=600)
+        assert out.returncode == 0, (mode, out.stdout[-1500:], out.stderr[-1500:])
+        runs[mode] = json.loads(out.stdout.split("RESULT", 1)[1])
+    guarded, plain = runs[None], runs["keep"]
+    if guarded["solver"] != "custom":
+        pytest.skip("devsim's direct solver is {!r}, not the UMFPACK shim".format(guarded["solver"]))
+    assert not plain["guard"]["installed"] and guarded["guard"]["installed"], runs
+    n2 = sum(1 for s, _, _ in plain["seen"] if s == 2)
+    assert n2 >= 10, plain["seen"]                       # AUTO picks 2-by-2 on this device (51 of 51)
+    assert guarded["seen"] == plain["seen"]              # same strategy (2) and fill, step by step
+    assert guarded["sol"] == plain["sol"] and guarded["I"] == plain["I"]   # bit for bit
+    g = guarded["guard"]
+    assert g.get("replaced") == 0 and g.get("kept") == g.get("auto_2by2") >= 10, g
