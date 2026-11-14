@@ -860,7 +860,13 @@ def sc_corner(opts):
                 g = NL.btbt_nonlocal_generation(dev, "b")
                 row.update(Gp=_lst(g["G_p"]), Gn=_lst(g["G_n"]), I=g["I_p"], stats=g["stats"])
             else:
-                row["I"] = btbt_generation_current(dev, "b")
+                # a MEASUREMENT on the nonlocal study's mesh (0.5 nm on the junction lines, 2 nm at the sides): since
+                # v0.15.1 the 2-D resolution advisory checks this local current and fires here (MEASURED estimate
+                # +3.4 / +2.2 / +1.4 % at 0.9 / 1.5 / 2.5 V; measured against the uniform-mesh reference +2.9 / +1.6 /
+                # +0.2 %, docs/audit/2026-11-08-v0.15-btbt-resolution-2d.md). Both models run on the same mesh and the
+                # 1-D planar reference at the same h, so the ratios carry it at most partly; recorded, not silenced
+                # globally
+                row["I"] = btbt_generation_current(dev, "b", check_resolution=False)
             out["rows"].append(row)
         out[kind + "_its"] = its
         out[kind + "_s"] = time.time() - t0

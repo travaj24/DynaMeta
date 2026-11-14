@@ -96,7 +96,9 @@ def test_registration_alone_changes_nothing(defaults_pair):
 def test_registration_alone_keeps_the_call_log_digest():
     """GATE C0(a)-3. The D1b call-log digest (tests/_bipolar_calllog.py) recorded with the dispatcher
     registered equals the one recorded without (MEASURED: both 3542731548...205f80, 237 calls = the
-    digest pinned in tests/test_bipolar_recombination_bgn_ionization.py)."""
+    digest pinned in tests/test_bipolar_recombination_bgn_ionization.py). Since v0.15.0 the child records
+    the DEFAULT statistics: MEASURED 2026-11-10 both 271e5d87...e18d, 302 calls = _CALLLOG_DIGEST_V0150
+    there. A same-machine A/B, so the child records the RAW log (canonical=False, tests/_calllog.py)."""
     a, b = _child("calllog"), _child("calllog", register=True)
     assert b["registered"] is True
     assert (b["n"], b["digest"]) == (a["n"], a["digest"])

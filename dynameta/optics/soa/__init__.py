@@ -65,7 +65,7 @@ from dynameta.optics.soa.imd import (imd3_ratio, imd3_numeric_agrawal_olsson, oi
 from dynameta.optics.soa.temperature import (ALLOY_GAP_PARAMS, B_LO_10MEV_HZ, VARSHNI_PARAMS,
                                              d_eg_dT_ev_per_K,
                                              fwhm_hom_at_temperature,
-                                             gain_peak_drift_nm_per_K,
+                                             gain_peak_drift_nm_per_K, ingaasp_lm_gap_law,
                                              qd_params_at_temperature, varshni_eg_ev)
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
@@ -99,7 +99,7 @@ __all__ = [
            "device_gain_dB", "saturation_output_power_dbm", "noise_figure_db",
            "imd3_ratio", "imd3_numeric_agrawal_olsson", "oip3_dbm", "sfdr_db_hz23",
            "tau_eff_s", "two_tone_oip3_dbm",
-           "VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "varshni_eg_ev", "d_eg_dT_ev_per_K",
+           "VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "varshni_eg_ev", "d_eg_dT_ev_per_K", "ingaasp_lm_gap_law",
            "gain_peak_drift_nm_per_K", "qd_params_at_temperature", "B_LO_10MEV_HZ",
            "fwhm_hom_at_temperature",
            "thermal_profile_transient_1d",

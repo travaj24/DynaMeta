@@ -147,9 +147,17 @@ def test_uniform_illumination_reproduces_the_scalar_amplifier(two_pop):
     if two_pop:
         kw.update(yb_coupled_fraction=0.85, k_tr2_m3_s=2e-22,
                   yb_migration_rate_per_s=50.0)
-    s = ErYbAmplifier(ER, YB, fib, pumps, sig, ase, **kw).solve(n_nodes=61)
+    # tol = 1e-7, not the default 1e-6: at 1e-6 both relaxations stop ON the integrator noise
+    # floor (residual 3e-7..1e-6 after 4-17 iterations), so each returned profile is one draw
+    # from a ~1e-7-relative noise cloud and max|d beta_yb| scatters over 1.4e-9..2.1e-8 under
+    # 1-ulp input perturbations or a different BLAS kernel / libm last bit (MEASURED 2026-11-13,
+    # py3.10 floor pins; CI floor leg of PR #37 drew 1.18e-8 on gw0). The 1e-8 beta bar is the
+    # SHARPEST assertion here (it alone catches a 1e-6 relative k_tr defect, beta/bar = 1.37),
+    # so the convergence is tightened under it rather than the bar loosened over it: at 1e-7 the
+    # same perturbations give max|d beta_yb| <= 1.5e-9 (>= 6.5x margin).
+    s = ErYbAmplifier(ER, YB, fib, pumps, sig, ase, **kw).solve(n_nodes=61, tol=1e-7)
     r = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, uniform_illumination=True,
-                              **kw).solve(n_nodes=61)
+                              **kw).solve(n_nodes=61, tol=1e-7)
     assert s.meta["converged"] and r.meta["converged"]
     assert abs(float(r.signal_gain_dB[0]) - float(s.signal_gain_dB[0])) < 1e-3
     assert abs(float(r.meta["eta_transfer"]) - float(s.meta["eta_transfer"])) < 1e-6

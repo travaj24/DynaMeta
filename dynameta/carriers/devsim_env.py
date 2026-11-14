@@ -64,9 +64,11 @@ import os
 import re
 import sys
 
-__all__ = ["configure_math_libs", "import_devsim", "math_libs_decision", "MODE_ENV"]
+__all__ = ["configure_math_libs", "import_devsim", "math_libs_decision", "MODE_ENV",
+           "UMFPACK_2BY2_ENV", "umfpack_2by2_guard"]
 
 MODE_ENV = "DYNAMETA_DEVSIM_BLAS"           # 'auto' (default) | 'pin' | 'off'
+UMFPACK_2BY2_ENV = "DYNAMETA_UMFPACK_2BY2"  # 'symmetric' (default) | 'keep'
 
 # Installed-file name patterns (basename). mkl: mkl_rt.dll / mkl_rt.3.dll (Windows),
 # libmkl_rt.so[.N] (Linux), libmkl_rt[.N].dylib (macOS). scipy: the LP64 bundle
@@ -197,8 +199,124 @@ def configure_math_libs() -> dict:
 
 
 def import_devsim():
-    """`configure_math_libs()` then `import devsim`; returns the devsim module. Raises the original
-    ImportError when devsim is not installed."""
+    """`configure_math_libs()` then `import devsim`, then `umfpack_2by2_guard()`; returns the devsim
+    module. Raises the original ImportError when devsim is not installed."""
     configure_math_libs()
     import devsim
+    umfpack_2by2_guard()
     return devsim
+
+
+# ---------------------------------------------------------------------------------------------------
+# UMFPACK 5.1: the obsolete 2-by-2 strategy (v0.15.1, 2026-11-10;
+# docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md)
+# ---------------------------------------------------------------------------------------------------
+# UMFPACK 5.1 umfpack.h indices (the version devsim/umfpack/umfpack_lgpl ships: "UMFPACK V5.1.0 (May 31,
+# 2007)" in its own report). Control[UMFPACK_STRATEGY] = 5. Info, each index checked against
+# umfpack_di_report_info on the same factorization (the eight DG matrices of the note and the 2-D diode):
+# [18] UMFPACK_STRATEGY_USED: "strategy used: symmetric 2-by-2" exactly when == 2 ("symmetric" 3,
+# "unsymmetric" 1); [23] / [24] UMFPACK_LNZ_ESTIMATE / UMFPACK_UNZ_ESTIMATE: the "upper bound" column of
+# "nz in L (incl diagonal)" / "nz in U (incl diagonal)" (e.g. 9601722 / 9875001 = Info[23] / Info[24] on the
+# 2-D electron + hole DG matrix under 2-by-2, 6910000 / 7085696 under symmetric).
+_UMF_CONTROL_STRATEGY = 5
+_UMF_INFO_STRATEGY_USED = 18
+_UMF_INFO_LNZ_ESTIMATE, _UMF_INFO_UNZ_ESTIMATE = 23, 24
+_UMF_STRATEGY_AUTO, _UMF_STRATEGY_2BY2, _UMF_STRATEGY_SYMMETRIC = 0, 2, 3
+# Keep AUTO's 2-by-2 unless its symbolic upper bound on nz(L+U) exceeds the symmetric strategy's by more than
+# this factor (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md, section 12: measured <= 1.070 wherever
+# 2-by-2 factorized as sparsely as symmetric, >= 1.291 wherever it filled in 4-45x).
+_UMF_2BY2_BOUND_RATIO = 1.15
+_GUARD: dict | None = None
+
+
+def umfpack_2by2_guard() -> dict:
+    """Keep devsim's bundled UMFPACK 5.1 off its obsolete 2-by-2 strategy WHERE THAT STRATEGY FILLS IN.
+    Returns the (live) record {'installed': bool, 'mode': 'symmetric' | 'keep', 'reason': str,
+    'symbolic': int, 'auto_2by2': int, 'replaced': int, 'kept': int}: 'symbolic' counts the fresh symbolic
+    factorizations seen since install, 'auto_2by2' how many of them AUTO sent to the 2-by-2 strategy,
+    'replaced' how many of those the guard redid with the symmetric strategy and 'kept' how many it left on
+    2-by-2 (replaced + kept == auto_2by2). Idempotent; called by import_devsim().
+
+    WHAT. devsim 2.11.2 (the Windows and the Linux pip wheel alike) factorizes every Newton step with the
+    UMFPACK 5.1 of its Python shim devsim/umfpack/umfshim.py, under UMFPACK's default Control, i.e.
+    strategy AUTO. On many matrices 5.1's AUTO picks the "symmetric 2-by-2" strategy (measured: every
+    density-gradient + quasi-equilibrium-closure Jacobian, the heterojunction suites, the 2-D bipolar
+    diode). UMFPACK itself disabled that strategy in 5.4.0 (May 2009; ChangeLog: "disabled 2-by-2
+    strategy"). On the DG + closure Jacobians it fills in (4-45x the nonzeros of the symmetric strategy on
+    the same ordering, up to 150x the numeric time); elsewhere it factorizes as sparsely as the symmetric
+    strategy and its solves are MORE accurate (2-D bipolar diode: componentwise backward error 9.0e-11
+    against 5.0e-8 under symmetric; 1-D electron DG Newton steps: 9e-14 against up to 3.3e-5).
+
+    RULE (v0.15.1 v2). When AUTO's symbolic step picks 2-by-2, the guard also runs the symbolic step with
+    UMFPACK_STRATEGY_SYMMETRIC and compares the two symbolic upper bounds on nz(L) + nz(U)
+    (Info[UMFPACK_LNZ_ESTIMATE] + Info[UMFPACK_UNZ_ESTIMATE]). It keeps AUTO's 2-by-2 factorization (Info
+    restored, so devsim's call sees exactly its own symbolic step) unless the 2-by-2 bound exceeds the
+    symmetric one by more than _UMF_2BY2_BOUND_RATIO = 1.15; then the symmetric Symbolic object replaces it.
+    Measured (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md, section 12; Windows, unguarded runs that
+    also factor every 2-by-2 matrix with the symmetric strategy): bound ratio 0.60-1.070 on every matrix
+    where 2-by-2's actual nz(L+U) stayed within 0.99-1.15x the symmetric one (2-D diode 1.03, valley-DG and
+    quasi-equilibrium suites <= 1.070, heterojunction 1.000); 1.291-117 on every matrix where it filled in
+    (actual 4.2-45x). The bound is computed from the pattern before any numeric pivoting, and the decision
+    costs one extra symbolic step per fresh symbolic factorization that AUTO sent to 2-by-2, as before.
+    v1 (5ee2c8d .. e29fbd3) replaced EVERY 2-by-2 choice; on the 2-D bipolar diode (18,357 nodes) that cost
+    ~1000x backward error (9.6e-8 against 9.0e-11) for nothing (the factor time was the same within the
+    run-to-run spread).
+
+    WHERE. The guard wraps devsim.umfpack.umfpack_loader.umf_control.symbolic, the one call through which
+    every symbolic step of devsim's UMFPACK shim goes (umfshim.dsobject.factor; DEVSIM reuses that Symbolic
+    object for the is_same_symbolic numeric steps of a Newton solve, so each decision holds for them too).
+    It is a class attribute, so it also survives ds.reset_devsim() (which re-registers umfshim's callback).
+    Not installed (reason says why) when devsim did not load its UMFPACK shim (e.g. pip `mkl` present:
+    MKL-PARDISO is then the direct solver; not measured here) or the loader lacks the expected names.
+    DYNAMETA_UMFPACK_2BY2=keep leaves devsim's AUTO choice untouched everywhere (the pre-v0.15.1
+    factorization, for A/B comparisons); the variable is read once, at the first call."""
+    global _GUARD
+    if _GUARD is not None:
+        return _GUARD
+    mode = os.environ.get(UMFPACK_2BY2_ENV, "symmetric").strip().lower() or "symmetric"
+    if mode not in ("symmetric", "keep"):
+        raise ValueError("{}={!r}: expected 'symmetric' or 'keep'".format(UMFPACK_2BY2_ENV, mode))
+    guard = {"installed": False, "mode": mode, "reason": "", "symbolic": 0, "auto_2by2": 0, "replaced": 0,
+             "kept": 0}
+    loader = sys.modules.get("devsim.umfpack.umfpack_loader")
+    ctl_cls = getattr(loader, "umf_control", None) if loader is not None else None
+    if mode == "keep":
+        guard["reason"] = "{}=keep".format(UMFPACK_2BY2_ENV)
+    elif "devsim.umfpack.umfshim" not in sys.modules or ctl_cls is None:
+        guard["reason"] = "devsim did not load its UMFPACK 5.1 shim (another direct solver)"
+    elif not callable(getattr(ctl_cls, "symbolic", None)):
+        guard["reason"] = "devsim.umfpack.umfpack_loader has an unexpected layout"
+    else:
+        original = ctl_cls.symbolic
+
+        def symbolic(self, matrix):
+            sym = original(self, matrix)
+            guard["symbolic"] += 1
+            if (self.Control[_UMF_CONTROL_STRATEGY] != _UMF_STRATEGY_AUTO
+                    or self.Info[_UMF_INFO_STRATEGY_USED] != _UMF_STRATEGY_2BY2):
+                return sym
+            guard["auto_2by2"] += 1
+            info_2by2 = self.Info[:]
+            bound_2by2 = info_2by2[_UMF_INFO_LNZ_ESTIMATE] + info_2by2[_UMF_INFO_UNZ_ESTIMATE]
+            self.Control[_UMF_CONTROL_STRATEGY] = _UMF_STRATEGY_SYMMETRIC
+            try:
+                sym_s = original(self, matrix)
+            finally:
+                self.Control[_UMF_CONTROL_STRATEGY] = _UMF_STRATEGY_AUTO
+            bound_s = self.Info[_UMF_INFO_LNZ_ESTIMATE] + self.Info[_UMF_INFO_UNZ_ESTIMATE]
+            if bound_2by2 > _UMF_2BY2_BOUND_RATIO * bound_s:
+                del sym                     # di_symbolic.__del__ frees the AUTO one
+                guard["replaced"] += 1
+                return sym_s
+            del sym_s
+            self.Info[:] = info_2by2        # devsim's call sees its own (AUTO) symbolic step
+            guard["kept"] += 1
+            return sym
+
+        symbolic.dynameta_original = original
+        ctl_cls.symbolic = symbolic
+        guard["installed"] = True
+        guard["reason"] = ("AUTO's 2-by-2 choice is redone with the symmetric strategy where its symbolic "
+                           "nz(L+U) bound exceeds the symmetric one by more than {}x".format(_UMF_2BY2_BOUND_RATIO))
+    _GUARD = guard
+    return _GUARD

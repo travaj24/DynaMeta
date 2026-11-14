@@ -129,12 +129,16 @@ class BulkGainParams:
                            Ga0.47In0.53As lattice-matched to InP: Vurgaftman, Meyer & Ram-Mohan,
                            JAP 89, 5815 (2001) Eq. (4.1) over the GaAs (Table I) and InAs (Table III)
                            Varshni laws with C = 0.477 eV (Table XIII): 0.816 eV at 0 K, 0.737 eV at
-                           300 K, ~1.68 um band edge). Any binary name / (A, B, x, C_eV) ternary that
-                           varshni_eg_ev accepts works here.
+                           300 K, ~1.68 um band edge): an L-BAND gain medium (peak 1612.5 nm at the
+                           reference drive). Any spec varshni_eg_ev accepts works here: a binary name,
+                           an (A, B, x, C_eV) ternary, ingaasp_lm_gap_law(z) for InP-matched GaInAsP.
+                           WHICH TO USE: the default for an InGaAs (L-band) active region;
+                           BulkGainParams.c_band() (gap_material "InGaAsP_LM_C") for a 1550 nm
+                           C-band device; ingaasp_lm_gap_law(z) for another GaInAsP composition.
       Eg0_eV, varshni_alpha_eV_K, varshni_beta_K
                            OPTIONAL device-effective Varshni override [eV, eV/K, K]: give ALL THREE
-                           to model an active region the material presets do not cover (e.g. an
-                           InGaAsP quaternary at a chosen 1.5x um band edge); they then replace
+                           to model an active region the material laws do not cover (e.g. a
+                           strained well fitted to a measured spectrum); they then replace
                            gap_material. Default None (use gap_material). Audit 2026-11-06: these
                            used to default to (0.816, 2.9e-4, 193) labelled "Varshni row for
                            In0.53Ga0.47As" -- no such row exists in Vurgaftman, and the triple put the
@@ -169,11 +173,10 @@ class BulkGainParams:
 
     Geometry-sizing note: this steady-state core does NOT self-clamp the carrier density with ASE.
     The default V_active places the 130 mA / 600 um reference operating point at N0 ~ 1.4 x
-    transparency, where the UNCLAMPED small-signal chip gain (alpha_i = 3000 /m) is 26.7 dB at a
-    1560 nm peak on the C-band device-effective gap the gates use (tests/test_soa_qw.py CBAND_GAP)
-    and 29.0 dB at a 1612 nm peak with the default Ga0.47In0.53As gap (MEASURED, v0.14 audit
-    2026-11-06): bulk lattice-matched InGaAs is an L-band gain medium, so model a 1550 nm device with
-    the explicit Varshni override (or a quaternary gap) rather than the default. A
+    transparency, where the UNCLAMPED small-signal chip gain (alpha_i = 3000 /m) is 29.0 dB at a
+    1612 nm peak with the default Ga0.47In0.53As gap (MEASURED, v0.14 audit 2026-11-06) and 26.2 dB
+    at a 1549.7 nm peak with BulkGainParams.c_band() (MEASURED, v0.15.1 audit 2026-11-08): bulk
+    lattice-matched InGaAs is an L-band gain medium, so model a 1550 nm device with c_band(). A
     physically smaller active cross-section at 130 mA would drive N0 far above transparency and, in
     the absence of ASE gain-clamping, over-predict the gain -- so the effective volume is the honest
     knob here (equivalently an injection efficiency eta_i < 1); a full ASE-clamped device solve is
@@ -205,6 +208,27 @@ class BulkGainParams:
             raise ValueError("BulkGainParams: the Varshni override needs ALL THREE of Eg0_eV, "
                              "varshni_alpha_eV_K, varshni_beta_K (got {} of 3); leave all None to use "
                              "gap_material={!r}".format(n_set, self.gap_material))
+
+    @classmethod
+    def c_band(cls, **overrides) -> "BulkGainParams":
+        """The opt-in C-BAND (1550 nm) bulk SOA: every default except the gap, which is the
+        InP-lattice-matched quaternary Ga(0.440)In(0.560)As(0.937)P(0.063) ("InGaAsP_LM_C" in
+        materials.band_temperature.ALLOY_GAP_PARAMS) -- Vurgaftman, Meyer & Ram-Mohan, JAP 89, 5815 (2001)
+        Eq. (5.4) between InP and Ga0.47In0.53As with C = 0.13 eV (Sec. V.B.1) over the binary Varshni
+        laws: Eg(300 K) = 0.7684 eV. The composition z = 0.937 is SOLVED so that the material-gain peak
+        is at 1550 nm at the reference operating point (130 mA, 298 K, the default geometry and
+        recombination; MEASURED 1549.7 nm by gain_peak), rounded to 0.001. The peak moves with drive and T (band
+        filling, gap law); for another target pass gap_material=ingaasp_lm_gap_law(z) instead.
+        `overrides` are any other BulkGainParams fields (T_K, Gamma, V_active_m3, ...); the gap fields
+        (gap_material, Eg0_eV, varshni_alpha_eV_K, varshni_beta_K) are refused -- that is a different
+        material, so build BulkGainParams(...) directly. The default BulkGainParams() is unchanged
+        (Ga0.47In0.53As, L-band)."""
+        bad = sorted(set(overrides) & {"gap_material", "Eg0_eV", "varshni_alpha_eV_K", "varshni_beta_K"})
+        if bad:
+            raise TypeError("BulkGainParams.c_band: {} would replace the C-band gap; build "
+                            "BulkGainParams(gap_material=..., ...) directly for another "
+                            "material".format(", ".join(bad)))
+        return cls(gap_material="InGaAsP_LM_C", **overrides)
 
     @property
     def gap_law(self):

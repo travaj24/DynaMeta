@@ -35,20 +35,37 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 # set_dg_gamma co-ramp sets; the Lambda row 'Electrons - QSqrtN*QSqrtN' replaces 'QLambda +
 # wall_lambda_pin'; no pinned ElectronContinuityEquation contact row) and the seed's node values (plus
 # the seeded Electrons). Every region model, edge model and flux string is unchanged.
-_DG_CALLLOG_DIGEST = "44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374"
+# RE-RECORDED 2026-11-10 (v0.15.1) as the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
+# tests/_cr_libm.py) on an export of e95a638 (the commit that recorded the value above) with the current
+# recorder + helpers copied in: 6af06e07... on Windows AND in WSL (glibc), = this tree's on both. The raw
+# digest of e95a638 and of this tree is still 44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374
+# on both platforms (the same log), but it carried numpy's np.tanh in the wall seed, which misses 3 of the
+# fixture's 15 arguments by 0.57-0.68 ulp (vs mpmath at 300 bits; identically on both platforms -- numpy's own
+# tanh, not the C library); cancellation in the seed turns that into 1-433726 ulp in 9 literals of 3 calls.
+# docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.
+_DG_CALLLOG_DIGEST = "6af06e078b7bdd3c41c02611e288dbd069b11228b9d7e97aebf25b4f7f29ef60"
 _DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
 # RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
 # e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
 # ElectronCurrent / HoleCurrent and their derivatives plus Bern_g_m / Bern_gp_m (+20 calls).
 # Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
+# 2026-11-10 (v0.15.1): now the CANONICAL log's digest (correctly rounded transcendentals, tests/_calllog.py),
+# re-recorded on an export of 273473b (the commit that recorded it): the SAME value, on Windows AND in WSL,
+# raw and canonical, and = this tree's -- none of this log's transcendental results is a hard rounding case on
+# either platform. It is pinned canonically so that stays true on any other libm.
 _BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 _BIPOLAR_CALLLOG_CALLS = 237
 # v0.15.0 (2026-11-07, the default statistics 'fermi_dirac'): the two digests above are now those of the
 # EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
 # tests: default == explicit 'fermi_dirac').
+# 2026-11-10 (v0.15.1): both CANONICAL (tests/_calllog.py), re-recorded on an export of 8434cce (the commit that
+# recorded them), Windows AND WSL, = this tree's on both. DG: the raw digest on both platforms was
+# 89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded (the same np.tanh seed misses as
+# _DG_CALLLOG_DIGEST); bipolar: canonical = raw, unchanged (its ~1.4e6 np.power elements of the FD
+# equilibrium root go through the vectorized fast path of tests/_cr_libm.py: 19 s instead of 1.4 s raw).
 _DG_CALLLOG_DIGEST_V0150, _DG_CALLLOG_CALLS_V0150 = (
-    "89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded", 157)
+    "cb2b24a2f73c50c0cd60b6f335903a99f049386c2331e6db3448c470abcf31fc", 157)
 _BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
     "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d", 302)
 
@@ -59,7 +76,10 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     """The shared kernel (_install_dg_variables), the generalized contact repoint and the hole-aware
     set_dg_gamma leave the UNIPOLAR DG's every DEVSIM definition call -- expression strings,
     parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
-    2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST)."""
+    2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST). Canonical logs since 2026-11-10 (v0.15.1). STILL
+    BITES (MEASURED on Windows and in WSL, canonical): lam = v_t ln(t t) written v_t (2 ln t) -- mathematically
+    equal -- moves 6 seed literals by 1-12118 ulp and changes both digests; a text change of the DG contact
+    equation ('QSqrtN - (...)') changes both."""
     import _dg_calllog as CL
     legacy = CL.record_call_log(statistics="legacy")
     assert len(legacy) == _DG_CALLLOG_CALLS
@@ -72,7 +92,9 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
 def test_bipolar_dd_without_dg_is_byte_identical():
     """No bipolar DG requested -> the bipolar DD definition is the recorded one (v0.13 / e46bd25 up to
     the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
-    `scale` keyword defaults to None)."""
+    `scale` keyword defaults to None). Canonical logs since 2026-11-10 (v0.15.1); STILL BITES (MEASURED,
+    Windows and WSL): see tests/test_bipolar_recombination_bgn_ionization.py::test_defaults_off_physics_
+    definition_is_byte_identical_to_the_recorded_digest."""
     import _bipolar_calllog as CL
     legacy = CL.record_call_log(statistics="legacy")
     assert len(legacy) == _BIPOLAR_CALLLOG_CALLS
@@ -408,3 +430,41 @@ def test_diode_transport_is_a_small_first_order_change():
     assert 0.0 < abs(r1) < 1e-2 and abs(r1) <= 2.0 * d[1.0][0.4]["max_lam_Vt"]
     assert 1.8 < r1 / rh < 2.2
     assert d[1.0][0.4]["I_sum"] < max(1e-6, 10.0 * cl["I_sum"])
+
+
+# ---- (e) cost: the factorization of the DG + quasi-equilibrium Jacobian ----------------------------
+
+def test_dg_closure_jacobian_factorizes_without_fill_in():
+    """v0.15.1 (docs/audit/2026-11-10-v0.15.1-dg-iteration-cost.md): a STRUCTURAL cost gate, no clock. The
+    1-D MOS of mos_qe with the electron AND hole DG (FD, GAMMA_WALL, both carriers closed) at flat band:
+    every LU factorization devsim's UMFPACK 5.1 makes on the way (classical solve, DG gamma ramp, closure)
+    must stay sparse, (nnz(L) + nnz(U)) / nnz(A) <= 4, and none may use the 2-by-2 strategy. MEASURED
+    (Windows, 19 factorizations): max fill 2.0 with dynameta.carriers.devsim_env.umfpack_2by2_guard; 80.5
+    without it (DYNAMETA_UMFPACK_2BY2=keep, = the code before the guard), where UMFPACK 5.1's AUTO picks
+    the 2-by-2 strategy for the DG + closure Jacobian and its numeric pivoting fills in -- the 10-130x
+    per-iteration cost of the isotropic DG the valley-resolved-DG note had reported. That one Jacobian is
+    the only 2-by-2 choice of the run; its symbolic nz(L+U) bound is 117x the symmetric strategy's, so the
+    v2 guard (which keeps 2-by-2 unless that bound ratio exceeds 1.15) replaces it, as v1 did. Read from UMFPACK's
+    own Info after each numeric factorization (Info[43] / [44] = nz in L / U incl. diagonal, Info[18] =
+    strategy used), by wrapping the loader's numeric call (the same instrument works on either code)."""
+    L = pytest.importorskip("devsim.umfpack.umfpack_loader")
+    if ds.get_parameter(name="direct_solver") != "custom":
+        pytest.skip("devsim's direct solver is not its UMFPACK shim")
+    seen = []
+    numeric = L.umf_control.numeric
+
+    def spy(self, matrix, Symbolic):
+        out = numeric(self, matrix, Symbolic)
+        seen.append(((self.Info[43] + self.Info[44]) / len(matrix.Ax), int(self.Info[18])))
+        return out
+
+    L.umf_control.numeric = spy
+    try:
+        V.mos_qe(3e23, (0.0,), fd=True, dg_gamma=V.gamma_wall(), tag="fill", dg_holes=True,
+                 close=("electrons", "holes"))
+    finally:
+        L.umf_control.numeric = numeric
+    assert len(seen) >= 10, seen
+    fill = max(f for f, _ in seen)
+    assert fill <= 4.0, (fill, seen)
+    assert 2 not in {s for _, s in seen}, seen

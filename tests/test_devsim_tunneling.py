@@ -446,7 +446,10 @@ def _l1_currents(h):
         for V in (0.0, -0.5):
             with _quiet():
                 b.solve(BiasPoint({"anode": V}, "v"))
-            i2[V] = btbt_generation_current(b.device, "si") / T     # per depth / thickness -> A/m^2
+            # a convergence study (h = 2 and 1 nm by design): since v0.15.1 the 2-D resolution advisory checks this
+            # element assembly too and fires at 2 nm (MEASURED estimate -2.2 % of the gross rate); it is gated in
+            # tests/test_devsim_btbt_resolution_2d.py, not here
+            i2[V] = btbt_generation_current(b.device, "si", check_resolution=False) / T   # per depth -> A/m^2
             if V == 0.0:                                          # the Kane prefactor integral (no D)
                 em_ = np.asarray(ds.get_element_model_values(device=b.device, region="si", name="BTBT_Emag"))
                 env = np.asarray(ds.get_element_model_values(device=b.device, region="si",

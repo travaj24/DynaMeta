@@ -40,10 +40,11 @@ from dynameta.constants import T_REF   # audit X-24: one reference temperature
 # package, v0.15 plan 4.0.4; moved there verbatim 2026-11-06 -- every optics.soa result is bit-identical). The
 # names are re-exported here unchanged: VARSHNI_PARAMS (binaries: GaAs, AlAs, InAs, InP), ALLOY_GAP_PARAMS
 # ("InGaAs_LM"), varshni_eg_ev, d_eg_dT_ev_per_K.
+# ingaasp_lm_gap_law(z) (v0.15.1) is the InP-matched GaInAsP law ("InGaAsP_LM_C" = the C-band SOA composition).
 from dynameta.materials.band_temperature import (ALLOY_GAP_PARAMS, VARSHNI_PARAMS,  # noqa: F401
-                                                 d_eg_dT_ev_per_K, varshni_eg_ev)
+                                                 d_eg_dT_ev_per_K, ingaasp_lm_gap_law, varshni_eg_ev)
 
-__all__ = ["VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "B_LO_10MEV_HZ", "varshni_eg_ev",
+__all__ = ["VARSHNI_PARAMS", "ALLOY_GAP_PARAMS", "B_LO_10MEV_HZ", "varshni_eg_ev", "ingaasp_lm_gap_law",
            "d_eg_dT_ev_per_K", "gain_peak_drift_nm_per_K", "fwhm_hom_at_temperature",
            "qd_params_at_temperature"]
 
