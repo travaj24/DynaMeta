@@ -183,7 +183,7 @@ def test_1d_mo_unchanged_by_the_shared_helper(monkeypatch):
         return real(exx, *a, **k)
     monkeypatch.setattr(fm, "_run_mo", spy)
     fm.solve_fdtd_mo_1d(lay, lambda_min_m=L1, lambda_max_m=L2, resolution=12, n_pad_wave=3.0,
-                        z_subcell="point")                         # the 2b7a002 rule (opt-out)
+                        z_subcell="point")                         # the 2531d5d rule (opt-out)
     from dynameta.optics.fdtd_nd.grid import z_grid
     dz, pad, _zs, _Lz, nz = z_grid(lay, L1, L2, 12, 3.0, NS)
     zc = np.arange(nz) * dz                                        # the pre-refactor inline rule
@@ -275,7 +275,7 @@ def test_2d_oblique_ppol_needs_its_own_ez_maps(monkeypatch):
     res, angle = 30, 30.0
     d_ship, d_single = [], []
     for npw in _npw_offsets(res, 4):
-        # the 2b7a002 POINT maps (z_subcell='point'): this gate is about the Ez REGISTRATION
+        # the 2531d5d POINT maps (z_subcell='point'): this gate is about the Ez REGISTRATION
         r, th, (a_t, k_t) = _obl_front("p", angle, res, npw, "numba", monkeypatch, z_subcell="point")
         d_ship.append(_dphi(r, th, "p"))
         ez_i = k_t["ez"][0]
@@ -342,7 +342,7 @@ def test_3d_and_3d_mo_phase_unbiased():
 
 
 # =================================================================================================
-# z-SUBCELL AVERAGING (the default since 2026-11-02; z_subcell="point" = the 2b7a002 point rule)
+# z-SUBCELL AVERAGING (the default since 2026-11-02; z_subcell="point" = the 2531d5d point rule)
 # =================================================================================================
 class _Lt:
     def __init__(self, t):
@@ -391,9 +391,9 @@ def test_two_drude_single_pole_rule_error_is_second_order():
 
 
 def test_point_opt_out_reproduces_the_2b7a002_material_maps(monkeypatch):
-    """z_subcell='point' must hand every kernel EXACTLY the 2b7a002 point maps (layer_masks on
+    """z_subcell='point' must hand every kernel EXACTLY the 2531d5d point maps (layer_masks on
     material_z, pads first). Checked by spying on the arrays each engine's kernel receives; the
-    end-to-end bit-identity of R/r0/r_co against an exported 2b7a002 package was also measured on all
+    end-to-end bit-identity of R/r0/r_co against an exported 2531d5d package was also measured on all
     seven engines (numpy backends; docs/audit/2026-11-02-fdtd-registration.md)."""
     import dynameta.optics.fdtd as F1
     import dynameta.optics.fdtd_nd.solve2d as S2
@@ -443,7 +443,7 @@ def test_z_subcell_rejects_unknown_mode():
 
 # ---- true-geometry gates: |R|, |T| and the r phase at EVERY sub-cell offset vs exact TMM of the TRUE
 # slab (d = 183 nm: 9.15 cells at res 30, NOT commensurate). Measured 2026-11-02 at 8 offsets, res 30
-# (res 60) -- point (2b7a002): 1-D max|dR| 7.9e-3 (2.3e-3), max|dphi| 0.073 (0.037) rad; average:
+# (res 60) -- point (2531d5d): 1-D max|dR| 7.9e-3 (2.3e-3), max|dphi| 0.073 (0.037) rad; average:
 # 1.9e-3 (3.9e-4), 0.0049 (0.0012) rad -- a ~4.8x / 4.1x drop per dz halving, O((k dz)^2). Bars:
 # |dR|, |dT| < 3e-3 and |dphi| < 0.1 k0dz per offset at res 30 (point fails both by 2.6x / 8x).
 # _ZSUB lets the whole battery be re-run on the point rule to prove each gate fails there:
@@ -512,7 +512,7 @@ def test_true_geom_1d_matches_tmm_at_every_offset_and_converges():
 
 
 def test_true_geom_1d_point_rule_fails_the_same_bars():
-    """Discrimination inside the suite: the 2b7a002 point rule misses both bars at res 30."""
+    """Discrimination inside the suite: the 2531d5d point rule misses both bars at res 30."""
     e = _true_geom_1d(30, "point")
     assert e[0] > RT_BAR and e[2] > PH_BAR * _k0dz(30), e
 

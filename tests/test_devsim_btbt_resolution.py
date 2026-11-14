@@ -24,7 +24,7 @@ Gates
       errors); the uniform h = 0.05 nm mesh warns (its MEASURED error vs the analytic estimate is +1.02 %, the
       estimate +1.50 %: sensitivity at the budget).
 
-FAILS ON THE OLD CODE (b94c2f4): btbt_quadrature_error does not exist (AttributeError, R1) and
+FAILS ON THE OLD CODE (d3c807c): btbt_quadrature_error does not exist (AttributeError, R1) and
 btbt_generation_current emits no warning (R2's pytest.warns fails; MEASURED error on that mesh +11.0 %).
 Runtime ~25 s.
 """

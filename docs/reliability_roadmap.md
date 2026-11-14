@@ -11,11 +11,11 @@ avoid id collision, reliability items are numbered REL1..RELn.
 ## STATUS UPDATE (2026-06-10): drivers D1-D4 shipped
 
 The four follow-on drivers flagged below all landed on 2026-06-10:
-- D1 contact currents (5499a5b): carriers/contact_current.py + validation/contact_current_drivers.py (REL3);
-- D2 per-region absorbed power (3ea5818): OpticalResult.per_region_absorption +
+- D1 contact currents (5b96ee2): carriers/contact_current.py + validation/contact_current_drivers.py (REL3);
+- D2 per-region absorbed power (775465d): OpticalResult.per_region_absorption +
   validation/per_region_absorption.py (REL5);
-- D3 MechanicalProps on Material (f7c5d3d) (REL6/7);
-- D4 Chynoweth impact ionization (2a24ee3): carriers/impact_ionization.py +
+- D3 MechanicalProps on Material (9ba395b) (REL6/7);
+- D4 Chynoweth impact ionization (af859f0): carriers/impact_ionization.py +
   validation/impact_ionization_isub.py (REL8).
 The "follow-on" notes below are retained for history but are CLOSED; only REL9's ambient inputs
 (RH/contamination) remain external, by design.
@@ -28,7 +28,7 @@ mechanical schema; a lumped thermal node for runaway):
 - REL3 electromigration (reliability/em.py): Black + Blech immortality + geometry-scaled calibrated
   prefactor + Miner duty-cycle accumulation; drive current I is an EXTERNAL design parameter (the
   DEVSIM contact-current extractor SHIPPED 2026-06-10 as driver D1, carriers/contact_current.py,
-  5499a5b). validation/reliability_em.py: ratio
+  5b96ee2). validation/reliability_em.py: ratio
   closed forms machine; Miner two-segment J(t) vs piecewise analytic 1e-3; Blech design demo.
 - REL5 optical damage / runaway (reliability/lidt.py): F_th ~ sqrt(tau) LIDT scaling + a lumped
   CW thermal node with absorbed(T) callable (built from the ACTUAL layered TMM + the T-dependent
@@ -37,9 +37,9 @@ mechanical schema; a lumped thermal node for runaway):
   absorption runaway threshold matches the EXACT analytic bifurcation (incl. the T_max truncation
   closed form) to 1e-3; the real ENZ stack absorbed(T) gated to [0,1]. The per-region absorbed-power
   MAP on the optics result SHIPPED 2026-06-10 as driver D2 (OpticalResult.per_region_absorption,
-  3ea5818).
+  775465d).
 - REL6 thermal-cycling fatigue (reliability/fatigue.py): MechanicalProps (reliability-local {E, nu,
-  CTE, sigma_crit} -- folded into materials/ 2026-06-10 as driver D3, f7c5d3d), biaxial mismatch stress, DUCTILE
+  CTE, sigma_crit} -- folded into materials/ 2026-06-10 as driver D3, 9ba395b), biaxial mismatch stress, DUCTILE
   Coffin-Manson Nf = C d_eps^(-1/c), Norris-Landzberg AF, BRITTLE Weibull/critical-stress split.
   validation/reliability_fatigue.py: Cu-on-Si stress in the literature band; log-slope == -1/c; the
   brittle ITO cracks at cycle 0 where ductile Cu lives 1.5e3 cycles.
@@ -48,7 +48,7 @@ mechanical schema; a lumped thermal node for runaway):
   the exact erf(x/2 sqrt(kappa t)) to 1e-3; Arrhenius-with-1/T-prefactor ratio machine.
 - REL8 HCI (reliability/hci.py): lucky-electron t ~ (I_sub/W)^(-2/3) with the q-corrected trap rate
   and the documented NEGATIVE-Ea allowance (worse cold); I_sub external (DEVSIM impact ionization
-  SHIPPED 2026-06-10 as driver D4, carriers/impact_ionization.py, 2a24ee3).
+  SHIPPED 2026-06-10 as driver D4, carriers/impact_ionization.py, af859f0).
   validation/reliability_hci.py.
 - REL9 corrosion (reliability/corrosion.py): Deal-Grove closed form (+ Arrhenius rates) + Peck
   humidity life; ambient RH external. validation/reliability_corrosion.py: closed form vs the rate

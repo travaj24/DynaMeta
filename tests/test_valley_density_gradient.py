@@ -8,9 +8,9 @@ unchanged. The MOS harness and the Schrodinger-Poisson oracle are validation/bip
 convergence and the gamma calibration are validation/valley_density_gradient.py. Audit note:
 docs/audit/2026-11-10-v0.15.1-valley-resolved-dg.md.
 
-On aed0aa9 (before this option) every physics gate here fails: electron_valleys does not exist (TypeError), and
+On e0fa0bb (before this option) every physics gate here fails: electron_valleys does not exist (TypeError), and
 the isotropic model it replaces misses the anisotropic SP by -14 % at the gated point (asserted below). The
-defaults-off gate passes there by construction (that is its point: the digest was recorded on aed0aa9)."""
+defaults-off gate passes there by construction (that is its point: the digest was recorded on e0fa0bb)."""
 import os
 import re
 import subprocess
@@ -36,7 +36,7 @@ TWIN = (ValleySet("a", V.MN, 0.5), ValleySet("b", V.MN, 0.5))
 
 # sha256 of tests/_bipolar_dg_calllog.record_call_log() -- the BIPOLAR DG definition without electron_valleys
 # (both carriers, quantum SRH, ohmic + insulator-wall rows, wall seed, gamma ramp, the quasi-equilibrium closure
-# on both carriers; statistics 'fermi_dirac' and 'boltzmann'). RECORDED 2026-11-10 on an export of aed0aa9 (the
+# on both carriers; statistics 'fermi_dirac' and 'boltzmann'). RECORDED 2026-11-10 on an export of e0fa0bb (the
 # base of this option) and on this tree: 638 calls, equal (Windows; canonical recording, tests/_calllog.py).
 _BIPOLAR_DG_CALLLOG_DIGEST = "92cb247b4052422fdfa7ce4cacabb307407be0229ed7565306f1a6b96bd2d710"
 _BIPOLAR_DG_CALLLOG_CALLS = 638
@@ -46,7 +46,7 @@ _BIPOLAR_DG_CALLLOG_CALLS = 638
 
 def test_default_bipolar_dg_definition_is_byte_identical():
     """Without electron_valleys every DEVSIM definition call of the bipolar DG + wall + closure path is the
-    aed0aa9 one, in order, character for character (the generalized kernel's tie=None / declare=True, the
+    e0fa0bb one, in order, character for character (the generalized kernel's tie=None / declare=True, the
     closure's valley hook returning None, the set_dg_gamma / seed / contact / wall branches that only read
     parameter lists). The unipolar DG and bipolar DD logs are gated in tests/test_bipolar_density_gradient.py
     (unchanged). STILL BITES (MEASURED): writing the kernel's default tie as '{u}^2 - {c}' changes the digest."""
@@ -221,7 +221,7 @@ def test_si100_valleys_against_the_anisotropic_sp_oracle():
     comparison (N_inv 10 %, centroid 15 %: SP_TOL_NINV / SP_TOL_CENTROID); the 2-fold share within 0.1 of the
     SP's. MEASURED: N_inv +3.71 %, centroid -2.42 %, 2-fold share 0.692 vs SP 0.750. The isotropic model (the
     old code's only option) against the same oracle: N_inv -13.8 %, centroid +17.8 % -- it MISSES both registered
-    tolerances (asserted: the gate fails on aed0aa9's model)."""
+    tolerances (asserted: the gate fails on e0fa0bb's model)."""
     sp = V.sp_inversion(NA, 1.2, valleys=V.sp_valleys(SI))
     sb = [float(np.sum(x[1])) for x in sp["subbands"]]
     r = V.mos_qe(NA, (1.2,), fd=True, dg_gamma=GW, valleys=SI, tag="spv")[0]

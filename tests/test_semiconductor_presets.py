@@ -5,7 +5,7 @@ docs/audit/2026-11-06-v0.15-si-bundles.md.
 
 ORACLES: Yan & Cuevas, J. Appl. Phys. 114, 044508 (2013) constants re-typed here in CGS with their
 equation / table numbers (read in the primary text); F_1/2 by scipy quadrature written here; k/q from
-scipy.constants. FAILS ON OLD CODE (9ea6500): the module and the 'power_log' kind / pairing fields do not
+scipy.constants. FAILS ON OLD CODE (4b6ca37): the module and the 'power_log' kind / pairing fields do not
 exist -- the imports below raise at collection, which fails the file (no importorskip on purpose).
 """
 import dataclasses

@@ -11,7 +11,7 @@ range (eta -3..8) that fit is +1..+3.9 % off the exact F_1/2 offset (physics_bip
 Delta"), so each such gate (a) bounds the miss by the fit's measured error and (b) ATTRIBUTES it: the
 miss divided by exp(Delta_exact - Delta_fit) must vanish to round-off.
 
-EVERY GATE FAILS ON THE OLD CODE (9ea6500): there BGNModel has no 'power_log' kind or pairing fields
+EVERY GATE FAILS ON THE OLD CODE (4b6ca37): there BGNModel has no 'power_log' kind or pairing fields
 and setup_bipolar_region no `statistics` (TypeError) -- and so that an ignored flag could not pass, each
 gate also asserts that the old configuration (the legacy statistics, or a mismatched n_i) misses its
 oracle by far more than its budget (measured margins in the docstrings).

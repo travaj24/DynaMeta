@@ -45,7 +45,7 @@ tipped the decision to a live dependency:
 
 ### A1. RCWA backend bridge (task #169) -- SHIPPED
 
-Shipped b005e17: `validation/lumenairy_rcwa_bridge.py` 6 gates green (incl GATE F
+Shipped f8f9b88: `validation/lumenairy_rcwa_bridge.py` 6 gates green (incl GATE F
 absorption attribution).
 
 `dynameta/optics/lumenairy_bridge/rcwa_backend.py`:
@@ -112,7 +112,7 @@ Landed alongside (the synergy glue A2 exposed):
 
 ### A3. Bidirectional translation tools (task #171) -- SHIPPED
 
-Shipped a0df9fd: `validation/lumenairy_translate.py` round-trip gates green.
+Shipped 4f41206: `validation/lumenairy_translate.py` round-trip gates green.
 
 `dynameta/optics/lumenairy_bridge/translate.py` -- the "seamless synergy" layer, both ways:
 
@@ -178,7 +178,7 @@ propagation; default is interop, not reimplementation.
 (verified 2026-06-11; each line cites the proving validation/commit)
 
 - DG oxide hard wall: RESOLVED (v0.15 item 4.4.4, 2026-11-06). The experimental
-  `setup_dg_hard_wall` rows (cef01d9) converged to a spurious wide-depletion state because the
+  `setup_dg_hard_wall` rows (aeb2ebf) converged to a spurious wide-depletion state because the
   pinned carrier row made the wall node a carrier sink; the name is now a deprecated shim onto
   `setup_dg_insulator_wall` (the v0.14 zero-flux wall), which reproduces the closed-form dark
   space (1.187207 n0 L_q) to 1.7e-5 and the post-hoc BVP self-consistently to 1.2e-3 of the peak
@@ -189,7 +189,7 @@ propagation; default is interop, not reimplementation.
   dynamic gain; both re-run green 2026-06-11). Remaining GPU items (fused 3D fast path,
   Taichi) are performance, not capability; the oblique and MO-1D solvers stay CPU
   (numpy/numba/jax) by design.
-- Oblique FEM envelope (`validation/oblique_vs_tmm`, ba4dcb2): s-pol gated 0-45 deg (3% to
+- Oblique FEM envelope (`validation/oblique_vs_tmm`, 64991d1): s-pol gated 0-45 deg (3% to
   30 deg; 4% at 45, measured ~2.6%); p-pol/conical/lossy gated to 30 deg; at 60 deg the
   fixed-alpha z-PML CREATES energy (R+T ~ 1.17, report-only) and `solve_fem` warns to stay
   <= ~45 deg. Angle-aware PML remains OPEN (`solver.py` `pml_alpha=1j` constant) -- low
@@ -204,8 +204,8 @@ propagation; default is interop, not reimplementation.
   coupled-Newton recipe -- 1D `validation/gated_dd.py` (re-run green 2026-06-11), 2D
   `validation/gated_dd_2d.py`, builder-wired reference metasurface
   `validation/gated_dd_builder.py` -- so Gummel is not required for that case.
-- Lasing/cavity, C(T), GPU nonlinear: SHIPPED 2026-06-10 (d588e50
-  `validation/fdtd_lasing_cavity` gates A-E; cee64bd `validation/thermal_ct_transient`
-  gates A-D; d646875 `validation/fdtd_gpu_nonlinear` gates A-E on CUDA hardware); all
+- Lasing/cavity, C(T), GPU nonlinear: SHIPPED 2026-06-10 (8870347
+  `validation/fdtd_lasing_cavity` gates A-E; fe9bab6 `validation/thermal_ct_transient`
+  gates A-D; 964ed57 `validation/fdtd_gpu_nonlinear` gates A-E on CUDA hardware); all
   three re-run green 2026-06-11. `docs/physics_depth_roadmap.md` carries the matching
   status update.

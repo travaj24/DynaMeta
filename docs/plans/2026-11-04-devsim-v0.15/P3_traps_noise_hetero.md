@@ -1,7 +1,7 @@
 # P3: trap kinetics, thermionic-interface shot noise, and temperature-aware heterointerfaces (v0.15 plan)
 
 Status: PLAN ONLY, for user review. No repository was modified.
-Reference tree: `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14` at `6595bde`, devsim 2.11.2.
+Reference tree: `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14` at `ee0ad04`, devsim 2.11.2.
 Author: planning agent, 2026-11-04.
 
 Read before this plan:
@@ -17,8 +17,8 @@ Read before this plan:
 ### 0.1 Item 3's premise is partly out of date (verified against the code)
 
 The brief says heterointerfaces at T_K != T_REF are "refused with BGN, and silently written at T_REF
-without it". That was true at `da7614f` (integration note section 2.8 and item 6.8). It was fixed by
-the D1a follow-up `f7c82db` (merge of `wip/dv_hetero2`; heterojunction doc section 4b). On `6595bde`:
+without it". That was true at `776bf2d` (integration note section 2.8 and item 6.8). It was fixed by
+the D1a follow-up `e55ce28` (merge of `wip/dv_hetero2`; heterojunction doc section 4b). On `ee0ad04`:
 
 * `physics_heterojunction.setup_heterointerface_carriers` reads `V_t` from each region
   (`region_V_t`). It refuses two different V_t values (NON-ISOTHERMAL), and uses the region V_t for

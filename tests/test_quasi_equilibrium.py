@@ -4,7 +4,7 @@ inversion oracle live in validation/bipolar_density_gradient.py (GATE G: the ful
 precision matrix and the SP comparison, nightly). Plan: docs/plans/2026-11-04-devsim-v0.15/
 P4_dg_ii_numerics.md sec. 1.6; audit note docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md.
 
-On 6f9044d (before the closure) every gate here fails: setup_quasi_equilibrium_carrier does not
+On a6d827d (before the closure) every gate here fails: setup_quasi_equilibrium_carrier does not
 exist, and the full model it replaces cannot reach the strong-inversion states at all (classical DD:
 Newton fails at 0.78-0.80 V; bipolar DG: 0.70 V -- P4 1.1 and the 4.4.2 stall diagnosis)."""
 import os
@@ -268,7 +268,7 @@ def test_imref_split_reproduces_the_analytic_channel_slice_charge():
     3000 / 6000 segments, beta = ln 1e3). Gates as G1-1: observed order >= 1.8, Richardson limit within
     1e-5. MEASURED: order 2.00 at all four points, Richardson 1.8e-14 .. 1.7e-13. Refutation: the same
     charge against the NO-split oracle (V_ch ignored) misses by 41 % (1.0 V) to 98 % (1.2 V, 0.3 V) --
-    far outside the 1e-5, so the gate sees the shift's sign and size. On 4aa3f3f the option existed but
+    far outside the 1e-5, so the gate sees the shift's sign and size. On dcbdade the option existed but
     only its guard was tested."""
     beta = float(np.log(1e3))
     for v_ch in (0.15, 0.30):

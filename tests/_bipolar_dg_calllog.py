@@ -7,8 +7,8 @@ seed_bipolar_dg(walls=...), the gamma ramp and the quasi-equilibrium closure on 
 charge-neutral models and Potential from the equilibrium seed, so every recorded value is a deterministic
 function of the code (no BLAS in the log).
 
-It uses only the public API of 6f9044d-era trees (no electron_valleys keyword), so it runs unchanged on an
-export of the base commit aed0aa9; the digest pinned in the test was recorded there AND on the valley tree
+It uses only the public API of a6d827d-era trees (no electron_valleys keyword), so it runs unchanged on an
+export of the base commit e0fa0bb; the digest pinned in the test was recorded there AND on the valley tree
 (equal). Canonical recording (correctly rounded transcendentals, tests/_calllog.py).
 
 Re-record: cd <a checkout> && python tests/_bipolar_dg_calllog.py (copy this file, _calllog.py and

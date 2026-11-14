@@ -5,10 +5,10 @@ docs/audit/2026-11-08-v0.15-junction-mesh-band.md. The devsim-free kernels: test
 Gates
   D1 DEFAULTS OFF, cross-commit: the ordered DEVSIM mesh-definition call log of build_device (create_2d_mesh,
      add_2d_mesh_line, add_2d_region, add_2d_interface, add_2d_contact with every argument's repr) hashes to the
-     digest RECORDED ON 0554410 (the v0.15.0 tip this branch was cut from) for five builder fixtures -- the
+     digest RECORDED ON 098553f (the v0.15.0 tip this branch was cut from) for five builder fixtures -- the
      GaN-like E4 diode, the Si lateral diode, the reference modulator (drift-diffusion), the N-AlGaAs / p-GaAs
      stack and the in-region z-junction GaAs layer -- with junction_band omitted, None and False. (Measured as well
-     on 0554410 vs this branch, same scratch recorder, Windows: the node coordinates and the solved digests of the
+     on 098553f vs this branch, same scratch recorder, Windows: the node coordinates and the solved digests of the
      four solved fixtures are identical too -- audit note.)
   D2 DEFAULTS OFF, same tree: the Si lateral diode solved with junction_band omitted / None / False is BITWISE equal
      (node fields + contact currents); devsim_isolated (a bitwise comparison of separate solves).
@@ -26,7 +26,7 @@ Gates
      z expression gets its band at the centre of its undoped sliver; an n-p-n lateral layer gets two x bands; a
      junction near the edge-metal line has its band clipped there (the line stays, no sliver edge).
   Z2 no junction (reference modulator): one AdvisoryWarning, and the call log is the graded one.
-FAILS ON THE OLD CODE (0554410): TypeError (no junction_band keyword) / ImportError (no junction_mesh) everywhere
+FAILS ON THE OLD CODE (098553f): TypeError (no junction_band keyword) / ImportError (no junction_mesh) everywhere
 but D1, an IDENTITY gate (its digests were recorded there), and A1's band-off half, which IS the old mesh.
 Runtime (MEASURED, Windows dev box, serial, -m "not slow"): see the solvers-devsim entry in .github/workflows/ci.yml.
 """
@@ -102,7 +102,7 @@ FIXTURES = {
     "gaas_pn": _gaas_stack,
     "gaas_homo_one": _gaas_homo_one,
 }
-# RECORDED ON 0554410 (2026-11-08, Windows, devsim 2.11.2) with the same hashing (sha256 of the JSON of
+# RECORDED ON 098553f (2026-11-08, Windows, devsim 2.11.2) with the same hashing (sha256 of the JSON of
 # [(call name, sorted [(kwarg, repr(value))])], first 16 hex digits). Python floats' repr is platform-independent.
 CALL_LOG_0554410 = {"gan_e4": ("2222f9fa11e3b536", 14), "si_lat": ("88ab8e4edd6b754a", 14),
                     "refmod_dd": ("c0ffd08506038d10", 52), "gaas_pn": ("5e37a0478f5b930a", 24),

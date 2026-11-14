@@ -144,7 +144,7 @@ class NeutralKineticTrapError(ValueError):
     (neutral when empty) or donor-like (neutral when full). "Neutral" is only the N_t -> 0 recombination-only
     idealisation of the quasi-static model; kept with a finite stored occupancy it would hold N_t f in its own
     row's time term but not in Poisson, and the small-signal system would not conserve charge (MEASURED on
-    d543fa9: Kirchhoff Y_V1 + Y_V2 off by 3.5e-3 of Y at 1 MHz, 2.8e5 x the trap-free floor; S/(4 kT Re Y) - 1 =
+    862493a: Kirchhoff Y_V1 + Y_V2 off by 3.5e-3 of Y at 1 MHz, 2.8e5 x the trap-free floor; S/(4 kT Re Y) - 1 =
     +0.39 at 1 MHz on the gate-B diode). Pick kind="acceptor" or "donor" (for N_t << the doping the choice moves
     the DC state by O(q N_t) only), or keep dynamic=False for a recombination-only level."""
 # Where a level's energy is quoted from (the per-level ENERGY REFERENCE, v0.14 follow-up). Equivalent to

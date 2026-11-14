@@ -3,11 +3,11 @@ in EVERY flux family, accurate at any drift. docs/audit/2026-11-04-sg-flux-two-b
 
   (a) value + Jacobian vs a 50-digit mpmath oracle at |v| up to 40, every family: unipolar DD
       electrons, bipolar DD electrons / holes, unipolar DG electrons, bipolar DG electrons / holes.
-      ON 6595bde (the kahan3 B(v) + v spelling) the four kahan3 families FAIL it -- measured numbers
-      in the test docstring; the two bipolar DG families passed there already (a4f00d9).
+      ON ee0ad04 (the kahan3 B(v) + v spelling) the four kahan3 families FAIL it -- measured numbers
+      in the test docstring; the two bipolar DG families passed there already (e36e808).
   (b) one kernel: every family's Bernoulli and current models are created inside sg_flux (run-time spy).
   (c) the cross-version guard: the defaults-off definition fixtures of tests/_bipolar_calllog.py and
-      tests/_dg_calllog.py, SOLVED, equal the arrays recorded on 6595bde (tests/data/
+      tests/_dg_calllog.py, SOLVED, equal the arrays recorded on ee0ad04 (tests/data/
       sgflux_6595bde.json) to the measured round-off of the flux change -- and a 1e-6 change of one
       physics parameter fails that gate (the gate still catches physics).
 """
@@ -102,11 +102,11 @@ def test_sg_flux_value_and_jacobian_are_accurate_at_large_drift(family):
     1e-3, 2.0e-12 at 1e-4, 2.4e-10 at 1e-6, 4.8e-5 at 1e-12), identically in both flux spellings and
     only in the Jacobian (Newton rate, not the solution) -- out of this change's scope (audit note,
     open items).
-    ON 6595bde (kahan3, B(-v) spelled B(v) + v) the four kahan3 families FAIL both (measured, worst
+    ON ee0ad04 (kahan3, B(-v) spelled B(v) + v) the four kahan3 families FAIL both (measured, worst
     over the two isolated terms, value / Jacobian): |v| = 40: 1.0 / 0.18-0.64; 33: 1.1-2.3e-2 /
     4.4e-5-9.7e-4; 27.6: 0.7-1.6e-4 / 4.1e-8-4.6e-7; 21: 0.6-1.3e-7 / 3.2e-10-8.0e-9; 10: 0.5-2.3e-12 /
     1.1-2.3e-13 (dd_electrons, bipolar_electrons, bipolar_holes, dg_electrons; electrons at v < 0,
-    holes at v > 0). The bipolar DG families passed there already (two Bernoulli since a4f00d9)."""
+    holes at v > 0). The bipolar DG families passed there already (two Bernoulli since e36e808)."""
     pytest.importorskip("mpmath")
     worst_v, worst_d = flux_accuracy(family)
     assert worst_v < 1e-13, (family, worst_v)
@@ -167,7 +167,7 @@ def test_every_flux_family_is_built_by_the_one_sg_kernel(monkeypatch):
     """House rule (one kernel per formula), checked at RUN time: building every family (_FAMILIES),
     every DEVSIM edge model whose expression calls B( / dBdx( or kahan3s a Bern* product, and every
     current model, is created INSIDE sg_flux.install_sg_current (a spy on devsim.edge_model, flagged
-    by a wrapper around the kernel). On 6595bde it fails: the classical and unipolar-DG fluxes were
+    by a wrapper around the kernel). On ee0ad04 it fails: the classical and unipolar-DG fluxes were
     spelled in their own modules."""
     import re
     from dynameta.carriers import sg_flux as SG
@@ -205,7 +205,7 @@ def test_every_flux_family_is_built_by_the_one_sg_kernel(monkeypatch):
 
 def _solve_in_child(perturb=None, statistics="legacy"):
     """REF.solve_fixtures() in a child process (the cl_bz circuit cannot be removed from this one --
-    tests/_bipolar_calllog.py), on this tree. statistics (v0.15.0): 'legacy' -- the path the 6595bde arrays
+    tests/_bipolar_calllog.py), on this tree. statistics (v0.15.0): 'legacy' -- the path the ee0ad04 arrays
     pin (the pre-v0.15.0 default); None = this tree's default ('fermi_dirac')."""
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
     if statistics:
@@ -236,7 +236,7 @@ def solved():
 def test_defaults_off_fixtures_equal_6595bde_to_flux_round_off(solved):
     """The defaults-off DEFINITION fixtures (tests/_bipolar_calllog.py: FD diode with DC contacts,
     Boltzmann diode with a circuit contact; tests/_dg_calllog.py: the unipolar DG ITO bar), solved,
-    against the arrays recorded on 6595bde (kahan3 everywhere, tests/data/sgflux_6595bde.json).
+    against the arrays recorded on ee0ad04 (kahan3 everywhere, tests/data/sgflux_6595bde.json).
     The definition digests were RE-RECORDED for the two-Bernoulli flux (2026-11-04), so this is the
     gate that still pins the physics: every field and terminal current within REF.TOL of the old
     tree -- the measured round-off of the flux change times ~10 (REF module docstring). REVISED 2026-11-07
@@ -250,7 +250,7 @@ def test_defaults_off_fixtures_equal_6595bde_to_flux_round_off(solved):
 
 def test_v0150_default_moves_the_fd_and_dg_fixtures():
     """MEASUREMENT of the v0.15.0 default change on these fixtures (statistics unset = 'fermi_dirac' vs the
-    6595bde arrays = the legacy statistics): the Boltzmann (bz) rows are untouched -- they are within the
+    ee0ad04 arrays = the legacy statistics): the Boltzmann (bz) rows are untouched -- they are within the
     gate (their statistics did not change) -- and the FD (fd) and DG ITO (dg) rows move by physics (the FD
     detailed balance, the quasi-field transport). MEASURED values: audit note
     2026-11-06-v0.15-fermi-dirac-mode-complete.md, section 10."""

@@ -494,7 +494,7 @@ def _dump(path):
 # the metric its round-off lives in: Electrons / Holes and every other positive density entry-wise;
 # potentials (Potential, Lambda-like fields that cross 0) and the ssac C / G, noise S, transient t / i
 # and the DC source current relative to the array's max |.|. TOL_C per class, from the MEASURED move
-# (6595bde -> the sign-selected two-Bernoulli tree, 2026-11-04, scipy OpenBLAS) and the measured
+# (ee0ad04 -> the sign-selected two-Bernoulli tree, 2026-11-04, scipy OpenBLAS) and the measured
 # solve-to-solve spread of the SAME code (40 extra converged DC passes + ssac on this diode):
 #  * dc (dc0, dc_fwd, layered_vg*: fields + DC current): moved <= 2.2e-15 -> 1e-13 (45x);
 #  * small_signal (ssac C, noise S, transient t / i): moved <= 3.5e-11 (noise S; C 9.5e-12, i 2.6e-11),

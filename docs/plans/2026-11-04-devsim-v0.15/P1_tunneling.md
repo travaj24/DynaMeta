@@ -1,6 +1,6 @@
 # P1: DEVSIM tunnelling follow-ons, implementation and verification plan (v0.15 candidate)
 
-Plan only. No code was changed. Reference tree: `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14` at `6595bde`.
+Plan only. No code was changed. Reference tree: `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14` at `ee0ad04`.
 
 It covers three deferred items from `docs/audit/2026-11-03-devsim-tunneling.md` section 7:
 

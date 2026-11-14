@@ -9,7 +9,7 @@ recorded digest: equal digests mean the unipolar DG physics DEFINITION is charac
 recorded one (solved cross-version comparison: tests/_sgflux_reference.py). No solve is run (solution
 values depend on the BLAS build); the seed reads the setup-time Electrons values.
 
-History: digest recorded on e46bd25 (BEFORE the bipolar DG landed); re-recorded 2026-11-04 for the
+History: digest recorded on 07587b4 (BEFORE the bipolar DG landed); re-recorded 2026-11-04 for the
 two-Bernoulli SG flux (sg_flux); re-recorded 2026-11-06 for v0.15 item 4.4.4 -- the fixture's wall is
 now setup_dg_insulator_wall (the retired setup_dg_hard_wall rows are gone; that name is a deprecated
 shim onto it, `hard_wall_shim=True` records the shim's log, gated equal) and the seed passes

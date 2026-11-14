@@ -920,7 +920,7 @@ def gate_f3_hooge(alpha=2e-3, v=1e-3, n_bg=4e26, LX=200e-9, A=80e-9 * 80e-9):
     n_eff = n (v/2) coth(v/2) <= n (1 + v^2/12) (v = vdiff_g), so 1 - sqrt(n/n_eff) <= v^2/24 per edge;
     every P1 element couple of a Kuhn tet is >= 0 (no sign-mixed amplification), hence |r - 1| <=
     max v^2/12, plus 4 |I/I_ohm - 1| through the solved state and a 1e-11 summation floor. MEASURED
-    (2026-11-06): -5.80e-9 vs budget 5.81e-9 (the deviation IS the SG density term); 48886a7, with
+    (2026-11-06): -5.80e-9 vs budget 5.81e-9 (the deviation IS the SG density term); be719d5, with
     DEVSIM's circumcentric element couples, +0.125 (the defect this gate exists for)."""
     set_bias._v = {}
     unipolar_3d_resistor()

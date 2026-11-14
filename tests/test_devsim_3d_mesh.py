@@ -3,7 +3,7 @@
 The pre-D2c gmsh mesh had 42-57 % non-well-centred tetrahedra; DEVSIM 2.11 sums the MAGNITUDES of each
 tet's circumcentric dual pieces, so sum NodeVolume over-counted (1.196 x semi, 1.293 x oxide) and
 integrated / sheet charge was ~20 % wrong. The heavy oracles (five topologies, the D1c trap gate G,
-the e46bd25 failure table) are validation/devsim_3d_mesh.py; docs/audit/2026-11-03-devsim-3d-mesh.md."""
+the 07587b4 failure table) are validation/devsim_3d_mesh.py; docs/audit/2026-11-03-devsim-3d-mesh.md."""
 import os
 import sys
 import warnings
@@ -202,7 +202,7 @@ spec = Stacked3DSpec(semi_material="Si", oxide_material="SiO2", lateral_m=4e-9, 
 def build(sol):                       # build_device's mesh/device step without the region physics
     if hasattr(sol, "_create_mesh_device"):
         return sol._create_mesh_device()
-    sol._build_mesh()                 # 6595bde: the same first lines of build_device, verbatim
+    sol._build_mesh()                 # ee0ad04: the same first lines of build_device, verbatim
     ds.create_gmsh_mesh(mesh=sol.mesh_name, file=sol.msh_path)
     for (name, mat, _r, _e) in sol._mesh_regions:
         ds.add_gmsh_region(mesh=sol.mesh_name, gmsh_name=name, region=name, material=mat)
@@ -239,7 +239,7 @@ print("BAD", bad, "OF", iters, "EXPECTED", expected, flush=True)
 
 def test_two_processes_building_default_path_3d_devices_get_their_own_meshes(tmp_path):
     """The default msh_path was ONE fixed file (~/.dynameta/_devsim3d.msh) for every process. MEASURED
-    on 6595bde (this harness, 100 builds per process): 1 build read the OTHER process's mesh and 199/200
+    on ee0ad04 (this harness, 100 builds per process): 1 build read the OTHER process's mesh and 199/200
     died with 'DEVSIM FATAL'; with 25 builds each this gate fails there. Now the default tensor mesh goes
     to DEVSIM in memory, so two concurrent processes with different devices both get their own mesh in
     every build (MEASURED 0/100 + 0/100)."""

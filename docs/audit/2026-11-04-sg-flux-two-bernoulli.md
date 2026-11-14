@@ -1,6 +1,6 @@
 # One Scharfetter-Gummel flux kernel, sign-selected two-Bernoulli bracket (2026-11-04)
 
-Branch `wip/dv_sgflux` (from `6595bde`, head of `feat/devsim-2.11-v0.14`). User decision 2026-11-04:
+Branch `wip/dv_sgflux` (from `ee0ad04`, head of `feat/devsim-2.11-v0.14`). User decision 2026-11-04:
 replace every `kahan3` B(v) + v flux with an accurate form, accuracy over byte-identity. DEVSIM 2.11.2,
 scipy's OpenBLAS (the `devsim_env` pin), Windows. "Measured" = run on this box; "inferred" says so.
 
@@ -14,7 +14,7 @@ scipy's OpenBLAS (the `devsim_env` pin), Windows. "Measured" = run on this box; 
   `_clamped_bernoulli` and `_upper_clamped_bernoulli` are gone.
 * **The form.** Both B(v) and B(-v) are evaluated (DEVSIM's accurate `B`); the flux bracket picks,
   by the sign of v, the spelling that uses the Bernoulli identity only on the non-negative argument
-  (section 1.3). Not the plain bracket `n@n1 B(-v) - n@n0 B(v)` of a4f00d9: same large-|v| accuracy,
+  (section 1.3). Not the plain bracket `n@n1 B(-v) - n@n0 B(v)` of e36e808: same large-|v| accuracy,
   but measurably noisier near equilibrium (section 1.3) -- the one deliberate deviation from the
   literal decision; kept by the coordinator's decision (2026-11-04).
 * **Clamps.** Classical DD unclamped (as its B(v) always was); DG fluxes B(min(arg, 200)) only; the
@@ -41,10 +41,10 @@ of two O(|v|) numbers leaving B(-v) ~ |v| e^-|v|: relative error ~ eps |v| e^|v|
 | DEVSIM B(-v), dBdx(-v) | <= 3.1e-16 at every v in 0.3 .. 60 | | | | | | | | | |
 
 On the actual flux edges (one 1 nm edge per family, each term isolated, `tests/test_devsim_sg_flux.py`)
-the 6595bde code measured, worst value / Jacobian error: |v| = 40: 1.0 / 0.18-0.64; 33: 1.1-2.3e-2 /
+the ee0ad04 code measured, worst value / Jacobian error: |v| = 40: 1.0 / 0.18-0.64; 33: 1.1-2.3e-2 /
 4.4e-5-9.7e-4; 27.6: 0.7-1.6e-4 / 4.1e-8-4.6e-7; 21: 0.6-1.3e-7 / 3.2e-10-8.0e-9; 10: 0.5-2.3e-12 /
 1.1-2.3e-13 (unipolar DD, bipolar DD n and p, unipolar DG). The bipolar DG already used two
-Bernoullis (a4f00d9) and measured <= 3.3e-16.
+Bernoullis (e36e808) and measured <= 3.3e-16.
 
 ### 1.2 DEVSIM's B and dBdx (measured)
 
@@ -57,7 +57,7 @@ Bernoullis (a4f00d9) and measured <= 3.3e-16.
 
 ### 1.3 Which two-Bernoulli bracket: plain vs sign-selected
 
-Plain (a4f00d9): `n@n1 B(-v) - n@n0 B(v)`. Sign-selected (shipped):
+Plain (e36e808): `n@n1 B(-v) - n@n0 B(v)`. Sign-selected (shipped):
 
     electrons:  v >= 0:  kahan3(n@n1 B(v),  n@n1 v,      -n@n0 B(v))      [B(-v) = B(v) + v]
                 v <  0:  kahan3(n@n1 B(-v), -n@n0 B(-v), n@n0 v)        [B(v) = B(-v) - v]
@@ -75,7 +75,7 @@ extra pass):
 
 | form | ssac G(1 Hz) | ssac G(1 MHz) | DC floor |
 |---|---|---|---|
-| kahan3 (6595bde) | 3.2e-4 | 1.5e-7 | 1.6e-15 |
+| kahan3 (ee0ad04) | 3.2e-4 | 1.5e-7 | 1.6e-15 |
 | plain two-Bernoulli | **2.2e-3** | **1.1e-6** | 3.3e-15 |
 | sign-selected (shipped) | 5.7e-4 | 2.6e-7 | 8.9e-16 |
 
@@ -87,7 +87,7 @@ in ssac noise is the ulp-level step between the branches as v changes sign in ne
 ### 1.4 Clamping (measured)
 
 * Classical DD: none. Its B(v) was never clamped, and 1.2 shows none is needed.
-* DG: `B(min(arg, 200))`, kept from a4f00d9. It moves B by < 2.8e-85 where it binds (a value no-op),
+* DG: `B(min(arg, 200))`, kept from e36e808. It moves B by < 2.8e-85 where it binds (a value no-op),
   belt-and-braces for a hard wall's log-singular Lambda in Newton transients.
 * Never a lower clamp. Under the plain bracket the unipolar DG's two-sided clamp would freeze both
   Bernoullis for |v| > 200 and zero a wall node's Jacobian column (measured 2026-11-03 on the bipolar
@@ -100,7 +100,7 @@ Derivatives are DEVSIM's `simplify(diff(...))` of the new string (`eq_registry.e
 derivative of an `ifelse` is the `ifelse` of the branch derivatives). Gated against mpmath (1.1 row,
 <= 8.9e-16 for |v| >= 0.1). Newton iteration counts, this tree vs the reference, every solve:
 
-| case | 6595bde | this tree |
+| case | ee0ad04 | this tree |
 |---|---|---|
 | `tests/_sgflux_reference` cl_fd (FD diode: equilibrium, 0..+0.4, ..-0.5 V) | 18 7 7 7 7 8 8 9 9 | identical |
 | cl_bz (Boltzmann, circuit contact) | 20 8 8 8 8 8 9 9 10 | identical |
@@ -128,15 +128,15 @@ Poisson charge `kahan3(Holes, -Electrons, N)` (a sum, not a Bernoulli); `noise_a
 (numpy `x/expm1(x)`, the SG-segment noise weights `n0 B(v) + n1 B(-v)`, a sum of positives with no
 cancellation). Consumers inherit the kernel by model name (see "What changed").
 
-## 3. Gates (each fails on 6595bde)
+## 3. Gates (each fails on ee0ad04)
 
-| gate | where | this tree | on 6595bde |
+| gate | where | this tree | on ee0ad04 |
 |---|---|---|---|
 | value + Jacobian vs mpmath, 6 families, abs(v) <= 40, 1e-13 | `tests/test_devsim_sg_flux.py::test_sg_flux_value_and_jacobian_are_accurate_at_large_drift` | <= 3.3e-16 / 8.9e-16 | 4 families FAIL (1.0 / 0.18-0.64) |
 | every family built inside the kernel (run-time spy) | `::test_every_flux_family_is_built_by_the_one_sg_kernel` | pass | FAIL (no `sg_flux`) |
-| defaults-off fixtures vs 6595bde, round-off tolerance | `::test_defaults_off_fixtures_equal_6595bde_to_flux_round_off` | pass | trivially equal (it is the reference) |
+| defaults-off fixtures vs ee0ad04, round-off tolerance | `::test_defaults_off_fixtures_equal_6595bde_to_flux_round_off` | pass | trivially equal (it is the reference) |
 | the same gate catches mu_n x (1 + 1e-6) | `::test_cross_version_gate_still_catches_physics` | fails as required | -- |
-| bipolar DG flux (existing) | `tests/test_bipolar_density_gradient.py::test_dg_edge_flux_is_accurate_at_large_drift` | 3.3e-16 / 2.2e-16 | passed (a4f00d9) |
+| bipolar DG flux (existing) | `tests/test_bipolar_density_gradient.py::test_dg_edge_flux_is_accurate_at_large_drift` | 3.3e-16 / 2.2e-16 | passed (e36e808) |
 | validation GATE A / A' / B / C | `validation/sg_flux_cross_version.py` | PASS | A fails (4 families); A' is the old strings failing in this tree |
 
 ## 4. Byte-identity guards converted
@@ -148,10 +148,10 @@ round-off of the change; each still fails on a real physics change.
 | guard | old form | new form | tolerance and derivation |
 |---|---|---|---|
 | `tests/_bipolar_calllog.py` digest (`test_bipolar_recombination_bgn_ionization`, `test_bipolar_density_gradient`) | sha256 `ac63536e...` (217 calls), v0.13.0 | sha256 `35427315...` (237 calls), re-recorded 2026-11-04. The old and new logs were diffed: they differ ONLY in `ElectronCurrent` / `HoleCurrent` (+ derivatives) and the new `Bern_g_m` / `Bern_gp_m` | definition: exact |
-| `tests/_dg_calllog.py` digest (`test_bipolar_density_gradient`) | sha256 `6bcbe925...` (127 calls), e46bd25 | sha256 `bc52c792...` (139 calls); differs only in the flux models, `Bern_g_dg`'s clamp and the new `Bern_g_m` / `Bern_g_dg_m` | definition: exact |
-| numeric half of both digests | -- | `tests/test_devsim_sg_flux.py::test_defaults_off_fixtures_equal_6595bde_to_flux_round_off`: the calllog fixtures SOLVED (FD diode, Boltzmann circuit diode, DG hard-wall bar; 21 arrays) vs `tests/data/sgflux_6595bde.json`, recorded on 6595bde (`tests/_sgflux_reference.py --record`) | Densities entry-wise and potentials relative to their max: measured 7.7e-15 / 1.9e-16 -> 1e-13 (13x). Currents: abs(dI) <= 1e-11 abs(I) + 4 eps T, T = q mu V_t c / h of the contact edge. A majority-carrier `get_contact_current` is eps T noise in EITHER spelling (the FD diode's p-contact hole current moved 0.15 / 0.24 eps T = 2.1e-5 / 5.4e-2 RELATIVE); every other current <= 6.5e-13 relative (15x / 9x margins). mu_n x (1 + 1e-6) fails it (`test_cross_version_gate_still_catches_physics`; minority electrons move 4e-7) |
-| `validation/traps_oracles.py` gate F "byte-identical vs main" | sha256 of 5 arrays x 3 fixtures, main 5cbd998 vs branch | numeric per array (`cross_version_rows`, `TOL_F`); hashes still printed | Densities entry-wise, Potential / its max, PotentialNodeCharge / q(n+p+abs N), USRH / its term size (n p + n_i^2)/(taup(n+n1)+taun(p+p1)). Measured worst 4.1e-15 (6595bde reproduced main's sha256 exactly) -> 1e-13 (24x) |
-| `validation/extended_precision.py` GATE C (manual `--hashes` across commits) | 7 sha256 fingerprints | `--compare DIR` (+ `--dump`): the same arrays, numerically, per class (`TOL_C`) | dc 1e-13 (measured 2.2e-15); small-signal C / noise S / transient 1e-9 (measured 3.5e-11; same-code C spread ~4e-11); ssac G 1e-4 of max G (measured 2.6e-6: Re Y(1 Hz) is round-off in double in both forms -- repeat spread 3-6e-4, 2e-4..3e-3 off the extended DC dI/dV). PASS vs 6595bde |
+| `tests/_dg_calllog.py` digest (`test_bipolar_density_gradient`) | sha256 `6bcbe925...` (127 calls), 07587b4 | sha256 `bc52c792...` (139 calls); differs only in the flux models, `Bern_g_dg`'s clamp and the new `Bern_g_m` / `Bern_g_dg_m` | definition: exact |
+| numeric half of both digests | -- | `tests/test_devsim_sg_flux.py::test_defaults_off_fixtures_equal_6595bde_to_flux_round_off`: the calllog fixtures SOLVED (FD diode, Boltzmann circuit diode, DG hard-wall bar; 21 arrays) vs `tests/data/sgflux_6595bde.json`, recorded on ee0ad04 (`tests/_sgflux_reference.py --record`) | Densities entry-wise and potentials relative to their max: measured 7.7e-15 / 1.9e-16 -> 1e-13 (13x). Currents: abs(dI) <= 1e-11 abs(I) + 4 eps T, T = q mu V_t c / h of the contact edge. A majority-carrier `get_contact_current` is eps T noise in EITHER spelling (the FD diode's p-contact hole current moved 0.15 / 0.24 eps T = 2.1e-5 / 5.4e-2 RELATIVE); every other current <= 6.5e-13 relative (15x / 9x margins). mu_n x (1 + 1e-6) fails it (`test_cross_version_gate_still_catches_physics`; minority electrons move 4e-7) |
+| `validation/traps_oracles.py` gate F "byte-identical vs main" | sha256 of 5 arrays x 3 fixtures, main 2db6a00 vs branch | numeric per array (`cross_version_rows`, `TOL_F`); hashes still printed | Densities entry-wise, Potential / its max, PotentialNodeCharge / q(n+p+abs N), USRH / its term size (n p + n_i^2)/(taup(n+n1)+taun(p+p1)). Measured worst 4.1e-15 (ee0ad04 reproduced main's sha256 exactly) -> 1e-13 (24x) |
+| `validation/extended_precision.py` GATE C (manual `--hashes` across commits) | 7 sha256 fingerprints | `--compare DIR` (+ `--dump`): the same arrays, numerically, per class (`TOL_C`) | dc 1e-13 (measured 2.2e-15); small-signal C / noise S / transient 1e-9 (measured 3.5e-11; same-code C spread ~4e-11); ssac G 1e-4 of max G (measured 2.6e-6: Re Y(1 Hz) is round-off in double in both forms -- repeat spread 3-6e-4, 2e-4..3e-3 off the extended DC dI/dV). PASS vs ee0ad04 |
 | integration doc sec. 4 "D1d solution arrays" sha256 (script never committed) | sha256 `a500ca93...`, main vs branch | `validation/sg_flux_cross_version.py` GATE B: `bipolar_diode` FD at +0.3 / -0.5 V and `bipolar_diode_2d` via `LayeredDevsimBuilder` at +0.3 / -0.4 V, 16 arrays, main vs this tree | fields 1e-11 (measured <= 6.5e-15); currents 1e-11 abs(I) + 4 eps T, T an upper bound of the region's edge terms |
 | integration doc sec. 4 table; D2b doc fingerprint table | recorded hashes | dated notes pointing here | -- |
 
@@ -170,10 +170,10 @@ plain bracket gives 3.0e-15 / 1.1e-13 on this tree. The classical seed state dif
 both values are the double readout floor of psi + Lambda - V_t ln(n/n_i) at abs(Lambda_wall) = 0.71 V
 (the n p check is that error / V_t). Docstring updated.
 
-**Validations.** Every printed number compared token by token, 6595bde vs this tree, threshold 1e-12.
-A 62c4097 vs 6595bde run gives the run-to-run baseline: only wall times differ.
+**Validations.** Every printed number compared token by token, ee0ad04 vs this tree, threshold 1e-12.
+A 9aa0db6 vs ee0ad04 run gives the run-to-run baseline: only wall times differ.
 
-| validation | quantity | 6595bde | this tree | explanation |
+| validation | quantity | ee0ad04 | this tree | explanation |
 |---|---|---|---|---|
 | bipolar_density_gradient GATE E | max abs(phi_n); n p relation | 3.3e-16 V; 7.1e-15 | 3.7e-15 V; 1.5e-13 | double readout floor (above) |
 | devsim_noise B | FDT residuals S/(4kT Re Y) - 1, low f | 4.6-7.1e-6 | 0.4-5.4e-6 | Re Y at low f is ssac round-off (section 1.3); gate 1e-4 |
@@ -190,18 +190,18 @@ devsim validations is identical to all printed digits.
 ## 6. Where the old flux was materially wrong
 
 Max abs(v) per edge over every converged solve of the devsim validations (read-only
-instrumentation on the 6595bde run; fields agree with this tree to 1e-14): classical DD <= 7.0
+instrumentation on the ee0ad04 run; fields agree with this tree to 1e-14): classical DD <= 7.0
 everywhere (impact_ionization_isub 6.99, bipolar_diode_2d 3.09, gated_dd_2d 2.93,
 contact_current_drivers 2.52, everything else < 2.1). kahan3's B(v) + v error at abs(v) = 7 is ~ eps e^7
 = 2.4e-13 of the B(-v) term: **the old classical flux was never materially wrong on any validation
 fixture.** The only edges past -v = 10 are the bipolar DG MOS wall (-v = 24.7,
-`bipolar_density_gradient`), fixed by a4f00d9.
+`bipolar_density_gradient`), fixed by e36e808.
 
 Materially wrong (measured):
-1. **Bipolar DG insulator walls** (a4f00d9, 2026-11-03): wall edge at -v ~ 27.6, wall Lambda 1.7e-10 V
+1. **Bipolar DG insulator walls** (e36e808, 2026-11-03): wall edge at -v ~ 27.6, wall Lambda 1.7e-10 V
    off, GATE C in a period-3 Newton cycle. Fixed before this change.
 2. **Unipolar DG + `setup_dg_insulator_wall`: CONFIRMED.** 100 nm ITO bar at 4e26, u_floor 1e-6,
-   frozen psi, gamma ramp to 1 at REL 1e-5: the wall edge sits at v = -26.15. 6595bde puts the wall
+   frozen psi, gamma ramp to 1 at REL 1e-5: the wall edge sits at v = -26.15. ee0ad04 puts the wall
    node's Lambda at -2.567079886 V, this tree at -2.567076685 V; the extended-precision solve gives
    -2.567076685 V (both trees agree there to 3e-28). Old double error 3.2e-6 V (1.25e-6 relative), new
    1.7e-16. Only the wall node moves (Lambda[1], n[1] identical to 1e-16): its Lambda is fixed by that
@@ -217,15 +217,15 @@ Materially wrong (measured):
 ## 7. Verification
 
 * `pytest -n 2` over the 53 test files that touch devsim or the carriers modules (the 52 of the
-  6595bde count + `test_devsim_sg_flux.py`): **989 passed, 3 xfailed** (the same three strict
-  xfails), 35 min. 6595bde: 976 passed, 3 xfailed (52 files).
+  ee0ad04 count + `test_devsim_sg_flux.py`): **989 passed, 3 xfailed** (the same three strict
+  xfails), 35 min. ee0ad04: 976 passed, 3 xfailed (52 files).
 * `python -m validation.run_all --tier full` over the 33 devsim validations + the new
   `sg_flux_cross_version`: **34/34 PASS** after one environmental rerun. In the first run
-  `carriers_3d_dd` failed at `create_device`: the concurrent 6595bde comparison run wrote the same
+  `carriers_3d_dd` failed at `create_device`: the concurrent ee0ad04 comparison run wrote the same
   hard-coded `~/.dynameta/_devsim3d.msh` at the same moment (shared-path collision; already fixed on the
-  integration branch by 4ff95c2, the default tensor mesh goes to DEVSIM in memory -- not touched here).
+  integration branch by 3c91e8f, the default tensor mesh goes to DEVSIM in memory -- not touched here).
   The 3-D scripts (`carriers_3d*`, `devsim_3d_mesh`; 11) were rerun serially: 11/11 PASS, every printed
-  value identical to 6595bde.
+  value identical to ee0ad04.
 * `ruff check dynameta validation tests`: clean.
 
 ## 8. Open questions (user decisions)

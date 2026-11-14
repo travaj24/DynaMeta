@@ -5,8 +5,8 @@ References are independent of the code under test: closed forms re-derived here,
 intersection written here (no walking), the 1-D model (tests/test_btbt_nonlocal_kernels.py gates it against
 Sentaurus' equations) and that file's scipy continuum oracle.
 
-OLD CODE (ec67290): carriers/btbt_nonlocal_2d does not exist and btbt_nonlocal has no path_rates_2d -- every
-test fails at import (MEASURED by running this file against an export of ec67290).
+OLD CODE (22b1ba7): carriers/btbt_nonlocal_2d does not exist and btbt_nonlocal has no path_rates_2d -- every
+test fails at import (MEASURED by running this file against an export of 22b1ba7).
 
   W1   WALKER: the numba walker's points (path coordinate s and band value v) == a brute-force intersection
        of the ray with EVERY mesh edge (sorted; ray-inside checks by point location), on random Delaunay

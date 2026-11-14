@@ -1,20 +1,20 @@
 # DEVSIM phase integration: D1b + D1c + D1d + D2a + D1a consolidated (v0.14.0)
 
-Branch `feat/devsim-2.11-v0.14` (worktree `DynaMeta_wt/dv_integ`). Merged on top of D1b (`d3a7012`,
+Branch `feat/devsim-2.11-v0.14` (worktree `DynaMeta_wt/dv_integ`). Merged on top of D1b (`232ca9b`,
 already on the branch):
 
 | Commit | What |
 |---|---|
-| `71978e9` | merge `wip/dv_tunnel` (D1d: BTBT in the Newton, post-processed oxide tunneling) |
-| `2e4b8ee` | merge `wip/dv_traps` (D1c: SRH at E_t, multi-level trapped charge, interface traps) |
-| `6baa9a6` | merge `wip/dv_noise` (D2a: impedance-field small-signal noise) |
-| `b5e8e47` | consolidation: one term mechanism, one SRH kernel, one contact rule, noise on the same inventory, composition gates |
-| `da7614f` | merge `wip/dv_hetero` (D1a: Anderson alignment, thermionic / continuous-QFL heterointerfaces), with the contact-rule and BGN-interface composition (section 2.8) |
+| `d855d39` | merge `wip/dv_tunnel` (D1d: BTBT in the Newton, post-processed oxide tunneling) |
+| `098750d` | merge `wip/dv_traps` (D1c: SRH at E_t, multi-level trapped charge, interface traps) |
+| `ff9d06c` | merge `wip/dv_noise` (D2a: impedance-field small-signal noise) |
+| `63c947a` | consolidation: one term mechanism, one SRH kernel, one contact rule, noise on the same inventory, composition gates |
+| `776bf2d` | merge `wip/dv_hetero` (D1a: Anderson alignment, thermionic / continuous-QFL heterointerfaces), with the contact-rule and BGN-interface composition (section 2.8) |
 | (last commit) | the D1a x D1b / D2a composition gates, the hetero noise builder, this note's final counts |
 
 The first three merge commits are plain unions of the conflicting hunks: keyword lists, dataclass
 fields and builder threading, each with its own validation. The design work for D1b/D1c/D1d/D2a is in
-`b5e8e47`; the D1a composition is in its merge commit `da7614f`.
+`63c947a`; the D1a composition is in its merge commit `776bf2d`.
 
 ## 1. What collided
 
@@ -243,7 +243,7 @@ still pass.
   was wrong at T != T_REF. The bulk installer uses the region's `V_t`; interface traps read the
   region parameter. For E = 0, or with T_K unset, the arithmetic is unchanged.
 
-### 2.8 D1a heterojunctions x D1b BGN x the contact rule (merge `da7614f`)
+### 2.8 D1a heterojunctions x D1b BGN x the contact rule (merge `776bf2d`)
 
 **One contact rule.** `physics_bipolar_dd.contact_potential_residual` is used by both the DC and the
 circuit bipolar recipes:
@@ -355,14 +355,14 @@ It is solved at 0.5 V reverse.
 | noise FDT, continuous-QFL heterointerface | the D2a FDT diode as a heterojunction (n_i 1e19 / 3e18, chi step 0.05 eV, s = 18.9 mV on the circuit contact), 1 Hz - 1 GHz | <= 5.7e-6 (gate 1e-4). Re Y 3.06 vs 6.78 (homojunction). |
 | noise FDT, thermionic heterointerface | **strict xfail (LIMIT)**: no noise source for the TE fluxterm | -0.69 at 1 Hz with A* x 1e-6 |
 
-## 4. Defaults-off guards (all against main `5cbd998`, untouched checkout; run on the final tree)
+## 4. Defaults-off guards (all against main `2db6a00`, untouched checkout; run on the final tree)
 
 > **2026-11-04: these byte-identity guards were converted on purpose.** The ONE SG flux kernel
 > (`dynameta.carriers.sg_flux`, user decision) changed every Scharfetter-Gummel flux string, so the
 > defaults-off definition and results can no longer be byte-identical to main. Each guard below now
 > pins (a) the re-recorded definition digest and (b) a NUMERIC comparison against the pre-change tree
 > at a tolerance derived from the change's measured round-off: the call-log digests ->
-> `tests/test_devsim_sg_flux.py` (fixtures solved vs 6595bde); D1d's solution arrays ->
+> `tests/test_devsim_sg_flux.py` (fixtures solved vs ee0ad04); D1d's solution arrays ->
 > `validation/sg_flux_cross_version.py` GATE B (vs main); D1c gate F -> numeric (`TOL_F`).
 > docs/audit/2026-11-04-sg-flux-two-bernoulli.md section 4. The table records the 2026-11-03 state.
 
@@ -426,7 +426,7 @@ No test in the files above pinned the old 2-D zero-built-in-potential result. No
    order >= 1.7 and abs(gap) <= 2 C_inf h^2.
 7. **Noise source for thermionic-emission heterointerfaces** (section 2.8): the interface shot noise
    2q(J_0->1 + J_1->0) is not in the source set. The strict xfail pins it.
-8. **Heterointerfaces at T_K != T_REF**: RESOLVED by the D1a temperature follow-up (merge `f7c82db`,
+8. **Heterointerfaces at T_K != T_REF**: RESOLVED by the D1a temperature follow-up (merge `e55ce28`,
    wip/dv_hetero2; heterojunction doc section 4b). The interface now runs at the regions' V_t (one
    source, `BipolarOptions.T_K`): barrier offsets, the BGN-shifted tops (the BGN refusal is gone),
    Richardson A* T^2, the Anderson frame and the band-gap check, with the bipolar N_c/N_v from the
@@ -440,16 +440,16 @@ No test in the files above pinned the old 2-D zero-built-in-potential result. No
 
 | Merge | What | Doc |
 |---|---|---|
-| `1385d31` wip/dv_core | devsim >= 2.11.2; `carriers.devsim_env` is the one devsim import home (BLAS pinned before the first import; AST gate); `reset_devsim()` in `ac_capacitance`; `DEVSIM_NEW_SYMBOLIC=1` with MKL-PARDISO; Fermi-Jacobian `simplify()` cache | `2026-11-03-devsim-2.11-core.md` |
-| `c81cd3f` wip/dv_mesh3d | `Stacked3DSpec.mesher="tensor"` default (Kuhn tets: DEVSIM's magnitude-summed couples are exact, 9e-16); circumcentric 3-D interface trap areas; 3-D element impact ionization; `mesher="gmsh"` warns | `2026-11-03-devsim-3d-mesh.md` |
-| `6991e99` wip/dv_blasfix | R26/R27 slab fixture was a floating body (DC Jacobian rank-deficient by one at every G); bipolar DG wall-edge flux by two Bernoulli calls (kahan3 B(v)+v cancelled); DG validation in the extended Newton | recombination doc, DG doc section 1.6 |
+| `abd3507` wip/dv_core | devsim >= 2.11.2; `carriers.devsim_env` is the one devsim import home (BLAS pinned before the first import; AST gate); `reset_devsim()` in `ac_capacitance`; `DEVSIM_NEW_SYMBOLIC=1` with MKL-PARDISO; Fermi-Jacobian `simplify()` cache | `2026-11-03-devsim-2.11-core.md` |
+| `25d8c63` wip/dv_mesh3d | `Stacked3DSpec.mesher="tensor"` default (Kuhn tets: DEVSIM's magnitude-summed couples are exact, 9e-16); circumcentric 3-D interface trap areas; 3-D element impact ionization; `mesher="gmsh"` warns | `2026-11-03-devsim-3d-mesh.md` |
+| `983beb5` wip/dv_blasfix | R26/R27 slab fixture was a floating body (DC Jacobian rank-deficient by one at every G); bipolar DG wall-edge flux by two Bernoulli calls (kahan3 B(v)+v cancelled); DG validation in the extended Newton | recombination doc, DG doc section 1.6 |
 
 Integration fixes made at the merges:
 * The D1/D2 modules and validations imported devsim directly; routed through `devsim_env`
   (extended_precision, tunneling, impact_ionization; 6 validations). The one string that is run on
-  main too (`traps_oracles._FIXTURE`, gate F) keeps its plain import (`3a56a0d`).
+  main too (`traps_oracles._FIXTURE`, gate F) keeps its plain import (`02f8188`).
 * `validation/devsim_noise.py` integrates through `core.numerics.trapz` (numpy >= 1.24 floor gate).
-* `tests/_bipolar_calllog.record_call_log()` records in a CHILD process (`62c4097`). Its circuit-contact
+* `tests/_bipolar_calllog.record_call_log()` records in a CHILD process (`9aa0db6`). Its circuit-contact
   fixture adds a process-global DEVSIM circuit that the process cannot drop (devsim 2.11.2, MEASURED):
   a second recording died on "cl_n already exists" and left device cl_bz behind (7 unrelated DG /
   Gummel / R26 failures on one xdist worker under `-n 3`); `delete_circuit()` raises an empty error
@@ -462,11 +462,11 @@ wall-edge cancellation plus criteria finer than double). Both now give the same 
 libraries; new gates (`test_slab_is_well_posed`, `test_dg_edge_flux_is_accurate_at_large_drift`)
 fail on the old code under both.
 
-**Final tree `3a56a0d`** (devsim 2.11.2, scipy-OpenBLAS pin, Windows):
+**Final tree `02f8188`** (devsim 2.11.2, scipy-OpenBLAS pin, Windows):
 * tests: every file that touches devsim or carriers (52 files, `-n 3`): **976 passed, 3 xfailed**
   (strict: charged traps ssac at high f, TE heterointerface noise, extended-precision ssac).
 * validations: the 33 devsim validations, `run_all --tier full`: **33/33 PASS** (traps_oracles 9/9
-  after `3a56a0d`; `impact_ionization_isub` 1463 s is the longest).
+  after `02f8188`; `impact_ionization_isub` 1463 s is the longest).
 
 Open decisions added by these merges: D0 doc "Open questions" 1-2 and 4; D2c doc section 8; DG doc
 section 6 items 5-6.

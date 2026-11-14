@@ -258,7 +258,7 @@ def umfpack_2by2_guard() -> dict:
     quasi-equilibrium suites <= 1.070, heterojunction 1.000); 1.291-117 on every matrix where it filled in
     (actual 4.2-45x). The bound is computed from the pattern before any numeric pivoting, and the decision
     costs one extra symbolic step per fresh symbolic factorization that AUTO sent to 2-by-2, as before.
-    v1 (5ee2c8d .. e29fbd3) replaced EVERY 2-by-2 choice; on the 2-D bipolar diode (18,357 nodes) that cost
+    v1 (9e1c427 .. 4cd3af7) replaced EVERY 2-by-2 choice; on the 2-D bipolar diode (18,357 nodes) that cost
     ~1000x backward error (9.6e-8 against 9.0e-11) for nothing (the factor time was the same within the
     run-to-run spread).
 

@@ -10,7 +10,7 @@ of E4 (1131 nodes) whose ORACLE -- the Shockley + Sah-Noyce-Shockley current of 
 is written out in THIS file with scipy.constants / scipy.integrate.quad (re-derived, not imported from
 validation/extended_precision.py or from DynaMeta).
 
-FAILS ON OLD CODE (40b1ede): geometry exports no CarrierSpec (ImportError at collection), Design has no
+FAILS ON OLD CODE (bd925ac): geometry exports no CarrierSpec (ImportError at collection), Design has no
 `carriers` field (TypeError), and LayeredDevsimBuilder(design) ignores any design setting (E3's spy sees 0
 enable calls, E4's double-precision current is 3e4x off the oracle). Runtime of the fast tests: ~25 s
 serial (box A, loaded).

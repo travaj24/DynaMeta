@@ -9,7 +9,7 @@ whose 1-D device builders and closed forms this script reuses so the two cannot 
   GATE D  surface recombination velocity S == sigma v_th N_it (three decades of N_it)
   GATE E  OLD PHYSICS FAILS every one of A-D: the same oracles run with the traps OFF (which is the
           pre-D1c code, to round-off -- gate F) miss by the margins printed; and the pre-D1c MODULE
-          (main, 5cbd998, via a subprocess on its own tree) cannot even express them (ImportError /
+          (main, 2db6a00, via a subprocess on its own tree) cannot even express them (ImportError /
           TypeError).
   GATE F  CROSS-VERSION IDENTITY: a 1-D Si diode (FD on, forward ramp), a 1-D MOS cap (gate
           sweep into inversion onset) and a 2-D LayeredDevsimBuilder bipolar bar, solved on main and
@@ -317,9 +317,9 @@ def _run_fixture(tree, default=False):
 # metric where its round-off lives: densities entry-wise relative; Potential relative to its max |.|;
 # PotentialNodeCharge relative to q (n + p + |N|) (its three terms cancel in neutral regions); USRH
 # relative to its term size (n p + n_i^2) / (taup (n + n1) + taun (p + p1)) (n p ~ n_i^2 near
-# equilibrium). MEASURED main 5cbd998 vs the two-Bernoulli tree (2026-11-04, scipy OpenBLAS): worst
+# equilibrium). MEASURED main 2db6a00 vs the two-Bernoulli tree (2026-11-04, scipy OpenBLAS): worst
 # 4.1e-15 (diode USRH; diode Electrons 3.9e-15, Potential <= 1.3e-16, PotentialNodeCharge <=
-# 2.2e-16), and 6595bde reproduced main's three sha256 exactly. TOL_F = 1e-13 (24x the worst); any
+# 2.2e-16), and ee0ad04 reproduced main's three sha256 exactly. TOL_F = 1e-13 (24x the worst); any
 # physics change of relative size >~ 1e-12 in the traps-OFF definition still fails it.
 TOL_F = 1e-13
 _Q = 1.602176634e-19

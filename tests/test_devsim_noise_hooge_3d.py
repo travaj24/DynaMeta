@@ -28,7 +28,7 @@ P1 couples mix signs), and S_T ~ V_T, so
 plus 4 |I/I_ohm - 1| (S ~ J^2 against the measured I^2) and a 1e-11 summation floor (~1e3 elements).
 
 MEASURED (dev box, 2026-11-06; S f N / (alpha I^2) - 1 at 1 Hz; the derived budget):
-                                                 48886a7 (circumcentric)   this fix     budget
+                                                 be719d5 (circumcentric)   this fix     budget
   Kuhn bar 10x4x4 cells, current along x            +0.1249999935        -5.8015e-9   5.812e-9
   the same device rigidly rotated                   +0.1249999935        -5.8015e-9   5.812e-9
   rotated-lattice Delaunay 8x4x4, exact geometry    +0.0547369783        +2.7101e-9   1.155e-7
@@ -249,7 +249,7 @@ def test_hooge_3d_kuhn_bar_closed_form(monkeypatch):
     10 x 4 x 4 cells of 20 nm, 960 tets), axis-aligned current, and the SAME device rigidly rotated
     (the P1 couples come from the node coordinates: frame invariance). MEASURED: -5.80e-9 both (budget
     5.81e-9: v_max^2/12 of the degenerate-FD SG argument -- the deviation IS that term, kappa = 1);
-    48886a7 (circumcentric couples): +0.125 both. Perturbation (couples on the wrong edges): +0.770."""
+    be719d5 (circumcentric couples): +0.125 both. Perturbation (couples on the wrong edges): +0.770."""
     P, T, ext = kuhn_box((10, 4, 4))
     out = {}
     for case, rot in (("aligned", None), ("rotated", _rot3())):
@@ -269,7 +269,7 @@ def test_hooge_3d_oblique_non_well_centred_exact_geometry(monkeypatch):
     """Current OBLIQUE to every edge on a non-well-centred 3-D mesh: rotated-lattice Delaunay box
     (8 x 4 x 4 cells of 20 nm, boundary faces with obtuse triangles), with devsim_geometry.
     apply_exact_geometry(negative='warn') so DEVSIM's own DC / adjoint solve is exact (patch test)
-    and the fixture checks hold. MEASURED: +2.71e-9 (budget 1.16e-7); 48886a7 (circumcentric couples,
+    and the fixture checks hold. MEASURED: +2.71e-9 (budget 1.16e-7); be719d5 (circumcentric couples,
     signed after the correction): +0.0547; perturbation (couples on the wrong edges): +1.299."""
     P, T, ext = rotated_lattice_box((8, 4, 4))
     r, budget, chk = _hooge_ratio("hk3_obl", P, T, ext, exact=True)

@@ -10,7 +10,7 @@ bitwise equal. Which run differs is a round-off accident (one leftover did not m
 differ in three tries), so this file gates the deterministic part: the leftover is MOVED by an unrelated
 solve, and a marked test runs where no leftover exists.
 
-FAILS ON THE OLD CODE (c6aa0a4: no marker, no hook): the marker is unknown (--strict-markers: collection
+FAILS ON THE OLD CODE (26a6d5f: no marker, no hook): the marker is unknown (--strict-markers: collection
 error), and with the marker merely registered the isolated test sees the leftover device and fails.
 Runtime ~25 s (two child interpreters).
 """
