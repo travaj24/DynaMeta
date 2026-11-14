@@ -1,7 +1,7 @@
 # Extended-precision (128-bit) DEVSIM solves
 
 DEVSIM phase, release v0.14.0, workstream D2b, branch `wip/dv_extprec` (off `feat/devsim-2.11-v0.14`
-at 6baa9a6, after the noise merge). New capability: one opt-in switch that builds a device with
+at ff9d06c, after the noise merge). New capability: one opt-in switch that builds a device with
 DEVSIM's 128-bit model evaluation and equation assembly, and solves it with DEVSIM's extended Newton.
 
 **Bottom line.**
@@ -167,7 +167,7 @@ current at V = 0.
 | B | p+n, N_A 1e25 / N_D 1e22, Si-like n_i 1e16, tau 20 us, 734 nodes, absolute tol 1e8 | equilibrium Newton | **Convergence failure** | converges | converges |
 | B | same | dI/dV at 0 V, +-0.1 mV (oracle G0 2.5823e-5 S/m^2: SRH 2.52e-5 + diffusion 6.0e-7) | n/a (at tol 1e13: 2.5822950490e-5) | 2.5822950490e-5: **-1.2e-6** | < 1e-4 |
 | B | same | ssac Re Y(1 Hz) | -3.5e-5 to -6.8e-5 (state dependent) | **+5.995e-5 = 2.3 G0** | strict xfail |
-| C | 1-D Si diode through DC, ssac, noise, transient; 2-D layered metasurface at Vg 0 / +2 V | sha256 of every solved array, base 6baa9a6 vs this branch | | | 7/7 identical |
+| C | 1-D Si diode through DC, ssac, noise, transient; 2-D layered metasurface at Vg 0 / +2 V | sha256 of every solved array, base ff9d06c vs this branch | | | 7/7 identical |
 | D | default, then extended, then default, in one process | sha256 (5 paths) + `extended_solver` after | | | identical; `False` |
 
 **What fails in double, and what does not.** In the GaN junction the densities and the
@@ -231,9 +231,9 @@ module docstrings. The D2a noise gates are unchanged.
 
 The fingerprint is a sha256 (first 16 hex digits) of every solved array, from
 `python validation/extended_precision.py --hashes`. The base column was run from a detached
-checkout of 6baa9a6 with `--root`. In both runs `extended_solver` was never set ("None").
+checkout of ff9d06c with `--root`. In both runs `extended_solver` was never set ("None").
 
-| Path | Base 6baa9a6 | `wip/dv_extprec` |
+| Path | Base ff9d06c | `wip/dv_extprec` |
 |---|---|---|
 | 1-D DC at 0 V (`solve_dc`) | 02821f6cf0e27c0c | 02821f6cf0e27c0c |
 | 1-D DC, 0.1 V forward ramp + terminal current | dc71a4d2fc3e1591 | dc71a4d2fc3e1591 |
@@ -251,7 +251,7 @@ after it reproduces the first column.
 > earlier commit. Gate C's cross-commit check is now numeric: `python -m validation.extended_precision
 > --compare <checkout>` dumps the same arrays from both trees (`--dump`) and gates each against
 > `TOL_C` (dc 1e-13, small-signal 1e-9, ssac G 1e-4 of max |G|; derivations next to `TOL_C`).
-> Measured vs 6595bde: DC <= 2.2e-15, noise S 3.5e-11, ssac C 9.5e-12, transient i 2.6e-11, ssac G
+> Measured vs ee0ad04: DC <= 2.2e-15, noise S 3.5e-11, ssac C 9.5e-12, transient i 2.6e-11, ssac G
 > 2.6e-6 (Re Y at 1 Hz is round-off in double in either flux form).
 > docs/audit/2026-11-04-sg-flux-two-bernoulli.md.
 

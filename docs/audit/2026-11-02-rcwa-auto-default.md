@@ -117,13 +117,13 @@ overshoot printed, plus a tight TE leg (Laurent valid): 4.6e-5 at n = 32 (< 3e-4
   `examples/lumenairy_gated_grating.py` (n_orders 24, absorption=True: S 128 -> 192). No unit-test
   pin moved (tests/test_lumenairy_*.py, test_bridge, test_fdtd_seam, test_geometry_guards all
   pass; every other raster pin is at n_orders <= 16 or passes an explicit `cell_samples`).
-- Validation printouts moved by the default flip (32f5545 -> this change; all still PASS, and
+- Validation printouts moved by the default flip (ab5e57e -> this change; all still PASS, and
   the analytic path lands closer to the independent oracle each time):
   lumenairy_rcwa_bridge GATE C (asymmetric pillar vs FEM) dRx 9.4e-4 -> 7.9e-4, dRy 1.2e-3 ->
   9.8e-4; GATE H cross-engine conical vs PMM 5.0e-4 -> 1.4e-4; lumenairy_pmm2d_bridge GATE B
   RCWA-vs-pure at n_orders 8 / 16: 4.0e-3 / 5.8e-4 -> 3.9e-3 / 6.1e-4 (final bar 1.5e-3).
 - lumenairy_pmm2d_bridge GATE I / J request `formulation='fff'`; under the bare default flip
-  (c98d3cf) they FAILED because `'auto'` routed the circle / ellipse / rectangle to the
+  (30d9d62) they FAILED because `'auto'` routed the circle / ellipse / rectangle to the
   Laurent-only shapes path (FFF |d| 1.3e-4 / 7.4e-5 / 6.2e-4, no longer bracketing). The
   formulation rule restores the rasterized FFF layer: 1.3e-5 / 1.3e-5 / 4.1e-5 -> PASS, the
   pre-flip numbers.
@@ -134,7 +134,7 @@ overshoot printed, plus a tight TE leg (Laurent valid): 4.6e-5 at n = 32 (< 3e-4
 ## Opt-out (one line)
 
 `make_lumenairy_rcwa_solver(..., inclusion_model='raster', cell_samples=128)` reproduces the
-raster numbers of the commit before the default flip (32f5545) bit for bit at every n_orders: an
+raster numbers of the commit before the default flip (ab5e57e) bit for bit at every n_orders: an
 explicit `cell_samples` keeps the old lattice formula `max(cell_samples, 4N + 1, 128)`.
 `inclusion_model='raster'` ALONE reproduces them only for n_orders <= 16 (identical lattice
 S = 128); from n_orders 17 it uses the new `max(128, 8N)` lattice. (Against the v0.12.0 release

@@ -18,7 +18,7 @@ Oracles (none shares code with noise_analysis):
   * DEVSIM's own ASSEMBLED residual (get_matrix_and_rhs with the flux model set to a unit constant) for the
     per-node area (T0) -- the quantity the source must reproduce;
   * an equilibrated scipy solve of the adjoint system for the fields on the two interface copies.
-OLD CODE (ebd9e65, MEASURED by running this file against an export of it, with this tree's
+OLD CODE (45ca938, MEASURED by running this file against an export of it, with this tree's
 validation/devsim_noise.py fixtures): all 14 fail (the FDT misses by -0.694 / -0.9977 / -0.9986 in 1-D /
 2-D / 3-D, the coth law by -1.0; the pair model, by_interface and the te source do not exist).
 Runtime ~33 s serial (Windows dev box).
@@ -69,7 +69,7 @@ def _te(sn):
 
 def test_pair_model_is_written_from_the_flux_strings():
     """thermionic_flux_and_pair: the flux string is BYTE-identical to the pre-v0.15 one (re-typed from
-    ebd9e65 physics_heterojunction: "{p}*(exp({w0}) - exp({w1}))" with p = repr(qsign A* T^2)), and the pair
+    45ca938 physics_heterojunction: "{p}*(exp({w0}) - exp({w1}))" with p = repr(qsign A* T^2)), and the pair
     string is |p| (exp(w0) + exp(w1)) of the SAME w0 / w1 -- evaluated here with math.exp: pair >= |flux|
     everywhere, pair = 2 |p| e^w and flux = 0 at w0 = w1 (zero bias: J_01 = J_10 = J_s, pair = 2 J_s)."""
     rng = np.random.default_rng(3)

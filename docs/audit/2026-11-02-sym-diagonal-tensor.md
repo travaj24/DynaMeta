@@ -6,7 +6,7 @@ They were written on 2026-09-25 for the exp31 coax study and carried uncommitted
 pass reviewed them, fixed three defects found in review (one wrong answer, two late refusals),
 and added the gates.
 
-Branch `feat/sym-diagonal-tensor`, rebased onto main `95766c0` (v0.11.6). Version
+Branch `feat/sym-diagonal-tensor`, rebased onto main `2d05d21` (v0.11.6). Version
 `0.11.6 -> 0.11.7`.
 
 ---
@@ -134,7 +134,7 @@ Every new keyword defaults off. On a cell with no Dirichlet DOFs the free-DOF re
 the old all-DOF one (periodic minion rows carry `f = 0`, `A u = 0`; measured 1.377e-13 both
 ways), so only the warning on PEC-walled cells moves.
 
-**Measured against v0.11.6 (`95766c0`, a separate worktree, separate processes).** Six
+**Measured against v0.11.6 (`2d05d21`, a separate worktree, separate processes).** Six
 default-path solves were run: scalar full/quarter, `umfpack`/`bddc_gmres`, 20-deg oblique, and a
 diagonal and a gyrotropic tensor. NGSolve's threaded assembly is NOT bitwise reproducible
 run to run. Two runs of unmodified v0.11.6 differ by up to **3.4e-15** in `r`. The branch

@@ -1,6 +1,6 @@
 # DynaMeta deep audit — 2026-07-05
 
-**Git HEAD at audit:** 09e87fc (post BOR-PMM bridge, post FEM symmetry reduction, post QD-SOA Phases 1-34b)
+**Git HEAD at audit:** 7b1496a (post BOR-PMM bridge, post FEM symmetry reduction, post QD-SOA Phases 1-34b)
 **Scope requested:** feature gaps / seams between library portions, physical correctness,
 code-convention adherence, library organization, and speed/memory opportunities that do
 NOT sacrifice accuracy.
@@ -10,10 +10,10 @@ defects AND prove out claimed-good paths), findings hand-re-graded before accept
 This document is written incrementally as each stage completes.
 
 **Prior-audit context (do not re-report):** the 2026-06-22 two-pass deep audit
-(d8bdbdc, 8871b77, 7eae231, 8626360, 61092ec, a6b3987) resolved 1 P1 (cache tensor-fingerprint)
+(d1ada95, 89b2276, ea44db3, 68e850f, 6fa8cbe, 45b4a87) resolved 1 P1 (cache tensor-fingerprint)
 plus ~24 P2 seam/guard findings; earlier rounds are documented in this folder.
 Landed SINCE that audit and therefore never audited in-repo: FEM mirror-symmetry
-reduction (c638181), the Lumenairy BOR-PMM bridge (09e87fc), and the entire QD-SOA
+reduction (67f9da8), the Lumenairy BOR-PMM bridge (7b1496a), and the entire QD-SOA
 module (optics/soa/, Phases 1-34b) plus the Berreman/EMT bridge backends.
 
 **Baseline:** fast suite `pytest tests/` — result recorded in §0.3.
@@ -90,7 +90,7 @@ Tests: 54 files (fast, numpy/scipy-only gate). Validation: 205 solver-backed scr
 
 ### 0.3 Baseline test run
 
-`python -m pytest tests/ -q` at 09e87fc: **482 passed, 0 failed** (26 min 15 s wall,
+`python -m pytest tests/ -q` at 7b1496a: **482 passed, 0 failed** (26 min 15 s wall,
 3 numba-cuda occupancy warnings; the CUDA legs genuinely ran on this machine's GPU —
 they are among the legs that silently skip in CI, see §1.2).
 
@@ -971,7 +971,7 @@ gap-fill closed each:
   reproduced analytic accumulation to 1.6e-15; store round-trips probed on h5py AND
   zarr; transient t→∞ limit consistent). Two doc P3s (resonance_dip docstring example
   numerically wrong; enz_reflector_stack depth-axis orientation undocumented).
-- **FEM mirror-symmetry reduction (c638181)** — the PEC/PMC wall mapping was
+- **FEM mirror-symmetry reduction (67f9da8)** — the PEC/PMC wall mapping was
   hand-derived (x-pol → PMC on y-normal mirror walls; y-pol swaps; pseudovector H signs)
   and the code's mapping is **CORRECT**; eligibility guards reject the right classes.
   Four P3s: Mesh3DSpec.symmetry string unvalidated (typo silently builds the full
@@ -1136,53 +1136,53 @@ against the pre-fix code; affected pytest files and NGSolve/DEVSIM/bridge/statis
 validations pass locally after each commit.
 
 **FIXED — P1 (all three):**
-- C5-1 bridge graded-slab flip (5c5505c) — `reversed()` x3 + asymmetric-lossy
+- C5-1 bridge graded-slab flip (351e829) — `reversed()` x3 + asymmetric-lossy
   bridge-vs-TMM gate (fails on pre-fix code by construction).
-- C4-1 Norris-Landzberg inversion (951eb72) — ratio flipped; GATE B de-tautologized to a
+- C4-1 Norris-Landzberg inversion (c6dff29) — ratio flipped; GATE B de-tautologized to a
   primitive-law Nf ratio + exact frequency-only direction leg; pytest direction pin.
-- C5-2 FDTD seam graded/tensor drop (99c11d7) — graded fields sliced like the TMM peer;
+- C5-2 FDTD seam graded/tensor drop (26f185d) — graded fields sliced like the TMM peer;
   tensor/structured/broadband raise; DrudeOptical crash repro fixed; end-to-end
   modulation-sensitivity FDTD gate.
 
 **FIXED — P2 physics formulas (Wave 2):**
-- C7b-1 KaneOpticalMass halved alpha (007d442) — exact √(1+4αγ_F); legacy=True
+- C7b-1 KaneOpticalMass halved alpha (a41c171) — exact √(1+4αγ_F); legacy=True
   back-compat (α_legacy=2α); gate/test de-circularized to a numeric-dispersion reference.
-- C2-2 Kane ⟨m*(Te)⟩ Sommerfeld K-factor (2c1e7db) — exact-FD shift gate (1.9% vs
+- C2-2 Kane ⟨m*(Te)⟩ Sommerfeld K-factor (c6c43e5) — exact-FD shift gate (1.9% vs
   pre-fix 20%).
-- C4-3 spont-spont 2x (7afc83c) — Olsson-identity gate.
-- C4-4 Langevin exact-emit (c92053d) — telescoping-identity gate; validation GATE B
+- C4-3 spont-spont 2x (82c2f15) — Olsson-identity gate.
+- C4-4 Langevin exact-emit (5b52bba) — telescoping-identity gate; validation GATE B
   now 1.9e-3.
-- C3-7 absorption ÷Re(n_super) (19dad3f) — dense-superstrate lossy closure GATE C
+- C3-7 absorption ÷Re(n_super) (be64f26) — dense-superstrate lossy closure GATE C
   (ratio 0.999 vs pre-fix 1.5).
-- C3-4 t0 de-embed n-aware (b4ad5a2) — hand-derived factor; t0-PHASE legs in all four
+- C3-4 t0 de-embed n-aware (cb22797) — hand-derived factor; t0-PHASE legs in all four
   nonvacuum gates (0.2-1.1° vs ~100° pre-fix).
-- C3-2 Kerr standard chi3 (3152749) — factor 3 in all eight kernels incl. CUDA;
+- C3-2 Kerr standard chi3 (e666427) — factor 3 in all eight kernels incl. CUDA;
   ABSOLUTE SPM GATE F vs measured analytic pump (0.992 vs pre-fix 0.33).
 
 **FIXED — P2 seams/guards (Wave 3):**
 - C4-2 conical any-pol raise + C5-8 structured-period raise + C5-11 collapse
-  unclaimed-key raise (f5cd4f0; Berreman validation conical leg converted to must-raise).
+  unclaimed-key raise (edba4fa; Berreman validation conical leg converted to must-raise).
 - C5-3 material-content cache keys + C5-6 solver-identity keys, _SCHEMA 4 (8abd725).
-- C5-7 seam design.optical guards + oblique chi2/raman/gain raises (663b0eb).
-- C5-12 full-band dispersion check + C6-3 Sweep duplicate-label raise (7817409).
-- C5-9 signed Arrhenius Ea + C5-10 no silent callable substitution (3946db9).
+- C5-7 seam design.optical guards + oblique chi2/raman/gain raises (317ff71).
+- C5-12 full-band dispersion check + C6-3 Sweep duplicate-label raise (1a4731c).
+- C5-9 signed Arrhenius Ea + C5-10 no silent callable substitution (647febc).
 - C2-1 body_net_doping_m3 phi_bi contract + C2-3 2D lateral-isolation raises +
-  semi-semi carrier-blocking raise (69c5ccb; gated_dd_2d/bipolar_diode_2d/
+  semi-semi carrier-blocking raise (654540a; gated_dd_2d/bipolar_diode_2d/
   carriers_3d_bipolar all pass).
-- C4-5 eh_split excitonic-accessor raises (77db547).
+- C4-5 eh_split excitonic-accessor raises (e6a0e46).
 - C3-3 MO both-branch grid sizing + II-3D dimension guard + C6-4 LC rtol honored +
-  C6-2 v_ac threaded through both AC sources (1a2e8fa; ac/mo/ii validations pass).
-- C5-5 extras ride the lift — the silent x<->y transpose at shipped defaults (0c48abe;
+  C6-2 v_ac threaded through both AC sources (6294abd; ac/mo/ii validations pass).
+- C5-5 extras ride the lift — the silent x<->y transpose at shipped defaults (e2da235;
   discrimination-proven gate).
 - C6-1 lc_director_2d certifies on the geometric-tail error estimate, not update size
   (residual now reports the estimate; parity validation passes).
 - C4-9 TDDB stress = sign-robust layer-mean |Ez| via new
-  ElectrostaticResult.mean_absEz_per_layer (50f2ff0; split-gate probe: signed mean
+  ElectrostaticResult.mean_absEz_per_layer (4d671d0; split-gate probe: signed mean
   1.2e4 vs |Ez| mean 3.0e8 V/m; end-to-end skip-gated NGSolve test).
 
-- C4-6 line_filter ES-band cancellation (f5bd0cc; new gain_per_m_slices_gs so the
+- C4-6 line_filter ES-band cancellation (6857109; new gain_per_m_slices_gs so the
   marcher subtracts exactly the band its poles re-add; ES-active ON==OFF carrier gate).
-- C4-7 dualpol TM pairing (134c02f; shifted-TM path uses step_slices_wdm per-channel
+- C4-7 dualpol TM pairing (3c5edbe; shifted-TM path uses step_slices_wdm per-channel
   lineshapes; single-pol-at-nu_tm oracle gate + unshifted byte-compat pin).
 - C4-8 calibration bandwidth honesty (material_fwhm_nm + net_3dB_bw_nm distinct keys,
   module-header caveat; dual-key gate).
@@ -1192,25 +1192,25 @@ the C6-class contract fixes), each with a discrimination-proven gate.
 
 - C3-1 adaptive FEM probe grid (_probe_grid_sizes per medium; sub-wavelength cells
   byte-identical; alias-weight + sizing gates) and C3-6 material-memory run window
-  (_ring_time_s at all five FDTD front-ends, warning when it dominates) — 9b59daa.
+  (_ring_time_s at all five FDTD front-ends, warning when it dominates) — e62c46e.
 - C3-5 oblique band mask trusts sin_t < 0.95 with an exclusion warning (2D + 3D).
 - C5-4 pipeline-seam TMM per_region_absorption re-keyed to design layer names
   (graded slabs sum into their layer; slab_<i> stays for direct LayeredStack use).
 
-- Stale-docs batch (ec3afd7): C6-5 pair ACTUALLY fixed (the ledger had over-claimed it —
+- Stale-docs batch (2eb487b): C6-5 pair ACTUALLY fixed (the ledger had over-claimed it —
   sp_carrier nonparabolic capabilities, graphene sheet-BC shipped) + the §6.3 set
   (em/hci driver notes + Black/HCI attribution corrections, reliability/__init__,
   dynameta/__init__ module map incl. BOR + symmetry, interfaces default location,
   solve2d lateral shape doc) + the CPML matched scaling corrected to 1/n
   (probe-verified strictly beneficial; every non-vacuum gate tightened).
-- Cache autosave batching (baf9739): autosave_every=K with atexit dirty-flush;
+- Cache autosave batching (901e41a): autosave_every=K with atexit dirty-flush;
   default byte-compatible; measured 240x available for sweeps; honest cost model
   replaces the inverted "(cheap, crash-safe)" claim.
 - C7b-2 reliability_tddb GATE B de-tautologized (hand-derived Arrhenius reference +
   module cross-pins).
 
 **Hygiene waves (2026-07-12):**
-- H1 gate de-tautologization (dd30a20 + follow-ups + H1c): scattering_link A-FIT
+- H1 gate de-tautologization (df03e39 + follow-ups + H1c): scattering_link A-FIT
   re-fits the material's own eps; switching GATE B cross-pinned vs LCDynamics;
   qcse part-4 exponent independent; S-P Gauss-integral pin ADDED (rel 4.1e-3);
   sp nonparabolic alpha=0 byte-identity ADDED; fatigue GATE A stress reference
@@ -1218,26 +1218,26 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   (+ 2x-dT linearity and CTE-swap antisymmetry pins) and GATE C Weibull leg pinned
   by the distribution-free S(sigma0)=1/e anchor + the ln S ~ s^m functional
   equation. Every §7.3 tautology item now closed (GATE KANE was closed by C7b-1).
-- H2 constants single-sourcing (74567f2): KB_EV_K (byte-identical literal,
+- H2 constants single-sourcing (1ca2670): KB_EV_K (byte-identical literal,
   KB/Q_E quotient REJECTED — differs at 1.5e-11 rel vs the 1e-13 Arrhenius pins),
   H_PLANCK (exact SI h; replaced the 2*pi*HBAR twins + calibration literal),
   SOLVER_TIME_CONVENTION string, sbe m_e/c, inline Q_E literals, F12
   Aymerich-Humet coefficients hoisted to one tuple (DEVSIM expression verified
   byte-identical); 7 qd_soa validation twins moved to the same source.
   134 affected tests + 23 validations green.
-- H4 test infrastructure (948da65): run_all rc==42 SKIP category (C6-6) +
+- H4 test infrastructure (7ebcf74): run_all rc==42 SKIP category (C6-6) +
   run-everything-except-SKIP discovery with a drift NOTE (the old regex silently
   never ran raise/assert-gated validations) + 35 qd_soa_* / optical_cache /
   sp_open_body curated into SMOKE; six capability-skips converted from exit-0 to
   SystemExit(42); CI smoke-tier leg wired; tests/test_devsim_smoke.py = first
   pytest presence for the DEVSIM solve path (equilibrium + unipolar DD).
-- H3a private-API promotions (1a602d8): optics/rasterize.py owns the
+- H3a private-API promotions (29837b8): optics/rasterize.py owns the
   fdtd_seam rasterizer publics (RCWA bridge off the underscore names);
   thermal_fem build_thermal_forms/add_load_terms/mean_T_per_layer public;
   fem_mesh MESH_SCALE. Underscore aliases retained. (fdtd_nd export cleanup +
   FDTDLayer relocation + lumenairy_bridge/_common.py in flight — _common lands
   with the §8 B1 floor work.)
-- H5a perf batch 1, results-identical (3da74bb): lc_director_2d vectorized
+- H5a perf batch 1, results-identical (11678c0): lc_director_2d vectorized
   red-black GS (x42 shipped scale, fields agree 1.9e-11 rad); LIDT absorbed(T)
   memo (26x fewer TMM solves, bit-identical); em Miner vectorized (17-45x,
   bit-identical); pipeline frees each CarrierField at its sole read;
@@ -1256,7 +1256,7 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   the tested 5.21.x line). bor_backend's copy-pasted gate (floor drifted to
   5.16.0) deleted; berreman's 5.14.4 tightening subsumed; pyproject floor
   5.14.2 -> >=5.21. 27 bridge tests green (2 new: parse/floor + _layers reader).
-- B3 + B4a / step 3 quick wins (9d7931b): make_lumenairy_rcwa_solver(n_workers=,
+- B3 + B4a / step 3 quick wins (a686e30): make_lumenairy_rcwa_solver(n_workers=,
   blas_per_worker=) threads solve_sweep (per-wavelength stack build + solve on a
   bounded pool, BLAS pinned thread-locally; byte-identical to serial, x6.1 on a
   12-wavelength structured sweep); make_lumenairy_pmm_solver(absorption=True)
@@ -1266,7 +1266,7 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   per-layer split CONVERGES toward PMM's (0.078 -> 0.022 -> 0.010 over n_orders
   32/64/96) -- first run showed RCWA's metal-TM grating-layer absorption 2.7x
   off at n_orders=32 (Gibbs), i.e. PMM referees per-layer absorption, not just R.
-- B2 / step 4 Berreman-conical leg (f0986df): conical s/p through the Berreman
+- B2 / step 4 Berreman-conical leg (402a654): conical s/p through the Berreman
   bridge is now EXACT via rotational covariance (layer tensors rotated Rz(-phi),
   solved in-plane -- planar tier only; RCWA/PMM lattices keep their guard). The
   GATE F end-to-end leg pins the bridge against lumenairy's NATIVE conical
@@ -1302,9 +1302,9 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   pre-regression values to all digits).
 
 **Campaign completion (2026-07-13):**
-- H3b follow-up (52846d1): ~20 validation + 3 test files' consumer renames the
+- H3b follow-up (35b7606): ~20 validation + 3 test files' consumer renames the
   fdtd_nd export commit missed.
-- H5d (c472937), the LAST §6.2 items: topology_opt jit with beta TRACED (XLA
+- H5d (3e9a32b), the LAST §6.2 items: topology_opt jit with beta TRACED (XLA
   compiles 5 -> 1, rho bit-identical, x1.48); FDTD vacuum-reference cache
   (bit-identical, x1.84/x2.16 on repeat 2D/3D seam solves); kernels3d run_3d
   prealloc + out= ufuncs + roll-free derivatives (np.array_equal on 4 cases
@@ -1312,12 +1312,12 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   absorption double-solve consolidation SKIPPED with evidence: BerremanStack
   discards jones_t upstream (berreman.py:695) — needs a lumenairy API change;
   class-vs-functional far fields probed bit-identical so it is safe later.
-- B5 (c619f34), §8.1-4: PMM2D bridge — pmm2d_backend.py bridges PMM2DStackPure
+- B5 (21bf2f8), §8.1-4: PMM2D bridge — pmm2d_backend.py bridges PMM2DStackPure
   (analytic walls on the commensurate union grid) + PMM2DStackHybrid
   (rasterized cells; absorption parity). C5-1 reversed() baked in + flipped-
   profile discrimination 1.8e-2; referee gate: RCWA converges TOWARD pure
   (5.7e-3 -> 5.8e-4 over n_orders 4..16) on an ITO-like patch.
-- B6 (2f66073), §8.1-5: JAX design twins — rcwa_design.py (grating functional +
+- B6 (b953bab), §8.1-5: JAX design twins — rcwa_design.py (grating functional +
   RCWAStack twins with uniform-eps lifting + static-arg TypeError guards +
   drude_eps_jax carrier closure) AND PMM twins (trace wavelength/angle/half-
   spaces). Gradient oracle = Richardson FD of the NON-JAX bridge: 2.1e-11
@@ -1332,20 +1332,20 @@ the C6-class contract fixes), each with a discrimination-proven gate.
 lumenairy shipped every item requested in its
 AUDIT_DYNAMETA_CONSUMER_API_GAPS_2026_07_13.md (v5.21.4 + v5.22.0); the DynaMeta
 bridge now consumes the whole surface (7 commits on this branch):
-- A1 (7966ef8): Berreman ONE class solve (jones_transmission) + C2 OOP-tensor-
+- A1 (bc29e5f): Berreman ONE class solve (jones_transmission) + C2 OOP-tensor-
   oblique absorption first-class (tilted-director budget 1.7e-16; was a graceful
   warn+None). ~2x per absorption solve; r/t byte-identical (0.0). GATE G.
-- C1/B4b (a815374): BOR fundamental REAL reflection phase from the pinned-gauge
+- C1/B4b (906e11a): BOR fundamental REAL reflection phase from the pinned-gauge
   per_mode_amplitudes diagonal (122.9deg, gauge-stable; was phase_deg=0) +
   per-layer absorption (budget R+T+sumA=1 to machine precision). GATE E. B4b,
   the item deferred behind the now-fixed BOR energy regression, is DONE.
-- C3 (91a235c): PMM2D-Pure per-layer absorption (budget 3.7e-15; hybrid-vs-pure
+- C3 (78c0d4f): PMM2D-Pure per-layer absorption (budget 3.7e-15; hybrid-vs-pure
   4.6e-4). GATE E.
-- D1+A2+floor (60c9b5f): JAX stack twin traces uniform eps + wavelength/theta/phi
+- D1+A2+floor (da48b27): JAX stack twin traces uniform eps + wavelength/theta/phi
   (d/d(wavelength) AD-vs-FD 2.1e-10 -- dispersion-engineering gradients now on the
   stack twin, lifting workaround dropped); public RCWAStack.layers (private
   _layers read + version-ceiling warning retired); VERSION_FLOOR -> 5.22.
-- B (e97c019): PMM OpticalResult.t (was None) + CONICAL s/p SOLVES via per-order-
+- B (70bd904): PMM OpticalResult.t (was None) + CONICAL s/p SOLVES via per-order-
   amplitude synthesis of the rotated s/p eigen-polarization (the C4-2 cross-term
   physics: naive per-order power sum is 1.25e-2 off). GATE F: uniform vs analytic
   oblique Airy 3.3e-16 (incl |r|^2==R, sec^2-theta p-normalization), phi->0
@@ -1353,7 +1353,7 @@ bridge now consumes the whole surface (7 commits on this branch):
   conical energy 4.0e-11. Only RCWA-conical for a 2-D PATTERNED lattice stays a
   follow-on (its per-order Jones synthesis; RCWAResult.per_order_amplitudes makes
   it consumer-side-feasible whenever wanted).
-- tests (2bbf756): pytest smokes across A1/B/C1/C2/C3/D1; the Berreman OOP test
+- tests (01433de): pytest smokes across A1/B/C1/C2/C3/D1; the Berreman OOP test
   flipped from graceful-degrade to closed budget.
 - RCWA CONICAL for a 2-D patterned lattice -- THE LAST CONICAL GAP, now CLOSED:
   the PMM synthesis was generalized to a shared engine-agnostic

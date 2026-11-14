@@ -11,7 +11,7 @@ GATE VA (the closure path; p-Si N_A = 1e23 / 3e23 / 1e24 m^-3, psi_s - psi_b = 1
         VA-2 characterization pin (measured 2026-11-10, +- 1 point, ~40x the default mesh's discretization
              error): N_inv error in [+1.86, +8.87] % and centroid in [-5.23, -0.20] % for N_inv >= 1e16;
         VA-3 the valley-resolved error is smaller than the isotropic model's (vs the same oracle) at EVERY
-             point of the matrix (the isotropic model is the only option of aed0aa9);
+             point of the matrix (the isotropic model is the only option of e0fa0bb);
         reported: the 2-fold share (DG vs SP), the isotropic model against its own isotropic SP, gamma = 1.
 GATE VC (the calibration, density_gradient.GAMMA_SI100_SP_CALIBRATED): direct runs at the constant over the same
         matrix; its comment's stated residuals (N_inv -1.33 .. +0.93 %, centroid -2.75 .. +1.51 %, all 21 points;

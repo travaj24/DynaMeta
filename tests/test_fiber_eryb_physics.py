@@ -59,7 +59,7 @@ def _all_on(**kw):
 
 
 # ================== gate 1: the DEFAULTS are v0.11.1, to 1e-5 relative =======================
-# Recorded on main @ a2ad5f1 (v0.11.1, pre-change) with the fixture above, re-read on this
+# Recorded on main @ 7efdf6e (v0.11.1, pre-change) with the fixture above, re-read on this
 # branch, where all 29 recorded values came back BIT-IDENTICAL. That bit-identity is NOT what is
 # asserted here, and the reason is the lesson the 2026-09-13 gate (f) recorded the hard way: CI
 # falsified a bitwise pin twice, once through scipy's adaptive LSODA step sequence (6.2e-4

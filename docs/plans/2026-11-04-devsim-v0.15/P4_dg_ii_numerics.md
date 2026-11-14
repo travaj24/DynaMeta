@@ -1,7 +1,7 @@
 # P4: DEVSIM bridge v0.15 deferred items: strong-inversion density gradient, unipolar wall retirement, 2-D element impact ionization, floating-body detection, density-scaled abs_tol
 
 Plan only. No repository was modified. Reference tree: `<workspace>\Python_Test_Scripts\DynaMeta_wt\dv_integ`
-(branch `feat/devsim-2.11-v0.14` at `6595bde`), devsim 2.11.2, scipy-OpenBLAS pin.
+(branch `feat/devsim-2.11-v0.14` at `ee0ad04`), devsim 2.11.2, scipy-OpenBLAS pin.
 
 Scratch probes run for this plan (read-only against the tree, `PYTHONDONTWRITEBYTECODE=1`, one process):
 `C:\Users\Tesla\AppData\Local\Temp\claude\C--Users-Tesla\2446cd33-1dc4-4fe3-b419-8eafba706074\scratchpad\plan_v015\exp\inv_probe.py` and

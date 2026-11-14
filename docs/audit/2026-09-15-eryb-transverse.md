@@ -1,8 +1,8 @@
 # Radially resolved Er:Yb co-doped amplifier -- build + audit note (2026-09-15)
 
-Branch `feat/eryb-transverse`, worktree `DynaMeta-eryb4`, branched from `main` at 21dff60
-(v0.11.2) and MERGED with `main` twice: 1bef664 (v0.11.3, PR #29: W_mig calibration, the
-co-doped temperature laws and `eryb_fit`) and 3e06b10 (v0.11.4, PR #30: the explicit Er 4I11/2
+Branch `feat/eryb-transverse`, worktree `DynaMeta-eryb4`, branched from `main` at dc3b77e
+(v0.11.2) and MERGED with `main` twice: f62d29d (v0.11.3, PR #29: W_mig calibration, the
+co-doped temperature laws and `eryb_fit`) and 89d7129 (v0.11.4, PR #30: the explicit Er 4I11/2
 level and the Yb emission-cross-section scale). Version 0.11.5.
 New module `dynameta/optics/fiber_amp/transverse_eryb.py` (`ResolvedErYbAmplifier`); new gate file
 `tests/test_fiber_transverse_eryb.py` (29 gates); model spec section 18 + 18a (16 is PR #29's, 17 is PR #30's).
@@ -376,7 +376,7 @@ cannot be lost.
 
 ### 5.0 Unchanged by the v0.11.3 merge
 
-Every number in sections 5 and 3 was RE-RUN after merging `main` at 1bef664 (PR #29: W_mig
+Every number in sections 5 and 3 was RE-RUN after merging `main` at f62d29d (PR #29: W_mig
 calibration, `RateTemperatureLaw` / `YbStarkThermal`, `eryb_fit`) and reproduces to every printed
 digit -- both study points bit-for-bit, `11.834719507405362 -> 11.800421909124550 dB` and
 `0.7229656180388068 -> 0.7982270041044350 dB`. That is the expected result and worth stating as a

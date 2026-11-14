@@ -9,7 +9,7 @@ limitation (documented honestly rather than hidden).
 
 ---
 
-## Stretch 1 -- oblique incidence  [RESOLVED; tmm-validated, s-pol gated 0-45deg, 60deg report-only (oblique_vs_tmm.py, ba4dcb2)]
+## Stretch 1 -- oblique incidence  [RESOLVED; tmm-validated, s-pol gated 0-45deg, 60deg report-only (oblique_vs_tmm.py, 64991d1)]
 
 **Implemented** in `optics/solver.py` + `geometry/specs.py`:
 - transverse wavevector `kx = k0 sin(theta)` (x-z plane, vacuum/air incidence medium);
@@ -93,7 +93,7 @@ the PML nor a phase sign:
    Es=(-sin phi, cos phi, 0); and a 2D-demodulated, projected R/T extraction. **Validated**
    (`validation/oblique_conical_vs_tmm.py`, PASS): an isotropic layered stack is azimuthally
    symmetric, so at theta=30deg the R/T are phi-INVARIANT (spread 0.0000 over phi=0/30/60/90)
-   and match `tmm(theta,'s')` to <0.001. p-pol conical is DONE (4f9bf06,
+   and match `tmm(theta,'s')` to <0.001. p-pol conical is DONE (4364c73,
    `validation/conical_ppol_vs_tmm.py`, 7e-4).
 
 ---
@@ -166,7 +166,7 @@ dielectric; `validation/from_design_multidielectric.py` PASS), selects the gate 
 `electrode.role=='biased'`, and threads the gate/body electrode NAMES into the bias lookup.
 It requires a SQUARE cell and an (approximately) centered square gate footprint -- each
 now RAISES/WARNS rather than silently mis-modeling (audit F1-F4). The single-semiconductor
-restriction is LIFTED (86a5e41): the equilibrium solve supports `extra_semiconductors` /
+restriction is LIFTED (a3e0399): the equilibrium solve supports `extra_semiconductors` /
 a contiguous gate-ward heterostack (`validation/carriers_3d_multisemi.py`); DD on a
 heterostack and non-contiguous semiconductors still raise. True lateral material
 inclusions in the semiconductor still need a manual `Stacked3DSpec` or a further general
@@ -179,8 +179,8 @@ OCC builder.
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
 | Oblique incidence | **resolved, s+p-pol, +conical (s AND p)** | `tmm` s-pol gated 0-45deg (p/conical/lossy to 30), 60deg report-only, vacuum/dense/lossy; s+p-pol conical phi-invariant + tmm (conical_ppol_vs_tmm 7e-4) | -- |
-| 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven + **multi-dielectric** + **lateral inclusions** | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible, multi-dielectric series-C oracle 4.6e-4, lateral high-eps pillar enhances under-pillar accumulation (1.07), multi-semi heterostack equilibrium (carriers_3d_multisemi.py, 86a5e41) | DD on a heterostack + non-contiguous semiconductors still raise |
-| Quantum confinement (S-P) | **implemented + CarrierSolver + self-consistent nonparabolic + Neumann/open body BC** | analytic wells ~1e-5; self-consistent Kane nonparabolic (bulk-recover 1.000); Neumann body removes the Dirichlet dead layer (n[0] 0->O(n_bg)), gate-side unchanged 6e-4; open body BC recovers n_bg flat, removing BOTH the Dirichlet dead layer and the Neumann pile-up (sp_open_body.py, 2802cca) | -- |
+| 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven + **multi-dielectric** + **lateral inclusions** | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible, multi-dielectric series-C oracle 4.6e-4, lateral high-eps pillar enhances under-pillar accumulation (1.07), multi-semi heterostack equilibrium (carriers_3d_multisemi.py, a3e0399) | DD on a heterostack + non-contiguous semiconductors still raise |
+| Quantum confinement (S-P) | **implemented + CarrierSolver + self-consistent nonparabolic + Neumann/open body BC** | analytic wells ~1e-5; self-consistent Kane nonparabolic (bulk-recover 1.000); Neumann body removes the Dirichlet dead layer (n[0] 0->O(n_bg)), gate-side unchanged 6e-4; open body BC recovers n_bg flat, removing BOTH the Dirichlet dead layer and the Neumann pile-up (sp_open_body.py, eeca881) | -- |
 | Bipolar DD (holes+SRH) | **implemented + 2D-builder-wired** | 1D Si diode J-V (rectify 1.8e10, n=1.20); 2D p-n through LayeredDevsimBuilder (rectify 9.1e3, opposite sign) | wire into the gated-cap (ITO is unipolar; bipolar is a generality feature) |
 | Boundary-spanning inclusions | **resolved** | grating(1D edge) + disk(2D corner) translation-invariance |dR|<=1e-4 + energy R+T~1 | -- |
 | Inclusion shapes | **rect/circle/ellipse/polygon** | ellipse + hexagon build/solve + energy R+T~1 (validation/inclusion_shapes.py) | -- |
@@ -217,7 +217,7 @@ coupled system -- the same lesson as `_dc_abs_tol`).
 - minority injection ratio **1.6e11** at +0.7 V (the bipolar signature);
 - FD path reduces to Boltzmann SG in the non-degenerate limit (FD-on vs off **0.58%**).
 
-DONE (72de9e3): wired into the 2D `LayeredDevsimBuilder` (the Gummel `CARRIER_EQS`/
+DONE (dfe2302): wired into the 2D `LayeredDevsimBuilder` (the Gummel `CARRIER_EQS`/
 `_TRACK_VARS` extended for `Holes`; `validation/bipolar_diode_2d.py`); the pre-existing
 electron-only "gated-cap DD does not converge" note is orthogonal (weak 2-node lateral
 ITO contacts, not the formulation).
@@ -274,14 +274,14 @@ density is `(g_s g_v m*0/2 pi hbar^2) Int (1+2 alpha eps) f deps`. Validated
 `pref0*(dE + alpha*dE^2)` to <0.1%, the DOS enhancement is exactly `1+alpha*dE`, and
 `m*(E_F)/m*0 = 1.16` for ITO-like alpha=0.5/eV, dE=0.16 eV. The fully self-consistent
 nonparabolic SOLVE (the Trellakis inner Newton's a-priori density + Jacobian, and the
-bulk E_F<->n calibration, all using the nonparabolic DOS) is DONE (0352348,
+bulk E_F<->n calibration, all using the nonparabolic DOS) is DONE (3eed887,
 `validation/sp_self_consistent_nonparabolic.py`, re-run green 2026-06-11).
 Nonparabolicity is now ALSO reachable THROUGH the
 device path: `SchrodingerPoissonCarrier(alpha_np_per_eV=...)` applies a POST-HOC
 nonparabolic 2D fill on the converged (parabolic) potential (`validation/
 sp_carrier_nonparabolic.py` PASS: peak-density DOS enhancement ratio 1.25 at alpha=0.5/eV,
 Vg=+0.5V). The POST-HOC path's self-consistent potential + bulk E_F stay parabolic
-(documented); the fully-consistent nonparabolic solve is DONE (0352348, above).
+(documented); the fully-consistent nonparabolic solve is DONE (3eed887, above).
 
 ### Boundary-spanning inclusion topologies -- IMPLEMENTED + validated
 Phase 3 inclusions were interior-only (the four periodic faces stayed clean

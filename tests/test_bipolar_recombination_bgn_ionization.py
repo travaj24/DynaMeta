@@ -8,7 +8,7 @@ KB_EV_K literal alone shifts the 50 K freeze-out root by 8.6e-11). No gate reads
 computed and compares it with itself; the DEVSIM solution (or, for the contact roots, the pinned field
 the solution must match in the interior) is always the thing measured.
 
-EVERY GATE FAILS ON THE v0.13.0 CODE (main 5cbd998): there `setup_bipolar_region` has no `options`
+EVERY GATE FAILS ON THE v0.13.0 CODE (main 2db6a00): there `setup_bipolar_region` has no `options`
 keyword (TypeError) -- and, so that a silently-ignored flag could not pass either, each physics gate
 also asserts that its answer differs from the SRH-only / full-ionization / unnarrowed answer by far more
 than its own tolerance (the "ON is load-bearing" asserts, with the measured margins in the docstrings).
@@ -641,11 +641,11 @@ def test_mott_warning_once_per_region_above_the_mott_density(N, expect):
 # defaults OFF: byte-identical to v0.13.0
 # =====================================================================================================
 
-# sha256 of tests/_bipolar_calllog.record_call_log(). Recorded on v0.13.0 (main 5cbd998, 217 calls:
+# sha256 of tests/_bipolar_calllog.record_call_log(). Recorded on v0.13.0 (main 2db6a00, 217 calls:
 # ac63536e...b0c6aa) and RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux (sg_flux; user
 # decision): the logs differ ONLY in ElectronCurrent / HoleCurrent and their derivatives plus the new
 # Bern_g_m / Bern_gp_m models (measured diff of the two logs). The cross-version half -- the same
-# fixtures SOLVED, every field and terminal current vs 6595bde (= v0.13.0's flux) to the change's
+# fixtures SOLVED, every field and terminal current vs ee0ad04 (= v0.13.0's flux) to the change's
 # measured round-off -- is tests/test_devsim_sg_flux.py::test_defaults_off_fixtures_equal_6595bde_*.
 _CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 # v0.15.0 (2026-11-07): the DEFAULT statistics became 'fermi_dirac'. The digest above is now that of
@@ -656,8 +656,8 @@ _CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205
 _CALLLOG_DIGEST_V0150 = "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d"
 _CALLLOG_CALLS_V0150 = 302
 # 2026-11-10 (v0.15.1): both digests are now of the CANONICAL logs (correctly rounded transcendentals:
-# tests/_calllog.py, tests/_cr_libm.py), re-recorded on exports of the commits that recorded them (273473b for
-# _CALLLOG_DIGEST, 8434cce for _V0150) with the current recorder + helpers copied in: the SAME two values, raw
+# tests/_calllog.py, tests/_cr_libm.py), re-recorded on exports of the commits that recorded them (f2b2842 for
+# _CALLLOG_DIGEST, f7f245c for _V0150) with the current recorder + helpers copied in: the SAME two values, raw
 # and canonical, on Windows AND in WSL (glibc), and = this tree's on both -- none of these logs' libm results is
 # a hard rounding case there. They are pinned canonically so that holds on any libm / numpy build.
 # docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.

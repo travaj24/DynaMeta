@@ -1,7 +1,7 @@
 # The devsim_3d mesh / node-volume defect (D2c)
 
 DEVSIM phase, release v0.14.0, workstream D2c, branch `wip/dv_mesh3d` (off `feat/devsim-2.11-v0.14` at
-e46bd25). DEVSIM 2.11.2, gmsh 4.15.2, box A.
+07587b4). DEVSIM 2.11.2, gmsh 4.15.2, box A.
 
 **Bottom line.**
 - **Root cause (read in DEVSIM's source, reproduced in numpy to 5 digits).** DEVSIM 2.11's 3-D
@@ -20,7 +20,7 @@ e46bd25). DEVSIM 2.11.2, gmsh 4.15.2, box A.
   (0,1,0), (0,0,1) is right-angled and DEVSIM gives it exactly 2x its volume (section 10).
   Volumes and couplings are exact to 9e-16 on all five builder topologies, and every equation term
   (node, edge, element, interface) sees the same exact geometry.
-- **Gates.** All pass now, and all fail on e46bd25:
+- **Gates.** All pass now, and all fail on 07587b4:
   - D1c G2 0.799 -> 0.989;
   - 3-D == 1-D on the same z-lines to 9 digits;
   - carrier-free sheet charge 0.827 -> exact;
@@ -200,12 +200,12 @@ on the same z-lines.
 `validation/carriers_3d_resistor.py` now build the same Kuhn mesh through the shared helpers.
 `--gmsh` reruns the legacy mesh.
 
-## 3. Gates (all MEASURED 2026-11-03; every one FAILS on e46bd25)
+## 3. Gates (all MEASURED 2026-11-03; every one FAILS on 07587b4)
 
-`validation/devsim_3d_mesh.py --base <e46bd25 worktree>`: **PASS 8/8**. Gate M7 runs M1-M5 in a
-subprocess on the e46bd25 tree, and all 6 fail there.
+`validation/devsim_3d_mesh.py --base <07587b4 worktree>`: **PASS 8/8**. Gate M7 runs M1-M5 in a
+subprocess on the 07587b4 tree, and all 6 fail there.
 
-| gate | oracle | this branch | e46bd25 |
+| gate | oracle | this branch | 07587b4 |
 |---|---|---|---|
 | M1 volumes | sum NodeVolume, 2 sum ElementNodeVolume and sum EdgeCouple*EdgeLength/3 against the exact region volume; full gate, patch 0.5, multi-dielectric, buried-oxide inclusion, semi inclusion + patch | worst 8.9e-16; min EdgeCouple 0 | worst 0.41 (0.17-0.41) |
 | M2 carrier-free sheet charge | both layers dielectric, both contacts 0 V, sigma = 1e-3 C/m^2: psi_if = sigma/(eps_si/d_si + eps_ox/d_ox) = 0.1287076 V at every interface node | 0.0 (every node) | mean 0.827, worst node 0.19 |
@@ -243,12 +243,12 @@ Notes on the table:
 
 `test_impact_ionization` + `test_devsim_3d_mesh`: 15 passed. No test pinned a 3-D number that moved.
 
-**Validations** (sequential, new tree then e46bd25; `[t]` lines quoted):
+**Validations** (sequential, new tree then 07587b4; `[t]` lines quoted):
 
 Every 3-D validation PASSES on both trees. The table lists each value that moved, with the
 independent reference where one exists.
 
-| validation | quantity | e46bd25 (gmsh) | D2c (tensor) | reference / why the new value is right |
+| validation | quantity | 07587b4 (gmsh) | D2c (tensor) | reference / why the new value is right |
 |---|---|---|---|---|
 | `carriers_3d_resistor` | I / I_Ohm - 1 | 0.142 (gate < 0.16) | **8.3e-16** (gate now < 1e-6) | Ohm's law closed form V sigma A/L |
 | `carriers_3d` | lateral invariance (worst std/mean) | 8.96e-3 / 1.30e-2 | 1.2e-16 / 2.7e-16 (gate now < 1e-9) | a translation-invariant gate |
@@ -277,7 +277,7 @@ Re-pinned gates, all with the evidence above:
 `--gmsh` keeps the old gates on both scripts. No other pin moved: the other validations gate loosely
 (signs, ratios, 3 %), and every one still passes.
 
-`validation/traps_oracles.py --3d` (D1c, default `--main` = main 5cbd998): **PASS 12/12**. On the
+`validation/traps_oracles.py --3d` (D1c, default `--main` = main 2db6a00): **PASS 12/12**. On the
 integration tree it was 10 of 11, with G2 failing.
 - A-F are unchanged: A 2.09e-5, B 1.1e-15, C1 7.4e-5 V, C2 2.3e-4, C3 1.9e-6 V, D 7.7e-4; E, E' and F
   (byte identity against main) pass.
@@ -323,7 +323,7 @@ helpers. `Stacked3DSpec` is a gated capacitor with no DC current, so I_sub there
 
 ## 6. Cost
 
-| case | gmsh (e46bd25) | tensor (this branch) |
+| case | gmsh (07587b4) | tensor (this branch) |
 |---|---|---|
 | G2 cap (12 nm, 0.5 nm), nodes | 4482 | 575 |
 | bipolar build + solve at Vg 0.5 V (M3) | 2.75 s + 25.8 s | 3.17 s + 1.13 s |

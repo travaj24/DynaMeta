@@ -207,7 +207,7 @@ def second_order_constant(err, x):
 
 
 def check_z_subcell(where, mode):
-    """Validate the `z_subcell` opt-out kwarg ('average' default; 'point' = the 2026-11-02 2b7a002
+    """Validate the `z_subcell` opt-out kwarg ('average' default; 'point' = the 2026-11-02 2531d5d
     E-node point sampling, bit-for-bit)."""
     if mode not in Z_SUBCELL_MODES:
         raise ValueError("{}: z_subcell must be one of {}, got {!r}".format(where, Z_SUBCELL_MODES, mode))

@@ -3,8 +3,8 @@ no DEVSIM. Every reference is re-derived HERE from the Sentaurus Device User Gui
 (Eqs. 480-498, typed from the page images) or computed with scipy quadrature / root finding written here;
 nothing below calls the module's conversion or segment code to build a reference.
 
-Gates (OLD CODE: dynameta.carriers.btbt_nonlocal does not exist on 66f6185 -- every test fails at import,
-MEASURED by running this file against an export of 66f6185):
+Gates (OLD CODE: dynameta.carriers.btbt_nonlocal does not exist on e7c469d -- every test fails at import,
+MEASURED by running this file against an export of e7c469d):
   N0a  closed-form segment integrals (Kane two-band and Keldysh) == scipy.quad, including segments that touch
        v = 0 and v = 1 (the integrable 1/sqrt end singularities), within quad's own error estimate + 64 eps.
   N0b  their complex-step derivatives == Richardson central differences (budget derived in the test).

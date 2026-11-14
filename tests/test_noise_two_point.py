@@ -8,9 +8,9 @@ PTerm_* term, the edge-assembled BTBT -- now goes through this one kernel.
       per-node P, the same factor order q^2 |.|^2 (2P), c = +-1.0 products exact, y_p + (-y_n) == y_p - y_n
       in IEEE arithmetic). On the D2a FDT diode with BTBT AND a non-midgap trap level, at equilibrium and
       at 0.2 V forward, the per-node GR map and the GR total equal the pre-v0.15 expression
-      q^2 |y_p - y_n|^2 (2P), re-typed below from 9b6937f and evaluated on DEVSIM's own adjoint fields.
+      q^2 |y_p - y_n|^2 (2P), re-typed below from 0e88d31 and evaluated on DEVSIM's own adjoint fields.
       This is a consistency check of the re-expression (it shares _gr_pair_per_node, unchanged); the
-      CROSS-VERSION measurement (9b6937f vs this tree in separate processes: S, every by_mechanism entry
+      CROSS-VERSION measurement (0e88d31 vs this tree in separate processes: S, every by_mechanism entry
       and every per-node map float.hex-identical on three diodes x two biases) is in the audit note.
   (2) The INDEPENDENT oracle is the fluctuation-dissipation theorem S_I = 4 kT Re Y (ssac) on the same
       diode, budget 1e-4 (the D2a gate B budget; MEASURED <= 2.3e-6 there).
@@ -18,7 +18,7 @@ PTerm_* term, the edge-assembled BTBT -- now goes through this one kernel.
       closed form evaluated here with scipy constants.
   ADVERSARIAL: the GR rows with the WRONG relative sign (+1, +1: |y_p + y_n|) break both the bit-identity
   and the FDT.
-OLD CODE (9b6937f, MEASURED by running this file against it): the adversarial test, (3) and the registry
+OLD CODE (0e88d31, MEASURED by running this file against it): the adversarial test, (3) and the registry
 test FAIL (no TwoPointSource / two_point_psd / _gr_source / TWO_POINT_MECHANISMS: AttributeError). (1) is
 an IDENTITY gate (it passes on the old code by construction -- what it must show is that the new path did
 not move; its sensitivity is the adversarial test) and (2) is the oracle the re-expression must keep.
@@ -56,7 +56,7 @@ def _build():
 
 
 def _legacy_gr(dev, f):
-    """The pre-v0.15 GR map, RE-TYPED from 9b6937f noise_analysis.noise_spectrum:
+    """The pre-v0.15 GR map, RE-TYPED from 0e88d31 noise_analysis.noise_spectrum:
         s_i = Q_E * Q_E * np.abs(ys[_EQ_P] - ys[_EQ_N]) ** 2 * d.gr,   d.gr = 2.0 * P
     with ys DEVSIM's native noise fields plus the circuit-contact fix-up (module doc, item 4), at one
     frequency."""

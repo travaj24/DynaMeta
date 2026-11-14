@@ -3,7 +3,7 @@
 It builds a 1-D slab and a 2-D tensor-mesh slab through the PUBLIC bipolar API with btbt=<one set>
 (SILICON_HURKX by default -- so it runs unchanged on the pre-v0.15 tree) while intercepting every DEVSIM
 model-, equation-, parameter- and solution-defining call, and returns the ordered call log. The gate
-hashes it and compares to the digest recorded on 66f6185 (the v0.15 integration commit this work was cut
+hashes it and compares to the digest recorded on e7c469d (the v0.15 integration commit this work was cut
 from): equal digests mean a single BTBT set is installed character-for-character as before (every model
 name, expression string, parameter value and equation binding, in order). No solve, no circuit.
 

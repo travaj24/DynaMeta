@@ -13,7 +13,7 @@ Gates
      non-fixed lines inside dropped, fixed lines kept and clipping the band (remainder < h/4 merged), snapping
      onto an existing line, two overlapping junctions = one cluster with both junctions as nodes, duplicates.
   Z1 sign_changes: brackets, an undoped sliver, an n-p-n pair, side medians.
-FAILS ON THE OLD CODE (0554410): the module does not exist (ImportError at collection).
+FAILS ON THE OLD CODE (098553f): the module does not exist (ImportError at collection).
 Runtime < 1 s.
 """
 import math

@@ -18,7 +18,7 @@ The fixture's own exactness is asserted first (area, uniform n, I = sigma V w / 
 reference is valid on the discrete device, not just in the continuum.
 
 MEASURED (dev box, 2026-11-04; S f N / (alpha I^2)):   aligned      diagonal
-  6595bde (edge-independent Hooge)                      0.99999999964   0.49999999982
+  ee0ad04 (edge-independent Hooge)                      0.99999999964   0.49999999982
   this fix (element-assembled, one xi per element)      0.99999999964   0.99999999964
 The 3.6e-10 residual is the same in both orientations (the 1 mV drift term of the DD resistor); the
 diagonal - aligned difference is 2.3e-13. On the old code the diagonal gate fails by 0.5.
@@ -165,7 +165,7 @@ def test_hooge_uniform_resistor_is_orientation_independent(tmp_path):
     w2 = chk_al["w2_12"]
     tol = (12.0 * w2) ** 2 + 1e-13
     assert np.max(np.abs(r_al - (1.0 - w2))) < tol, (r_al, w2)
-    assert np.max(np.abs(r_dg - (1.0 - w2))) < tol, (r_dg, w2)          # 6595bde: 0.4999999998
+    assert np.max(np.abs(r_dg - (1.0 - w2))) < tol, (r_dg, w2)          # ee0ad04: 0.4999999998
     assert np.max(np.abs(r_dg - r_al)) < 1e-11, (r_dg, r_al)  # measured 2.3e-13
     # the per-node map (element shares split equally among its nodes) sums to the total
     tot = sn.maps["bulk"]["hooge_n"].sum(axis=1)

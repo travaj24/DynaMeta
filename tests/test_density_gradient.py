@@ -116,7 +116,7 @@ def test_dg_off_switch_and_dead_layer():
 
 
 def test_gamma_wall_is_the_exact_free_gas_wall_gamma():
-    """GAMMA_WALL (user decision 2026-11-04; fails on 6595bde, where the name does not exist) =
+    """GAMMA_WALL (user decision 2026-11-04; fails on ee0ad04, where the name does not exist) =
     (3 pi/4)/I^2, I = int_0^1 (1 - t^2)/sqrt(t^2 ln t^2 - t^2 + 1) dt (DG audit doc, GATE B).
 
     Pinned two independent ways: (1) I by scipy quadrature here (not the mpmath value the literal was
@@ -414,7 +414,7 @@ def test_dg_hard_wall_is_a_deprecated_shim_onto_the_insulator_wall():
     MEASURED change) and installs exactly setup_dg_insulator_wall: the whole unipolar DG definition call
     log through the shim equals the one through setup_dg_insulator_wall, call for call (tests/
     _dg_calllog.py; same-tree A/B). It creates no wall_lambda_pin parameter, so set_dg_gamma moves b_dg
-    only. On 48cfbc9 the two logs differed (the pin parameters and their co-ramp, the Lambda row
+    only. On 9003030 the two logs differed (the pin parameters and their co-ramp, the Lambda row
     'QLambda + wall_lambda_pin', the pinned carrier row) and no warning was issued."""
     pytest.importorskip("devsim")
     import os

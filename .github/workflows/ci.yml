@@ -116,7 +116,7 @@ jobs:
     # (audit X-19/X-26 added 9 measured solver-free scripts to the tier, ~112 s of real work --
     # the 7 curated bridge/capstone gates plus 2 new material/pole-finder wrappers.)
     # 2026-09-14: 75 -> 120. The coverage leg runs ~1.7x the three plain legs (73 min against
-    # 35-53 min on main at 1bef664), so the old cap had two minutes of headroom and CANCELLED
+    # 35-53 min on main at f62d29d), so the old cap had two minutes of headroom and CANCELLED
     # a healthy py3.12 leg on run 34896908068 -- a shared-budget artifact, not a test verdict.
     # 2026-11-03 (v0.13.0): 120 -> 150. main measured 65-95 min on the coverage leg (runs
     # 41479363891 / 41487439529) and v0.13.0 adds ~446 CPU-s of fast tests (summed per-test junit

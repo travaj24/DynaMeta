@@ -26,7 +26,7 @@ GATES
       inexact, worst 3.81x) while the same bar's diffusion noise (edge-assembled, not
       an element quantity) is still computed.
 FAILS ON THE OLD CODE: dynameta.carriers.element_geometry does not exist (ImportError) and, measured on
-189c648, setup_btbt installs on the 2-D obtuse mesh and on the 5-tet cube, the 2-D impact ionization
+3ba3a2a, setup_btbt installs on the 2-D obtuse mesh and on the 5-tet cube, the 2-D impact ionization
 integrates the obtuse mesh, and noise_spectrum(hooge_alpha=...) returns the biased Hooge spectrum on the
 gmsh bar (S f N / (alpha I^2) = 1.0546) -- only the 3-D impact ionization refused (its old region-total
 check, now this one) (docs/audit/2026-11-06-v0.14-impact-ionization-2d.md).

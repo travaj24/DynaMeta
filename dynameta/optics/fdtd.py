@@ -636,7 +636,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     z_subcell (2026-11-02): 'average' (DEFAULT) = z-subcell averaging -- every E node takes the
     fill-fraction mean of its control volume (arithmetic for the tangential E, pole strengths
     fill-weighted; formulas and citations in fdtd_nd.grid), so a layer's thickness is no longer
-    rounded to whole cells; 'point' = the E-node point sampling of 2b7a002, bit-for-bit."""
+    rounded to whole cells; 'point' = the E-node point sampling of 2531d5d, bit-for-bit."""
     # The 1-D engine carries eps_inf + Drude + Kerr(chi3) ONLY. The Lorentz pole, chi2, Raman and the
     # gain line are honored solely by the 2-D-TE kernels (fdtd_nd); _run never reads those arrays, so
     # solving them here would SILENTLY drop the term and the FDTD eps would diverge from the layer's own
@@ -668,7 +668,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # so the default UNIFORM path marched courant > 1 to overflow-driven garbage. One shared guard,
     # ahead of both branches (S == courant on either -- see spec.courant_guard).
     courant = courant_guard("solve_fdtd_1d", courant)
-    z_subcell = check_z_subcell("solve_fdtd_1d", z_subcell)   # 'average' (default) | 'point' (2b7a002)
+    z_subcell = check_z_subcell("solve_fdtd_1d", z_subcell)   # 'average' (default) | 'point' (2531d5d)
     # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
     # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
     dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
@@ -728,7 +728,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         chi3 = np.zeros(nz)
         z0 = pad
         zc = material_z(nz, dz)                            # E-node positions (name kept: tv_mask below)
-        if z_subcell == "point":                           # opt-out: the 2b7a002 point rule, bit-for-bit
+        if z_subcell == "point":                           # opt-out: the 2531d5d point rule, bit-for-bit
             for L, m in layer_masks(zc, z0, layers):
                 eps_inf[m] = L.eps_inf
                 wp[m] = L.drude_wp_rad_s

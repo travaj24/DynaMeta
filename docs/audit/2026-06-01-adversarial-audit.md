@@ -7,7 +7,7 @@
 This report is a snapshot for planning. Nothing here was changed in the code; it is an assessment only.
 
 > **Resolution (2026-06-01).** The Part-I functional findings were subsequently fixed
-> (commits `38a5826`..`1b25aec`): all HIGH items (OPT-1, SP-1, SP-2, from_design role +
+> (commits `be6d703`..`3e507fc`): all HIGH items (OPT-1, SP-1, SP-2, from_design role +
 > gate-name, the test/CI gaps) and the substantive MEDIUM/LOW items. Highlights: the FD
 > g-factor was replaced with an accurate <1% rational fit; the SP self-consistent solve now
 > reports convergence + warns; oblique raises on a non-vacuum superstrate and warns on the

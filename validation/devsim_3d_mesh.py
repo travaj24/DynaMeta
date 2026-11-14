@@ -26,7 +26,7 @@ split into right-angled Kuhn tets, on which every piece is >= 0.
            correction makes sum NodeVolume = L^2 t_si to 1e-12 (devsim_geometry).
   GATE M7  (--base PATH) M1-M5 FAIL on a pre-D2c checkout (run in a subprocess on that tree).
 
-Run:  python -m validation.devsim_3d_mesh [--base <pre-D2c checkout, e.g. a worktree at e46bd25>]
+Run:  python -m validation.devsim_3d_mesh [--base <pre-D2c checkout, e.g. a worktree at 07587b4>]
 """
 import argparse
 import dataclasses

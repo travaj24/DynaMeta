@@ -14,7 +14,7 @@ H4). Audit note: docs/audit/2026-11-06-v0.14-temperature-fixes.md.
          (TransportModel.chi_reference_T_K, None = T_REF) refuses by default; on_chi_temperature="warn" /
          "off" proceed.
 
-Every device gate FAILS on 189c648 (the v0.14 integration tip before this branch); the measured misses
+Every device gate FAILS on 3ba3a2a (the v0.14 integration tip before this branch); the measured misses
 are in each docstring.
 """
 import dataclasses
@@ -66,7 +66,7 @@ def _eta_of_u(u):
 def test_band_dos_at_T_is_the_closed_form():
     """Row 3.2-7, the shared helper: band_dos_at_T(m_n, m_p, options) = N(300) (T/300)^1.5 at 77/250/350 K,
     T_REF when T_K is None (bit-identical to the T_REF-default effective_dos_m3 call), N_v = N_c when
-    m_p is None. Adversarial: ignoring T_K (the 189c648 3-D rule) misses at 250 K by (300/250)^1.5 - 1 =
+    m_p is None. Adversarial: ignoring T_K (the 3ba3a2a 3-D rule) misses at 250 K by (300/250)^1.5 - 1 =
     31 %."""
     from dynameta.carriers.bipolar_options import BipolarOptions, band_dos_at_T
     from dynameta.carriers.physics_equilibrium import effective_dos_m3
@@ -164,7 +164,7 @@ def test_bipolar_body_dos_potential_and_reported_T_at_T(body_at_T, T, builder):
         0.01 V_t (eta - ln u) + 1e-9 V (the Newton). eta = 10, not lower: the fit error grows below the
         documented anchors (MEASURED 1.72 % at eta = 5, 3.3 % at eta = 2 -- see the audit note);
       * CarrierField.temperature_K == T.
-    MEASURED on 189c648 (3-D): N_dos 1.3145x / 0.7936x the closed form at 250 / 350 K, reported T = 300 K,
+    MEASURED on 3ba3a2a (3-D): N_dos 1.3145x / 0.7936x the closed form at 250 / 350 K, reported T = 300 K,
     and the body potential off by 29.6 / 45.8 mV against budgets of 1.47 / 2.06 mV (fixed: 1.15 / 1.60 mV,
     the fit's 0.78 %). The 2-D builder already passed its own checks there (it fails only the 3-D == 2-D
     consistency line); it is the reference the 3-D one must agree with."""
@@ -283,7 +283,7 @@ def test_interface_trap_bins_follow_the_region_kT_at_77K():
     6.635 meV wide, and the trapped charge sum_k N_k f_k matches scipy quadrature of the N&B integral at
     77 K, at seven Fermi levels across the gap, within the derived midpoint aliasing bound (_alias_bound at
     the installed bin width, 1.94e6 m^-2 = 6e-10 of the 3e15 m^-2 band charge) + the quad error estimate.
-    MEASURED on 189c648: the installed bins were 25.45 meV = 3.84 kT(77 K) wide (the 300 K kT) and the
+    MEASURED on 3ba3a2a: the installed bins were 25.45 meV = 3.84 kT(77 K) wide (the 300 K kT) and the
     charge missed quadrature by up to 4.75e12 m^-2 = 2.1e6x this tolerance -- inside the same bound
     evaluated at THOSE bins (4.89e12), which checks the bound. Fixed: bins 6.588 meV = 0.993 kT, worst miss
     1.89e6 m^-2 against the 1.94e6 bound (the m = 1 alias term is nearly sharp)."""
@@ -356,7 +356,7 @@ def _btbt_slab(tag, options):
 def test_btbt_under_T_K_warns_that_its_parameters_are_at_T_REF():
     """GATE 3.2-9 (decision D-H4). setup_btbt on a 250 K region warns (AdvisoryWarning naming the T and
     T_REF); at T_K = None and T_K = 300.0 (V_t == V_T exactly) it is silent (warnings are errors here).
-    189c648: no warning ("DID NOT WARN")."""
+    3ba3a2a: no warning ("DID NOT WARN")."""
     from dynameta.carriers.bipolar_options import BipolarOptions
     with pytest.warns(AdvisoryWarning, match=r"T = 250 K.*BTBT parameters.*T_REF = 300"):
         _btbt_slab("250", BipolarOptions(T_K=250.0))
@@ -439,7 +439,7 @@ def test_heterostack_at_T_refuses_an_untagged_affinity_by_default():
     """GATE 3.2-10 (user decision 3, modified). A 250 K bipolar N-AlGaAs / p-GaAs whose materials do not
     state chi's temperature: the default refuses (AffinityTemperatureError, a NotImplementedError, naming
     the toggle and the field and the material); an unknown toggle value is refused at construction.
-    189c648: the untagged device built silently (MEASURED: frames ntop 0.8701 V / pgaas 0.6270 V, no
+    3ba3a2a: the untagged device built silently (MEASURED: frames ntop 0.8701 V / pgaas 0.6270 V, no
     warning) -- the 300 K affinities used at 250 K."""
     from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
     from dynameta.carriers.physics_heterojunction import AffinityTemperatureError

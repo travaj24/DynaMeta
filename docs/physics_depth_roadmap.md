@@ -36,25 +36,25 @@ All nine Tier-0 items are implemented, validated against an independent oracle, 
 and pushed. Each is byte-identical when its new physics is off.
 
 - **R1** field/density mobility mu(E,n) -- `carriers/mobility.py` (Caughey-Thomas + Masetti DEVSIM edge);
-  validation `dd_field_mobility.py`. Commit 5921f85.
+  validation `dd_field_mobility.py`. Commit aad562d.
 - **R2** resolved Drude Gamma + Kane m_opt(n) -- `materials/scattering.py` (KaneOpticalMass,
-  MatthiessenGamma); `drude_matthiessen_kane.py`. Commit 16ad0f0.
-- **R3** shared mobility<->optical-Gamma link -- `ScatteringModel` (one tau drives both); `scattering_link.py`. Commit d22d8ce.
+  MatthiessenGamma); `drude_matthiessen_kane.py`. Commit 2fe593a.
+- **R3** shared mobility<->optical-Gamma link -- `ScatteringModel` (one tau drives both); `scattering_link.py`. Commit 0d302bc.
 - **R4** per-cell time-domain eps(t) -> FDTD -- `optics/fdtd_seam.effect_eps_to_fdtd_grid` +
-  solve_fdtd_2d lateral_wp/gam; `fdtd_effect_seam.py`. Commit a2bce7b.
+  solve_fdtd_2d lateral_wp/gam; `fdtd_effect_seam.py`. Commit f901bdf.
 - **R5** transient heat eqn rho Cp dT/dt -- `thermal_fem.solve_thermal_transient_fem` (theta-method);
-  `thermal_transient_fem.py` (Carslaw-Jaeger erfc + steady recovery). Commit f3f7477.
+  `thermal_transient_fem.py` (Carslaw-Jaeger erfc + steady recovery). Commit a3fc901.
 - **R6** self-consistent electro-thermo-optic Picard loop -- `carriers/electrothermal.py`;
-  `electrothermal_picard.py`. Commit 1be7ff1.
+  `electrothermal_picard.py`. Commit 0f16fb5.
 - **R7** quantum intersubband eps_zz -- `core/effects.IntersubbandEffect`; `intersubband_eps_zz.py`
-  (TRK f-sum rule + telecom line). Commit 48b84b4.
+  (TRK f-sum rule + telecom line). Commit 5f0ef31.
 - **R8** Burstein-Moss + bandgap-renormalization edge -- `core/effects.BursteinMossEdge`;
-  `burstein_moss_blueshift.py`. Commit 4946026.
+  `burstein_moss_blueshift.py`. Commit 8689782.
 - **R9** carrier-heating two-temperature ENZ nonlinearity -- `carriers/carrier_heating.py`;
-  `carrier_heating_enz.py` (sub-ps rise / ps relaxation, 15.4x ENZ enhancement). Commit 044f0dc.
+  `carrier_heating_enz.py` (sub-ps rise / ps relaxation, 15.4x ENZ enhancement). Commit 71483bf.
 
 Test suite: 307 passed (295 at the R1-R9 ship; +12 from the 2026-06-09 audit-guard batch, commit
-7a04a37).
+d11fb4d).
 
 ## STATUS (2026-06-10): Tier 1 (R11-R14) + Tier 2 (R15-R21) + drivers D1-D4 COMPLETE
 
@@ -62,79 +62,79 @@ The full 15-item program (drivers + both tiers) is implemented, oracle-validated
 pushed; each item is byte-identical off. One-line ledger (validations in `validation/`):
 
 - **D1** DEVSIM contact currents -> `carriers/contact_current.py` + CarrierField.extras
-  (`contact_current_drivers.py`: Ohm closed form 5.5e-13). Commit 5499a5b.
+  (`contact_current_drivers.py`: Ohm closed form 5.5e-13). Commit 5b96ee2.
 - **D2** per-region/per-layer absorbed-power maps (FEM + TMM) -> OpticalResult.per_region_absorption
-  (`per_region_absorption.py`: additivity exact; FEM vs TMM 4e-4). Commit 3ea5818.
-- **D3** MechanicalProps on the Material schema (re-exported by reliability.fatigue). Commit f7c5d3d.
+  (`per_region_absorption.py`: additivity exact; FEM vs TMM 4e-4). Commit 775465d.
+- **D3** MechanicalProps on the Material schema (re-exported by reliability.fatigue). Commit 9ba395b.
 - **D4** Chynoweth impact ionization / I_sub post-processor -> `carriers/impact_ionization.py`
   (`impact_ionization_isub.py`: constant-field bar 7.2e-15; supplies reliability.hci's Isub).
-  Commit 2a24ee3.
+  Commit af859f0.
 - **R11** LLG macrospin -> `carriers/llg.py` (`llg_macrospin.py`: exact tan(theta/2) ring-down,
-  SW astroid H_K/2; feeds R13 via fields['m_vector']). Commit a8487f9.
+  SW astroid H_K/2; feeds R13 via fields['m_vector']). Commit d8c815a.
 - **R12** PCM classical nucleation+growth -> `carriers/switching.PCMClassicalNucleation`
-  (`pcm_nucleation_growth.py`: exact O(n) KJMA moments; == JMAK cross-model 3.1e-8). Commit fc48c67.
+  (`pcm_nucleation_growth.py`: exact O(n) KJMA moments; == JMAK cross-model 3.1e-8). Commit f8f6dc0.
 - **R13** VectorMagnetoOpticModel full gyrotropic tensor (`vector_mo_tensor.py`: Levi-Civita +
-  rotation equivariance exact). Commit f7c5d3d.
+  rotation equivariance exact). Commit 9ba395b.
 - **R14** spatial two-temperature FEM -> `thermal_fem.solve_thermal[_transient]_twotemp_fem`
-  (`thermal_fem_twotemp.py`: == lumped R9 TTM 3e-6; exact cosh steady profile 1.7e-6). Commit 8b29ceb.
+  (`thermal_fem_twotemp.py`: == lumped R9 TTM 3e-6; exact cosh steady profile 1.7e-6). Commit 5b1aefb.
 - **R15** chi2 SHG + Raman chi3 FDTD (`fdtd_chi2_shg_raman.py`: coupled-wave closed form 8e-3;
-  Stokes gain ln G/gL = 0.93). Commit 28d9e81.
+  Stokes gain ln G/gL = 0.93). Commit 47bde0b.
 - **R16** FN + direct oxide tunneling -> `reliability/leakage.py` (`reliability_leakage.py`:
-  B_FN = 242 MV/cm in the literature band; DT == FN at phi_b EXACTLY). Commit 5431b75.
+  B_FN = 242 MV/cm in the literature band; DT == FN at phi_b EXACTLY). Commit b917545.
 - **R17** Voigt exciton lineshape (`qcse_voigt_lineshape.py`: Whiting FWHM 2e-4; area-conserving
-  unit-peak convention). Commit 5e49542.
+  unit-peak convention). Commit ca2054a.
 - **R18** BGR + exciton screening/Mott in the EAM (`qcse_density_screening.py`: n^(1/3) slope exact;
-  == BursteinMossEdge closed form). Commit 096893b.
+  == BursteinMossEdge closed form). Commit 1073114.
 - **R19** density-gradient quantum correction (frozen-potential closure; in-Newton DG-DD = follow-on)
   -> `carriers/density_gradient.py` (`density_gradient_dead_layer.py`: dead layer 1.7 nm vs
-  Schrodinger-Poisson 1.2 nm). Commit b80fba0.
+  Schrodinger-Poisson 1.2 nm). Commit f0f6c3c.
 - **R20** four-level gain: clamped-inversion gain ADE + exact expm populations ->
   `optics/laser_gain.py` (`fdtd_gain_medium.py`: g0 closed form 2.8e-4; dN < 0 == passive Lorentz
-  EXACTLY). Commit 438d95b.
+  EXACTLY). Commit 3284bd9.
 - **R21** k(T) via the EXACT Kirchhoff transform -> `thermal_fem.solve_thermal_kirchhoff_fem`
   (`thermal_kirchhoff.py`: closed-form inversion 1.9e-11 where naive constant-k errs 2.4e-2).
-  Commit 3c0943b.
+  Commit 0323124.
 
 ## STATUS (2026-06-10, later): the deferred set above is COMPLETE
 
 STATUS UPDATE 2026-06-11: the 2026-06-10 evening ships closed three more items below -- GPU
-nonlinear kernels (d646875; `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware),
-lasing/cavity feedback (d588e50; `validation/fdtd_lasing_cavity.py` gates A-E green), and C(T)
-(cee64bd; `validation/thermal_ct_transient.py` gates A-D green). The DG oxide-interface hard wall
-is now EXPERIMENTAL (cef01d9), parked. The corrections are folded into the lines below.
+nonlinear kernels (964ed57; `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware),
+lasing/cavity feedback (8870347; `validation/fdtd_lasing_cavity.py` gates A-E green), and C(T)
+(fe9bab6; `validation/thermal_ct_transient.py` gates A-D green). The DG oxide-interface hard wall
+is now EXPERIMENTAL (aeb2ebf), parked. The corrections are folded into the lines below.
 
 - **numba + jax 2D-TE nonlinear kernels** (chi2/Raman/gain): equivalence vs numpy 7.1e-14 /
   2.7e-14 all-active; jax stays DIFFERENTIABLE through the nonlinear carry (grad vs FD 1.1e-3)
   (`fdtd_nonlinear_backends.py`). GPU nonlinear kernels (numba-cuda/cupy) SHIPPED in commit
-  d646875: `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware (cupy + numba-cuda
-  vs numpy worst 2.6e-15, GATE E dynamic gain exact). Commit df5593d.
+  964ed57: `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware (cupy + numba-cuda
+  vs numpy worst 2.6e-15, GATE E dynamic gain exact). Commit 9ad6797.
 - **3D chi2/Raman/gain** (numpy/cupy path; per-component chi2, ONE isotropic Raman coordinate on
   |E|^2, per-component gain): laterally-uniform 3D == the 2D kernel EXACTLY (rel 0.0)
-  (`fdtd_3d_nonlinear.py`). Commit df5593d.
+  (`fdtd_3d_nonlinear.py`). Commit 9ad6797.
 - **Dynamic gain saturation** (field-coupled four-level populations, S_st = -E dPG/dt/(hbar w_a)):
   small-signal == clamped R20 5.3e-11; plateau inversion == the homogeneous saturation law
   dN0/(1 + A^2/A_sat^2) to 0.4% over A/A_sat = 0.15-4.4; sum(N) 3.6e-14
-  (`fdtd_gain_saturation.py`). Lasing/cavity feedback SHIPPED in commit d588e50:
+  (`fdtd_gain_saturation.py`). Lasing/cavity feedback SHIPPED in commit 8870347:
   `validation/fdtd_lasing_cavity.py` gates A-E green (ring-down tau_p 4.2e-2, threshold straddle,
-  standing-wave clamp, omega_RO bracket, sum(N) 4.9e-13). Commit df5593d.
+  standing-wave clamp, omega_RO bracket, sum(N) 4.9e-13). Commit 9ad6797.
 - **Per-layer k(T)** (interface theta jumps): EXACT 1D sequential Kirchhoff inversion
   (`solve_thermal_kirchhoff_layered_1d`) + **transient k(T(x))** FEM with pointwise elementwise
   coefficients (`solve_thermal_transient_kt_fem`); theta-jump two-layer cross-check 1.4e-4
-  (`thermal_kt_multilayer.py`). C(T) SHIPPED in commit cee64bd: `validation/thermal_ct_transient.py`
+  (`thermal_kt_multilayer.py`). C(T) SHIPPED in commit fe9bab6: `validation/thermal_ct_transient.py`
   gates A-D green (constant-C reduction 1.1e-15, chord-enthalpy O(dt) closure, FD oracle 3.2e-4).
-  Commit e7b0d86.
+  Commit 9781b69.
 - **In-Newton DG-DD** (4-variable DEVSIM Newton; `carriers/physics_density_gradient.py`): the
   Lambda-equation assembled Poisson-style (the recipe's blocker), gamma-ramped; classical
   reduction 5.6e-16, Lambda == independent FD stencil 8.4e-14, fixed-point decomposition 7.5e-16
   (`dg_dd_in_newton.py`). Oxide-interface wall: `setup_dg_insulator_wall` (v0.14 D2d; since v0.15 also the unipolar
-  wall -- the experimental `setup_dg_hard_wall` pins of cef01d9 are retired, see below). Commit cde280a.
+  wall -- the experimental `setup_dg_hard_wall` pins of aeb2ebf are retired, see below). Commit 0e0dce4.
 
 DG oxide-interface wall + bipolar: DONE. The bipolar DG and its zero-flux `setup_dg_insulator_wall`
 landed in v0.14 (D2d); in v0.15 (item 4.4.4) the unipolar `setup_dg_hard_wall` rows (a pinned carrier
 row = a carrier sink, converging to a wide-depletion branch) were retired -- the name is a deprecated
 shim onto the insulator wall (removal in v0.16), which reproduces the closed-form dark space to 1.7e-5
 and conserves carriers (docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md). Strong inversion
-(v0.15 item 4.4.3): `physics_bipolar_dd.setup_quasi_equilibrium_carrier`. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
+(v0.15 item 4.4.3): `physics_bipolar_dd.setup_quasi_equilibrium_carrier`. GPU nonlinear kernels (964ed57), lasing/cavity gain dynamics (8870347) and C(T) (fe9bab6)
 shipped 2026-06-10 evening and left this list.
 
 ---
