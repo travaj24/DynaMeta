@@ -15,22 +15,33 @@ now setup_dg_insulator_wall (the retired setup_dg_hard_wall rows are gone; that 
 shim onto it, `hard_wall_shim=True` records the shim's log, gated equal) and the seed passes
 walls=("wall",).
 
+CANONICAL FORM (2026-11-10). By default the log is recorded with correctly rounded transcendentals
+(tests/_calllog.py, tests/_cr_libm.py), so its digest no longer depends on the platform's C library;
+canonical=False records the raw log (the platform's libm) the pre-2026-11-10 digests were taken of.
+
 Re-record (only when a sibling workstream changes the unipolar DG physics ON PURPOSE):
     cd <a checkout of the reference code> && python <this file>
+(on an export of an older tree, copy this file, tests/_calllog.py and tests/_cr_libm.py into its tests/)
 """
 from __future__ import annotations
 
-import hashlib
-import json
+from _calllog import digest, intercepting, recording, skeleton  # noqa: F401  (re-exported for the gates)
 
 _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "contact_equation",
              "set_parameter", "node_solution", "edge_from_node_model", "set_node_values",
              "delete_equation", "delete_contact_equation")
 
 
-def record_call_log(*, hard_wall_shim: bool = False, statistics=None):
+def record_call_log(*, hard_wall_shim: bool = False, statistics=None, canonical: bool = True):
     """The unipolar in-Newton DG definition's call log. `statistics` (v0.15.0): None passes no keyword (this
-    tree's DEFAULT: the FD quasi-field transport); 'legacy' reproduces the pre-v0.15.0 averaged-g region."""
+    tree's DEFAULT: the FD quasi-field transport); 'legacy' reproduces the pre-v0.15.0 averaged-g region.
+    canonical (2026-11-10): record with correctly rounded transcendentals (module docstring); False: with the
+    platform's libm."""
+    with recording(canonical):
+        return _record(hard_wall_shim, statistics)
+
+
+def _record(hard_wall_shim, statistics):
     import devsim as ds
     from dynameta.constants import M_E
     from dynameta.carriers import eq_registry as _R
@@ -39,19 +50,8 @@ def record_call_log(*, hard_wall_shim: bool = False, statistics=None):
                                                            setup_semiconductor_region_dd)
 
     log = []
-    saved = {}
-
-    def _wrap(name, fn):
-        def inner(*a, **kw):
-            log.append([name, sorted((k, repr(v)) for k, v in kw.items())])
-            return fn(*a, **kw)
-        return inner
-
-    for nm in _RECORDED:
-        saved[nm] = getattr(ds, nm)
-        setattr(ds, nm, _wrap(nm, saved[nm]))
     dev, mesh = "dgcl", "dgcl_m"
-    try:
+    with intercepting(ds, _RECORDED, log):
         for d in list(ds.get_device_list()):
             if d == dev:
                 ds.delete_device(device=d)
@@ -85,14 +85,7 @@ def record_call_log(*, hard_wall_shim: bool = False, statistics=None):
         ds.delete_device(device=dev)
         ds.delete_mesh(mesh=mesh)
         _R.clear(dev)
-    finally:
-        for nm, fn in saved.items():
-            setattr(ds, nm, fn)
     return log
-
-
-def digest(log) -> str:
-    return hashlib.sha256(json.dumps(log, sort_keys=False).encode("utf-8")).hexdigest()
 
 
 if __name__ == "__main__":                                  # pragma: no cover - re-recording aid

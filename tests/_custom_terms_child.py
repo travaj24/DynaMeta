@@ -617,7 +617,7 @@ def sc_calllog(opts):
     if opts.get("register"):
         CT.register_dispatcher()
     import _bipolar_calllog as CL
-    log = json.loads(json.dumps(CL._record_in_this_process()))
+    log = json.loads(json.dumps(CL._record_in_this_process(canonical=False)))   # same-machine A/B: raw
     return {"registered": CT.is_registered(), "n": len(log), "digest": CL.digest(log),
             "dispatch_calls": CT._dispatch_calls}
 

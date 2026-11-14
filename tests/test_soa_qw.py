@@ -32,7 +32,10 @@ DRIVE_A = 130.0e-3
 # law. Ga0.47In0.53As itself (the BulkGainParams() default since v0.14, Vurgaftman Eq. 4.1:
 # Eg(298 K) = 0.7380 eV) peaks at 1612.5 nm at this drive and gives 30.33 dB in gate 8 (MEASURED,
 # docs/audit/2026-11-06-v0.14-ingaas-gap.md) -- outside both windows, as a bulk InGaAs active region
-# should be. The material-agnostic gates (1, 2, 4-7) run on BOTH.
+# should be. The material-agnostic gates (1, 2, 4-7) run on every device.
+# v0.15.1: BulkGainParams.c_band() is the SOURCED C-band material (InP-matched Ga0.440In0.560As0.937P0.063,
+# Vurgaftman Eq. (5.4); tests/test_soa_cband_ingaasp.py). The C-band device gates 3 and 8 run on it AND on this
+# old triple (kept as the device the gates were sized on, and as the comparison in the v0.15.1 audit note).
 CBAND_GAP = dict(Eg0_eV=0.816, varshni_alpha_eV_K=2.9e-4, varshni_beta_K=193.0)
 
 
@@ -40,8 +43,10 @@ def _ref_params():
     return BulkGainParams(**CBAND_GAP)
 
 
-BOTH_DEVICES = pytest.mark.parametrize("make", [_ref_params, BulkGainParams],
-                                       ids=["cband_ref", "default_InGaAs_LM"])
+BOTH_DEVICES = pytest.mark.parametrize("make", [_ref_params, BulkGainParams, BulkGainParams.c_band],
+                                       ids=["cband_ref", "default_InGaAs_LM", "c_band_InGaAsP"])
+CBAND_DEVICES = pytest.mark.parametrize("make", [_ref_params, BulkGainParams.c_band],
+                                        ids=["cband_ref", "c_band_InGaAsP"])
 
 
 def _peak_nu_and_Ntr(p):
@@ -98,8 +103,9 @@ def test_gate2_log_gain_fit(make):
 # --------------------------------------------------------------------------------------------------
 # gate 3 -- CONNELLY DEVICE GATE  (bulk InGaAsP, 130 mA, 600 um)
 # --------------------------------------------------------------------------------------------------
-def test_gate3_connelly_device_gain():
-    p = _ref_params()
+@CBAND_DEVICES
+def test_gate3_connelly_device_gain(make):
+    p = make()
     N0 = qw.steady_state_N(DRIVE_A, p, P_W=0.0)
     nu_pk, g_pk = qw.gain_peak(N0, p)
     lam_pk_nm = C_LIGHT / nu_pk * 1e9
@@ -192,12 +198,13 @@ def test_gate7_noise_figure(make):
 # --------------------------------------------------------------------------------------------------
 # gate 8 -- BOA1004P ORIENTATION (soft): G ~ 27 dB AND net -3 dB BW > 40 nm simultaneously
 # --------------------------------------------------------------------------------------------------
-def test_gate8_boa1004p_orientation():
+@CBAND_DEVICES
+def test_gate8_boa1004p_orientation(make):
     # Documented tweaks (NOT a full calibration): the reference bulk core at the default 130 mA /
     # 600 um operating point with the internal loss nudged to 2500 /m (within the dossier 2500-4000
     # /m band) lands the small-signal chip gain on the BOA's 27 dB and, because the net gain is
     # moderate (little high-gain narrowing), keeps a broad net band.
-    p = _ref_params()
+    p = make()
     alpha_i = 2500.0
     N0 = qw.steady_state_N(DRIVE_A, p)
     nu_pk, _ = qw.gain_peak(N0, p)

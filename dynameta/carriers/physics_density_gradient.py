@@ -52,13 +52,18 @@ from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.eq_registry import node_with_derivs as _node_with_derivs
 from dynameta.carriers.density_gradient import GAMMA_WALL   # the hard-wall gamma (2026-11-04)
+from dynameta.carriers.density_gradient import (GAMMA_SI100_SP_CALIBRATED, SI100_ELECTRON_VALLEYS,  # noqa: F401
+                                                ValleySet)    # v0.15.1: the valley-resolved electron DG (data)
 from dynameta.constants import HBAR, Q_E
 
 __all__ = ["setup_dg_quantum_correction", "setup_contact_dg", "setup_dg_hard_wall",
            "seed_dg_from_solution", "set_dg_gamma", "dg_b_coefficient", "GAMMA_WALL",
            # D2d: bipolar density-gradient
            "setup_bipolar_dg", "setup_contact_bipolar_dg", "setup_dg_insulator_wall",
-           "seed_bipolar_dg", "bipolar_dg_carriers", "DG_SRH_TERM"]
+           "seed_bipolar_dg", "bipolar_dg_carriers", "DG_SRH_TERM",
+           # v0.15.1: the valley-resolved electron DG (setup_bipolar_dg(electron_valleys=...))
+           "ValleySet", "SI100_ELECTRON_VALLEYS", "GAMMA_SI100_SP_CALIBRATED", "electron_valley_sets",
+           "valley_densities"]
 
 
 def dg_b_coefficient(m_eff_kg: float, gamma: float = 1.0) -> float:
@@ -75,7 +80,7 @@ def dg_b_coefficient(m_eff_kg: float, gamma: float = 1.0) -> float:
 
 
 def _install_dg_variables(device: str, region: str, *, u: str, lam: str, carrier: str,
-                          b: str, b_full: float) -> None:
+                          b: str, b_full: float, tie=None, declare: bool = True) -> None:
     """THE density-gradient kernel, shared by the unipolar electron DG and both carriers of the
     bipolar DG (D2d): the parameter pair `b` / `b`_full, the solution variables u = sqrt(carrier)
     and Lambda, the algebraic tie u^2 - c = 0 and the Poisson-style Lambda-equation
@@ -83,17 +88,22 @@ def _install_dg_variables(device: str, region: str, *, u: str, lam: str, carrier
     flux orientation so the converged Lambda equals +b u''/u -- pinned by the independent-stencil
     oracle of validation/dg_dd_in_newton.py GATE B). With (u, lam, carrier, b) = (QSqrtN, QLambda,
     Electrons, b_dg) every DEVSIM call is the pre-D2d unipolar one, in order, character-for-character
-    (tests/_dg_calllog.py digest)."""
+    (tests/_dg_calllog.py digest). tie (v0.15.1, the valley-resolved electrons): (expression, wrt) of the
+    u-row instead of u^2 - c (the valley sets' sum / intervalley rows, _valley_tie); None = the
+    unchanged single-population tie. declare=False: u and lam already exist (the valley sets declare
+    all their variables first, because a DEVSIM model binds its references when it is created)."""
     ds.set_parameter(device=device, region=region, name=b, value=b_full)
     ds.set_parameter(device=device, region=region, name=b + "_full", value=b_full)
 
-    for nm in (u, lam):
-        ds.node_solution(device=device, region=region, name=nm)
-        ds.edge_from_node_model(device=device, region=region, node_model=nm)
+    if declare:
+        _declare_dg_variables(device, region, u, lam)
 
     # u-equation (variable u): the algebraic tie u^2 = c
-    _node_with_derivs(device, region, u + "Constraint", "{u}*{u} - {c}".format(u=u, c=carrier),
-                      (u, carrier))
+    if tie is None:
+        _node_with_derivs(device, region, u + "Constraint", "{u}*{u} - {c}".format(u=u, c=carrier),
+                          (u, carrier))
+    else:
+        _node_with_derivs(device, region, u + "Constraint", tie[0], tie[1])
     _R.record_region_equation(device, region, name=u + "Equation", variable_name=u,
                               node_model=u + "Constraint", variable_update="positive")
 
@@ -104,6 +114,13 @@ def _install_dg_variables(device: str, region: str, *, u: str, lam: str, carrier
     _R.record_region_equation(device, region, name=lam + "Equation", variable_name=lam,
                               edge_model=u + "GradFlux", node_model=lam + "Node",
                               variable_update="default")
+
+
+def _declare_dg_variables(device: str, region: str, u: str, lam: str) -> None:
+    """The DG solution variables u and lam (+ their edge copies) of _install_dg_variables."""
+    for nm in (u, lam):
+        ds.node_solution(device=device, region=region, name=nm)
+        ds.edge_from_node_model(device=device, region=region, node_model=nm)
 
 
 # The quantum-shifted SG fluxes go through the ONE SG kernel (sg_flux.install_sg_current) with
@@ -321,7 +338,11 @@ def set_dg_gamma(device: str, region: str, frac: float) -> None:
     # both; the hole twin co-ramps with the SAME fraction. A unipolar region always has b_dg_full and
     # never b_dg_p_full, so its DEVSIM call sequence is the pre-D2d one (tests/_dg_calllog.py digest).
     rparams = ds.get_parameter_list(device=device, region=region)
-    if "b_dg_full" in rparams or "b_dg_p_full" not in rparams:
+    if _VDG_SETS in rparams:                # v0.15.1: valley-resolved electrons, every set with the same fraction
+        for k in range(electron_valley_sets(device, region)):
+            b_full = float(ds.get_parameter(device=device, region=region, name=_vk("b_dg", k) + "_full"))
+            ds.set_parameter(device=device, region=region, name=_vk("b_dg", k), value=frac * b_full)
+    elif "b_dg_full" in rparams or "b_dg_p_full" not in rparams:
         b_full = float(ds.get_parameter(device=device, region=region, name="b_dg_full"))
         ds.set_parameter(device=device, region=region, name="b_dg", value=frac * b_full)
     if "b_dg_p_full" in rparams:
@@ -381,7 +402,9 @@ def bipolar_dg_carriers(device: str, region: str) -> tuple:
     current). () for a classical region."""
     nodes = set(ds.get_node_model_list(device=device, region=region))
     edges = set(ds.get_edge_model_list(device=device, region=region))
-    return tuple(k for k, sp in _BIPOLAR_DG.items() if sp["u"] in nodes and sp["cur_dg"] in edges)
+    return tuple(k for k, sp in _BIPOLAR_DG.items()
+                 if (sp["u"] in nodes or (k == "electrons" and "QSqrtN_v0" in nodes))   # v0.15.1: valley sets
+                 and sp["cur_dg"] in edges)
 
 
 def _repoint_region_current(device: str, region: str, eq: str, cur_dg: str) -> None:
@@ -407,7 +430,8 @@ def _repoint_region_current(device: str, region: str, eq: str, cur_dg: str) -> N
 
 def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = None,
                      m_eff_p_kg: "float | None" = None, gamma_n: float = 1.0,
-                     gamma_p: float = 1.0, quantum_srh: bool = True) -> tuple:
+                     gamma_p: float = 1.0, quantum_srh: bool = True,
+                     electron_valleys=None) -> tuple:
     """Opt-in BIPOLAR density-gradient on a region built by physics_bipolar_dd.setup_bipolar_region
     (call AFTER it, with any BipolarOptions / traps / BTBT already installed, and ideally after a
     converged classical solve -- the seed). A carrier gets a quantum potential iff its mass is given:
@@ -445,6 +469,29 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
       Each carrier takes its own gamma; for one gate oxide pass GAMMA_WALL to both.
       Doc: docs/audit/2026-11-03-devsim-bipolar-density-gradient.md (GATE B, GATE C, Limits).
 
+    electron_valleys (v0.15.1, opt-in; default None = the isotropic electron DG above, unchanged):
+      a table of density_gradient.ValleySet (e.g. SI100_ELECTRON_VALLEYS) -> VALLEY-RESOLVED electrons: every set
+      gets its own quantum potential with its own quantization mass and share of N_c, all sets share one quasi-
+      Fermi level, the electron current is the single continuity row on the total density (module block
+      "VALLEY-RESOLVED"). Pass it INSTEAD of m_eff_n_kg (both: ValueError); gamma_n applies to every set. A
+      one-set table IS the isotropic model (same rows, bit-identical solve). Needs statistics 'fermi_dirac' or
+      'boltzmann' ('legacy' is refused). Read back: electron_valley_sets / valley_densities; QLambda is then the
+      effective Lambda_eff (a model), the per-set variables are QSqrtN_v<k> / QLambda_v<k>.
+      WHY: a real Si(100) inversion layer moves into the two valleys with the heavy confinement mass m_l; one
+      isotropic quantum potential cannot represent that repopulation. MEASURED against the DOS-consistent
+      anisotropic Schrodinger-Poisson oracle (p-Si 1e23 .. 1e24 m^-3, 1.00 .. 1.30 V, FD, GAMMA_WALL, closure;
+      validation/valley_density_gradient.py GATE VA): N_inv +2.9 .. +7.9 % for N_inv >= 1e16 m^-2 (up to +14.5 %
+      near threshold), centroid -1.2 .. -5.2 %, 2-fold share within 0.02 .. 0.08 of the SP's; the isotropic model
+      against the same oracle: -8.7 .. -39 %. Cost: +2 unknowns per node per extra set; MEASURED per Newton
+      iteration 1.9x the isotropic DG's in 1-D with electron DG only, but 0.1-0.8x in 1-D with the hole DG and in 2-D
+      (there the isotropic system factorizes slowly; audit note sec. 6); Newton iterations equal or fewer.
+      gamma_n = GAMMA_SI100_SP_CALIBRATED (= 1.88, a FIT to that oracle; its comment in density_gradient states
+      fit range and residuals: N_inv -1.3 .. +0.9 %, centroid -2.8 .. +1.5 %) is the opt-in calibration; the
+      default stays gamma = 1 and GAMMA_WALL stays the a-priori wall value.
+      Limits (not measured): other orientations (other tables), holes (single population), valley-dependent
+      mobility (one mu_n), oxide penetration, temperatures other than 300 K, 2-D/3-D confinement.
+      Doc: docs/audit/2026-11-10-v0.15.1-valley-resolved-dg.md.
+
     Each carrier gets the shared kernel (_install_dg_variables) and its continuity equation is
     re-pointed at the quantum-shifted SG flux (ElectronCurrentDG / HoleCurrentDG) built on the
     region's own quasi-field (vdiff_g / vdiff_gp: FD g-factor, BGN band edges and all -- header
@@ -469,26 +516,41 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
       gated -- doc: Limits).
 
     Returns the tuple of DG carriers installed."""
-    if m_eff_n_kg is None and m_eff_p_kg is None:
+    valleys = None
+    if electron_valleys is not None:
+        from dynameta.carriers.density_gradient import check_valley_table
+        valleys = check_valley_table(electron_valleys)
+        if m_eff_n_kg is not None:
+            raise ValueError("setup_bipolar_dg: give m_eff_n_kg OR electron_valleys (the sets carry their own "
+                             "quantization masses), not both")
+        if len(valleys) == 1:            # one set of share 1 IS the isotropic model: its rows, call for call
+            m_eff_n_kg, valleys = valleys[0].m_z_kg, None
+    if m_eff_n_kg is None and m_eff_p_kg is None and valleys is None:
         raise ValueError("setup_bipolar_dg: give m_eff_n_kg and/or m_eff_p_kg (the carriers that get "
                          "a quantum potential)")
     if "Holes" not in ds.get_node_model_list(device=device, region=region):
         raise ValueError("setup_bipolar_dg: region {!r} is not a bipolar region (no Holes); use "
                          "setup_dg_quantum_correction for a unipolar one".format(region))
-    for key, m in (("electrons", m_eff_n_kg), ("holes", m_eff_p_kg)):
+    for key, m in (("electrons", m_eff_n_kg if valleys is None else 1.0), ("holes", m_eff_p_kg)):
         if m is not None:                    # refuse BEFORE installing anything (v0.15 plan 4.4.3)
             rec = _R.recorded(device, _BIPOLAR_DG[key]["eq"], scope="region", loc=region)
             if rec and rec[-1]["kwargs"].get("node_model") in ("QE_n", "QE_p"):
                 _repoint_region_current(device, region, _BIPOLAR_DG[key]["eq"],
                                         _BIPOLAR_DG[key]["cur_dg"])      # raises the closure message
+    if valleys is not None:
+        _valley_fd(device, region)           # refuses statistics='legacy' before installing anything
     done = []
     for key, m, g in (("electrons", m_eff_n_kg, gamma_n), ("holes", m_eff_p_kg, gamma_p)):
-        if m is None:
-            continue
         sp = _BIPOLAR_DG[key]
-        _install_dg_variables(device, region, u=sp["u"], lam=sp["lam"], carrier=sp["c"],
-                              b=sp["b"], b_full=dg_b_coefficient(m, g))
-        wrt = ("Potential", sp["lam"], sp["c"])
+        if key == "electrons" and valleys is not None:
+            # v0.15.1: valley-resolved electrons -- the same flux on Lambda_eff (the QLambda model)
+            wrt = _install_valley_electrons(device, region, valleys, g)
+        elif m is None:
+            continue
+        else:
+            _install_dg_variables(device, region, u=sp["u"], lam=sp["lam"], carrier=sp["c"],
+                                  b=sp["b"], b_full=dg_b_coefficient(m, g))
+            wrt = ("Potential", sp["lam"], sp["c"])
         _edge_with_derivs(device, region, sp["vd"], sp["vd_expr"], wrt)
         _SG.install_sg_current(device, region, carrier=key, density=sp["c"], vdiff=sp["vd"],
                                bern=sp["bern"], bern_m=sp["bern_m"], current=sp["cur_dg"],
@@ -513,9 +575,16 @@ def _install_quantum_srh(device: str, region: str, carriers: tuple) -> None:
     from dynameta.carriers.physics_traps import srh_rate_expr
     lams = [_BIPOLAR_DG[k]["lam"] for k in carriers]
     arg = "(0.5*({})/V_t)".format(" + ".join(lams))
+    # v0.15.1: valley-resolved electrons -- QLambda is the Lambda_eff MODEL (the total density's band-edge
+    # shift, so DG equilibrium is still n p = n_i'^2 exp((Lambda_eff + Lambda_p)/V_t)); the derivatives go to
+    # its variables (every u_k and Lambda_0) through the chain rule
+    wrt = tuple(lams)
+    if "electrons" in carriers and electron_valley_sets(device, region):
+        wrt = _eff_wrt(electron_valley_sets(device, region)) + tuple(x for x in lams if x != "QLambda")
+        lams = list(wrt)
     _node_with_derivs(device, region, "DgNieFactor",
                       "exp(ifelse({a} > 200, 200, ifelse({a} < -200, -200, {a})))".format(a=arg),
-                      tuple(lams))
+                      wrt)
     bgn = "n_ie" in ds.get_node_model_list(device=device, region=region)
     fkw = {"fd": True} if "FDGammaN" in ds.get_node_model_list(device=device, region=region) else {}   # USRH's
     rate = "({}) - USRH".format(srh_rate_expr(bgn=bgn, scale="DgNieFactor", **fkw))
@@ -553,6 +622,10 @@ def setup_contact_bipolar_dg(device: str, contact: str) -> None:
         _repoint_contact_current_to_dg(device, contact, eq=sp["eq"], cur=sp["cur"],
                                        cur_dg=sp["cur_dg"], who="setup_contact_bipolar_dg",
                                        installer="setup_bipolar_dg")
+        if key == "electrons" and electron_valley_sets(device, region):
+            # v0.15.1: each valley set gets Lambda_k = 0 and the bulk u-rows (the classical split n_k = s_k n)
+            _valley_contact_rows(device, contact, region, "ohmic", None)
+            continue
         u, lam, c = sp["u"], sp["lam"], sp["c"]
         cu = "{}_{}_ohmic".format(contact, u.lower())
         ds.contact_node_model(device=device, contact=contact, name=cu,
@@ -610,8 +683,10 @@ def setup_dg_insulator_wall(device: str, contact: str, *, u_floor_rel: float = 1
     if not (0.0 < u_floor_rel < 1.0):
         raise ValueError("setup_dg_insulator_wall: u_floor_rel must be in (0, 1)")
     region = ds.get_region_list(device=device, contact=contact)[0]
+    vsets = electron_valley_sets(device, region)
     keys = tuple(k for k, sp in _BIPOLAR_DG.items()
-                 if sp["u"] in ds.get_node_model_list(device=device, region=region))
+                 if sp["u"] in ds.get_node_model_list(device=device, region=region)
+                 or (k == "electrons" and vsets))
     if not keys:
         raise ValueError("setup_dg_insulator_wall('{}'): region '{}' carries no DG carrier".format(
             contact, region))
@@ -624,6 +699,10 @@ def setup_dg_insulator_wall(device: str, contact: str, *, u_floor_rel: float = 1
             raise ValueError("setup_dg_insulator_wall('{}'): {} at the wall is not positive -- solve "
                              "the classical device first (the floor is relative to it)".format(
                                  contact, c))
+        if key == "electrons" and vsets:
+            # v0.15.1: u_k = u_floor_rel sqrt(s_k c) for every valley set; the u-rows move to the Lambda rows
+            _valley_contact_rows(device, contact, region, "wall", u_floor_rel * np.sqrt(np.max(cv)))
+            continue
         u_floor = float(u_floor_rel * np.sqrt(np.max(cv)))
         cu = "{}_{}_wall".format(contact, u.lower())
         ds.contact_node_model(device=device, contact=contact, name=cu,
@@ -672,6 +751,9 @@ def _seed_dg(device: str, region: str, *, walls, u_floor_rel: float, who: str) -
         d = cKDTree(wall_pts).query(xyz)[0]
     for key in keys:
         sp = _BIPOLAR_DG[key]
+        if key == "electrons" and electron_valley_sets(device, region):
+            _seed_valleys(device, region, d, v_t, u_floor_rel)          # v0.15.1
+            continue
         c = np.maximum(np.asarray(ds.get_node_model_values(device=device, region=region,
                                                            name=sp["c"])), 0.0)
         t = np.ones_like(c)
@@ -685,3 +767,206 @@ def _seed_dg(device: str, region: str, *, walls, u_floor_rel: float, who: str) -
                                values=list(np.maximum(u * u, 1e-300)))
         ds.set_node_values(device=device, region=region, name=sp["lam"],
                            values=list(v_t * np.log(t * t)))
+
+
+# =================================================================================================
+# v0.15.1: VALLEY-RESOLVED electron density gradient (opt-in: setup_bipolar_dg(electron_valleys=...)).
+# Doc: docs/audit/2026-11-10-v0.15.1-valley-resolved-dg.md. Valley set k of the table
+# (density_gradient.ValleySet; set 0 is the REFERENCE set), N_k = dos_share_k N_c:
+#
+#   variables   u_k = QSqrtN_v<k> = sqrt(n_k),   Lambda_k = QLambda_v<k>,   b_k = gamma hbar^2/(6 m_z,k q)
+#   Lambda-row  b_k lap(u_k) - Lambda_k u_k = 0          (the shared kernel _install_dg_variables, per set)
+#   u-rows      k = 0 :  sum_j u_j^2 - n = 0             (Poisson, SRH and continuity see the TOTAL n)
+#               k >= 1:  V_t [A(n_k/N_k) - A(n_0/N_0)] - (Lambda_k - Lambda_0) = 0
+#   A(x) = ln x + Delta(x): the region's activity (Boltzmann ln x; statistics="fermi_dirac": the FD built-in
+#   correction of physics_heterojunction.setup_log_activity -- reused, not re-implemented).
+#
+# Why the second row: n_k = N_k F(eta + (psi + Lambda_k)/V_t) with ONE eta for all sets (one electron
+# quasi-Fermi level: intervalley equilibrium) means A(n_k/N_k) - Lambda_k/V_t = eta + psi/V_t is the same
+# for every set. With Lambda_k = 0, n_k/N_k = n/N_c: the classical split is n_k = dos_share_k n exactly.
+#
+# THE CURRENT (one continuity row for the total n). A common quasi-Fermi level phi_n and one mobility give
+# J = q mu n grad(phi_n) for the TOTAL density, and the total obeys
+#     n = sum_k N_k F(eta + (psi + Lambda_k)/V_t)  =:  N_c F(eta + (psi + Lambda_eff)/V_t),
+# which defines Lambda_eff uniquely (F is monotone). The total is therefore a SINGLE population in the
+# effective band edge psi + Lambda_eff, and the single-population DG Scharfetter-Gummel flux applies with
+# Lambda -> Lambda_eff, unchanged (same kernel, same vd_expr, BGN / FD quasi-fields included). At a node,
+# using the k >= 1 rows (any set gives the same value; set 0 is used),
+#     Lambda_eff = Lambda_0 + V_t [A(U/N_c) - A(n_0/N_0)],   U = sum_k u_k^2      (= n by the k = 0 row)
+# (Boltzmann: V_t ln sum_k s_k exp(Lambda_k/V_t)). U, not the Electrons variable: with A(n/N_c) the flux
+# carries ln(n) of its own density -- the quasi-Fermi form of SG, exponential in n along a Newton step --
+# and a p-n diode's Newton DIVERGED on the 0.40 -> 0.35 V step back (MEASURED: relative update 1e3 at
+# iteration 0, 1e116 residual at 3); with U the flux depends on n only as the single-population one does
+# (prefactor, FD quasi-field) and on the sets' own (u_k, Lambda_0), and the same ramp converges.
+# QLambda is that node MODEL here (not a variable); its exact derivatives w.r.t. u_0..u_{V-1} and Lambda_0
+# are models, and DEVSIM's diff() picks them up by name, so every consumer of QLambda (the flux, the quantum
+# SRH) gets the exact Jacobian through the chain rule. Equilibrium: the flux vanishes iff the edge's two nodes
+# share eta, i.e. phi_n flat -- exactly the closure's state (setup_quasi_equilibrium_carrier).
+# Per-set SG fluxes summed would instead hold each set's current constant along an edge, i.e. NO
+# intervalley transfer inside an edge, contradicting the shared quasi-Fermi level; the single flux on the
+# total keeps the physics stated above.
+# NOT modelled: valley-dependent mobility (the conductivity-mass anisotropy of the sets: one mu_n for all),
+# intervalley non-equilibrium, holes (single population), oxide penetration (infinite barrier).
+# =================================================================================================
+
+_VDG_SETS = "vdg_n_sets"          # region parameter: number of electron valley sets (absent: not valley-resolved)
+
+
+def _vk(name: str, k: int) -> str:
+    return "{}_v{}".format(name, k)
+
+
+def electron_valley_sets(device: str, region: str) -> int:
+    """The number of electron valley sets of a region set up with setup_bipolar_dg(electron_valleys=...)
+    (>= 2), or 0 when the electrons are not valley-resolved (a one-set table IS the isotropic model and
+    installs its rows, so it reads 0 too)."""
+    if _VDG_SETS not in ds.get_parameter_list(device=device, region=region):
+        return 0
+    return int(round(float(ds.get_parameter(device=device, region=region, name=_VDG_SETS))))
+
+
+def _valley_fd(device: str, region: str) -> bool:
+    """True for a statistics='fermi_dirac' region, False for 'boltzmann'; 'legacy' is refused (its averaged-g
+    transport has no activity equilibrium for the sets to share)."""
+    rp = ds.get_parameter_list(device=device, region=region)
+    fd = float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) > 0.0
+    if fd and "fd_detailed_balance" not in rp:
+        raise ValueError("setup_bipolar_dg(electron_valleys=...): region {!r} uses statistics='legacy' (the v0.14 "
+                         "averaged-g transport); the valley-resolved DG needs statistics='fermi_dirac' or "
+                         "'boltzmann'".format(region))
+    return fd
+
+
+def _valley_tie(k: int, nsets: int, fd: bool) -> tuple:
+    """(expression, wrt) of valley set k's u-row (module block above): k = 0 the total-density sum, k >= 1 the
+    shared quasi-Fermi level against set 0, in volts. THE one copy of these rows: the bulk, the ohmic contact
+    and the insulator wall all use it."""
+    if k == 0:
+        u = tuple(_vk("QSqrtN", j) for j in range(nsets))
+        return " + ".join("{0}*{0}".format(x) for x in u) + " - Electrons", u + ("Electrons",)
+    dlt = " + HJ_VDGn_v{k}_Delta - HJ_VDGn_v0_Delta".format(k=k) if fd else ""
+    expr = ("V_t*(2*log(QSqrtN_v{k}/QSqrtN_v0) + log(N_dos_v0/N_dos_v{k}){d}) - QLambda_v{k} + QLambda_v0"
+            .format(k=k, d=dlt))
+    return expr, ("QSqrtN_v0", _vk("QSqrtN", k), "QLambda_v0", _vk("QLambda", k))
+
+
+
+def _eff_wrt(nsets: int) -> tuple:
+    """The variables Lambda_eff depends on: every set's u_k and the reference set's Lambda_0."""
+    return tuple(_vk("QSqrtN", k) for k in range(nsets)) + ("QLambda_v0",)
+
+
+def _install_valley_electrons(device: str, region: str, valleys: tuple, gamma: float) -> tuple:
+    """The valley-resolved electron DG rows (module block above) on a bipolar region; returns the flux wrt."""
+    from dynameta.carriers.physics_heterojunction import fd_delta_derivative, setup_log_activity
+    fd = _valley_fd(device, region)
+    nsets = len(valleys)
+    n_c = float(ds.get_parameter(device=device, region=region, name="N_dos"))
+    ds.set_parameter(device=device, region=region, name=_VDG_SETS, value=float(nsets))
+    for k, v in enumerate(valleys):
+        ds.set_parameter(device=device, region=region, name=_vk("vdg_share", k), value=float(v.dos_share))
+        ds.set_parameter(device=device, region=region, name=_vk("N_dos", k), value=float(v.dos_share) * n_c)
+        _declare_dg_variables(device, region, _vk("QSqrtN", k), _vk("QLambda", k))
+    # the set densities n_k = u_k^2 and U = sum_k u_k^2 (the sets' total, = n by the k = 0 row), with the
+    # derivative chain to the u's that DEVSIM's diff() looks up by name (<model>:<variable>): the FD correction
+    # Delta of each (the intervalley rows, Lambda_eff) and the reference set's activity (the closure row)
+    usum = " + ".join("{0}*{0}".format(_vk("QSqrtN", k)) for k in range(nsets))
+    dens = [(_vk("VDGn", k), "{0}*{0}".format(_vk("QSqrtN", k)), _vk("N_dos", k), (k,)) for k in range(nsets)]
+    for nk, expr, dos, ks in dens + [("VDGn", usum, "N_dos", tuple(range(nsets)))]:
+        ds.node_model(device=device, region=region, name=nk, equation=expr)
+        dd = fd_delta_derivative(device, region, nk, dos) if fd else None     # HJ_<nk>_Delta:<nk>
+        for k in ks:
+            u = _vk("QSqrtN", k)
+            ds.node_model(device=device, region=region, name="{}:{}".format(nk, u), equation="2*{}".format(u))
+            if fd:
+                ds.node_model(device=device, region=region, name="HJ_{}_Delta:{}".format(nk, u),
+                              equation="{d}*{n}:{u}".format(d=dd, n=nk, u=u))
+    act = setup_log_activity(device, region, "VDGn_v0", "N_dos_v0", fd=fd)
+    ds.node_model(device=device, region=region, name=act + ":QSqrtN_v0",
+                  equation="{}:VDGn_v0*VDGn_v0:QSqrtN_v0".format(act))
+    for k, v in enumerate(valleys):
+        _install_dg_variables(device, region, u=_vk("QSqrtN", k), lam=_vk("QLambda", k), carrier="Electrons",
+                              b=_vk("b_dg", k), b_full=dg_b_coefficient(v.m_z_kg, gamma),
+                              tie=_valley_tie(k, nsets, fd), declare=False)
+    # Lambda_eff: the effective band-edge shift of the total density (node model + exact derivatives, carried
+    # to the edges under the names diff() looks up: QLambda@n0:<var>@n0)
+    dlt = " + HJ_VDGn_Delta - HJ_VDGn_v0_Delta" if fd else ""
+    eff_wrt = _eff_wrt(nsets)
+    _node_with_derivs(device, region, "QLambda",
+                      "QLambda_v0 + V_t*(log((VDGn*N_dos_v0)/(N_dos*QSqrtN_v0*QSqrtN_v0)){})".format(dlt),
+                      eff_wrt)
+    ds.edge_from_node_model(device=device, region=region, node_model="QLambda")
+    for w in eff_wrt:
+        ds.edge_from_node_model(device=device, region=region, node_model="QLambda:" + w)
+        for nd in ("n0", "n1"):
+            ds.edge_model(device=device, region=region, name="QLambda@{nd}:{w}@{nd}".format(nd=nd, w=w),
+                          equation="QLambda:{w}@{nd}".format(w=w, nd=nd))
+    return ("Potential", "Electrons") + eff_wrt
+
+
+def _valley_closure_terms(device: str, region: str) -> "dict | None":
+    """For physics_bipolar_dd.setup_quasi_equilibrium_carrier on valley-resolved electrons: the closure row
+    written on the reference set, R_n = phi_ref - [psi + D_c + Lambda_0 - V_t (A(n_0/N_0) + ln(N_c/n_i))]
+    (= the single-population row with Lambda -> Lambda_eff; A(n/N_c) cancels exactly). None otherwise."""
+    if not electron_valley_sets(device, region):
+        return None
+    return {"lam": "QLambda_v0", "act": "HJ_L_VDGn_v0", "var": "QSqrtN_v0"}
+
+
+def valley_densities(device: str, region: str) -> "list | None":
+    """[n_k node values (m^-3), one array per valley set, table order] of a valley-resolved region, else None."""
+    nsets = electron_valley_sets(device, region)
+    if not nsets:
+        return None
+    return [np.asarray(ds.get_node_model_values(device=device, region=region, name=_vk("VDGn", k)))
+            for k in range(nsets)]
+
+
+def _valley_contact_rows(device: str, contact: str, region: str, kind: str, floor_scale) -> None:
+    """Contact rows of the valley sets (setup_contact_bipolar_dg, setup_dg_insulator_wall), from the ONE copy of
+    the u-rows (_valley_tie). kind="ohmic": u-row = the bulk row, Lambda_k = 0 -- the classical split at the
+    contact (as the single population's u^2 = c, Lambda = 0). kind="wall": u_k = floor_scale sqrt(s_k) (the
+    floor u_floor_rel sqrt(n_k) of the classical split) and the bulk u-row moves to the Lambda row, so each
+    set's Lambda at the wall is whatever makes the rows hold (zero normal flux, the single-population wall)."""
+    nsets, fd = electron_valley_sets(device, region), _valley_fd(device, region)
+
+    def row(name, eq_name, expr, wrt):
+        ds.contact_node_model(device=device, contact=contact, name=name, equation=expr)
+        for w in wrt:
+            ds.contact_node_model(device=device, contact=contact, name="{}:{}".format(name, w),
+                                  equation="simplify(diff({}, {}))".format(expr, w))
+        _R.record_contact_equation(device, contact, name=eq_name, node_model=name)
+
+    for k in range(nsets):
+        u, lam = _vk("QSqrtN", k), _vk("QLambda", k)
+        tie, wrt = _valley_tie(k, nsets, fd)
+        if kind == "ohmic":
+            row("{}_{}_ohmic".format(contact, u.lower()), u + "Equation", tie, wrt)
+            row("{}_{}_dirichlet".format(contact, lam.lower()), lam + "Equation", lam, (lam,))
+        else:
+            share = float(ds.get_parameter(device=device, region=region, name=_vk("vdg_share", k)))
+            row("{}_{}_wall".format(contact, u.lower()), u + "Equation",
+                "{} - {:.16e}".format(u, float(floor_scale * np.sqrt(share))), (u,))
+            row("{}_{}_wall".format(contact, lam.lower()), lam + "Equation", tie, wrt)
+
+
+def _seed_valleys(device: str, region: str, d, v_t: float, u_floor_rel: float) -> None:
+    """_seed_dg for valley-resolved electrons: the classical split n_k = s_k n, and next to a wall (d: the
+    distance to it, None = no wall) each set's own boundary-layer shape t_k = max(tanh(d/L_q,k), u_floor_rel):
+    u_k = t_k sqrt(s_k n), Lambda_k = V_t ln(t_k^2), and n = sum_k u_k^2 (the Boltzmann frozen-potential
+    relation per set, which also satisfies the sets' shared quasi-Fermi level)."""
+    n = np.maximum(np.asarray(ds.get_node_model_values(device=device, region=region, name="Electrons")), 0.0)
+    tot = np.zeros_like(n)
+    for k in range(electron_valley_sets(device, region)):
+        share = float(ds.get_parameter(device=device, region=region, name=_vk("vdg_share", k)))
+        b = float(ds.get_parameter(device=device, region=region, name=_vk("b_dg", k)))
+        t = np.ones_like(n)
+        if d is not None and b > 0.0:
+            t = np.maximum(np.tanh(d / np.sqrt(b / v_t)), u_floor_rel)
+        u = t * np.sqrt(share * n)
+        tot += u * u
+        ds.set_node_values(device=device, region=region, name=_vk("QSqrtN", k), values=list(u))
+        ds.set_node_values(device=device, region=region, name=_vk("QLambda", k),
+                           values=list(v_t * np.log(t * t)))
+    if d is not None:
+        ds.set_node_values(device=device, region=region, name="Electrons", values=list(np.maximum(tot, 1e-300)))

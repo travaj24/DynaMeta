@@ -10,24 +10,30 @@ character-for-character the recorded one (every expression string, every paramet
 equation binding, in order). Solution values are NOT part of the log (they depend on the BLAS build);
 the solved cross-version comparison is tests/_sgflux_reference.py.
 
+CANONICAL FORM (2026-11-10). By default the log is recorded with correctly rounded transcendentals
+(tests/_calllog.py, tests/_cr_libm.py), so its digest no longer depends on the platform's C library;
+canonical=False records the raw log (the platform's libm) the pre-2026-11-10 digests were taken of.
+
 Re-record (only when a sibling workstream changes the base bipolar physics ON PURPOSE):
     cd <a checkout of the reference code> && python <this file>
+(on an export of an older tree, copy this file, tests/_calllog.py and tests/_cr_libm.py into its tests/)
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 
+from _calllog import digest, intercepting, recording, skeleton  # noqa: F401  (re-exported for the gates)
+
 _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "contact_equation",
              "set_parameter", "node_solution", "edge_from_node_model", "add_circuit_node",
              "circuit_element")
 
 
-def record_call_log(statistics=None):
+def record_call_log(statistics=None, canonical=True):
     """The call log, recorded in a CHILD process on the caller's sys.path (same dynameta, same BLAS
     environment). The cl_bz fixture adds a process-global DEVSIM circuit (node cl_n, source Vcl) that
     the caller's process could not get rid of (MEASURED 2026-11-03, devsim 2.11.2): a second
@@ -38,12 +44,13 @@ def record_call_log(statistics=None):
     analysis has been performed"). JSON turns the log's tuples into lists, which dump identically, so
     the digest is unchanged. `statistics` (v0.15.0): None passes NO keyword (the recorder then runs unchanged on
     older trees, and records this tree's DEFAULT); a value is passed to the FD fixture's setup_bipolar_region
-    and ohmic_built_in_offset_V ('legacy' reproduces the pre-v0.15.0 default)."""
+    and ohmic_built_in_offset_V ('legacy' reproduces the pre-v0.15.0 default). canonical (2026-11-10): record
+    with correctly rounded transcendentals (module docstring); False: with the platform's libm."""
     fd, out = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
-        extra = [] if statistics is None else [statistics]
+        extra = ["--canonical" if canonical else "--raw"] + ([] if statistics is None else [statistics])
         subprocess.run([sys.executable, os.path.abspath(__file__), "--emit", out] + extra, env=env, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         with open(out, encoding="utf-8") as f:
@@ -52,24 +59,18 @@ def record_call_log(statistics=None):
         os.remove(out)
 
 
-def _record_in_this_process(statistics=None):
+def _record_in_this_process(statistics=None, canonical=True):
+    with recording(canonical):
+        return _record(statistics)
+
+
+def _record(statistics):
     import devsim as ds
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
 
     log = []
-    saved = {}
-
-    def _wrap(name, fn):
-        def inner(*a, **kw):
-            log.append([name, sorted((k, repr(v)) for k, v in kw.items())])
-            return fn(*a, **kw)
-        return inner
-
-    for nm in _RECORDED:
-        saved[nm] = getattr(ds, nm)
-        setattr(ds, nm, _wrap(nm, saved[nm]))
-    try:
+    with intercepting(ds, _RECORDED, log):
         for dev, fd, circuit in (("cl_fd", True, False), ("cl_bz", False, True)):
             st = {} if (statistics is None or not fd) else {"statistics": statistics}
             mesh = dev + "_m"
@@ -107,19 +108,13 @@ def _record_in_this_process(statistics=None):
             ds.delete_device(device=dev)
             ds.delete_mesh(mesh=mesh)
             _R.clear(dev)
-    finally:
-        for nm, fn in saved.items():
-            setattr(ds, nm, fn)
     return log
-
-
-def digest(log) -> str:
-    return hashlib.sha256(json.dumps(log, sort_keys=False).encode("utf-8")).hexdigest()
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--emit"]:   # the child of record_call_log()
     with open(sys.argv[2], "w", encoding="utf-8") as f:
-        json.dump(_record_in_this_process(sys.argv[3] if len(sys.argv) > 3 else None), f)
+        json.dump(_record_in_this_process(sys.argv[4] if len(sys.argv) > 4 else None,
+                                          canonical=sys.argv[3] == "--canonical"), f)
 elif __name__ == "__main__":                                # pragma: no cover - re-recording aid
     import dynameta
     lg = _record_in_this_process()

@@ -514,6 +514,11 @@ def test_t_builders_pass_the_scaled_set(monkeypatch):
 # sha256 of tests/_btbt_calllog.record_call_log() (306 calls: a 1-D and a 2-D slab, btbt=SILICON_HURKX),
 # RECORDED on 66f6185 (the v0.15 integration commit this work was cut from) by running the helper against
 # that tree; this tree gives the same 306-call log (MEASURED: the two JSON logs compare equal).
+# 2026-11-10 (v0.15.1): now the digest of the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
+# tests/_cr_libm.py), re-recorded on an export of 66f6185 with the current recorder + helpers copied in: the
+# SAME value, raw and canonical, on Windows AND in WSL (glibc), = this tree's on both (no libm result of this log
+# is a hard rounding case there); pinned canonically so that holds on any libm.
+# docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.
 _BTBT_CALLLOG_DIGEST = "61543ffbfa156a6a7566fd20481455cd5438f6702ccdb71487b814edecbeeb7d"
 
 
@@ -529,7 +534,12 @@ def _calllog():
 def test_p7_single_set_definition_is_byte_identical_to_66f6185():
     """(ii) the recorded digest; (i) same-tree A/B: the bare v0.14 constructor and a FLAGGED set passed through
     btbt_for_material at 300 K (with a band model) give the identical log. ADVERSARIAL: the same set as a
-    1-tuple (indexed names) changes the digest."""
+    1-tuple (indexed names) changes the digest. CANONICAL log since 2026-11-10 (v0.15.1). STILL BITES
+    (MEASURED on Windows and in WSL, canonical): A_SI = A_cgs (1e6 100^-P) instead of (A_cgs 1e6) 100^-P --
+    mathematically equal -- moves A_SI by 1 ulp (4.0000000000000005e15 -> 4e15, 30 literals) and changes the
+    digest; the field-magnitude string 'pow(ElectricField^2 + 1, 0.5)' (for '+ 1.0') changes it. NOT
+    COVERED: 100.0 ** -P is Python's C pow, which no context can intercept (bitwise equal on UCRT and glibc
+    here: the raw digests agree)."""
     CL = _calllog()
     _wipe()
     log = CL.record_call_log()

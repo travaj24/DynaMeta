@@ -142,7 +142,8 @@ from dynameta.warning_types import UnreliableResultWarning
 __all__ = ["apply_exact_geometry", "measure_dual_geometry", "exact_geometry_applied",
            "geometry_already_exact", "correct_device_geometry", "resolve_policy",
            "ExactGeometryReport", "NegativeDualGeometryError", "triangle_dual_pieces",
-           "tetrahedron_dual_pieces", "MARKER_PARAMETER"]
+           "tetrahedron_dual_pieces", "tetrahedron_dual_parts", "tetrahedron_circumcentres",
+           "MARKER_PARAMETER"]
 
 MARKER_PARAMETER = "dynameta_exact_geometry"     # region parameter set by apply_exact_geometry
 NEGATIVE_POLICIES = ("raise", "warn", "clip")
@@ -268,16 +269,38 @@ def tetrahedron_dual_pieces(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.n
     signed distance c_f -> c_T along the face normal (positive toward the tet's fourth vertex l).
     `unsigned` is DEVSIM's 0.5 (|v0 x v1| + |v0 x v2|) = 0.5 sum |s1| |s2| (TetrahedronEdgeCouple.cc:99;
     v0 = c_T - m, v1/v2 = c_f - c_T are orthogonal decompositions of the same triangles)."""
+    pp, L, _cT, _cf = tetrahedron_dual_parts(X)
+    pa, pb = pp[..., 0], pp[..., 1]
+    signed = 0.5 * (pa + pb)
+    unsigned = 0.5 * (np.abs(pa) + np.abs(pb))
+    return signed, unsigned, L
+
+
+def tetrahedron_circumcentres(X: np.ndarray) -> np.ndarray:
+    """Circumcentres (n, 3) of tetrahedra X (n, 4, 3)."""
+    A = X[:, 1:] - X[:, :1]
+    return X[:, 0] + np.linalg.solve(A, 0.5 * np.einsum("nij,nij->ni", A, A)[..., None])[..., 0]
+
+
+def tetrahedron_dual_parts(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The pieces behind tetrahedron_dual_pieces, for consumers that need them one by one (the 3-D BTBT
+    resolution estimate integrates over each). X: (n, 4, 3). Returns (pp, L, cT, cf):
+    pp (n, 6, 2) the signed products s1 s2 of edge k (_TET_EDGES) for its two faces, in the order
+    f_a, f_b = the two vertices NOT on the edge, ascending -- face "opposite f_a" first; the right triangle
+    (m, c_f, c_T) of that face has signed area 0.5 s1 s2, and the tet (v, m, c_f, c_T) on either end node v of
+    the edge the signed volume s1 s2 L / 12 (its ElementNodeVolume share); L (n, 6) the edge lengths; cT (n, 3)
+    the tet circumcentres; cf (n, 4, 3) the circumcentre of the face OPPOSITE each vertex."""
     X = np.asarray(X, dtype=np.float64)
     n = X.shape[0]
-    A = X[:, 1:] - X[:, :1]
-    cT = X[:, 0] + np.linalg.solve(A, 0.5 * np.einsum("nij,nij->ni", A, A)[..., None])[..., 0]
+    cT = tetrahedron_circumcentres(X)
     # face f = the face opposite vertex f; its vertices in increasing local order
     s1 = {}                                       # (face, i, j) -> signed in-face distance, (n,)
     s2 = np.empty((n, 4))
+    cf_all = np.empty((n, 4, 3))
     for f in range(4):
         vs = [v for v in range(4) if v != f]
         s, _L, cf = triangle_dual_pieces(X[:, vs])
+        cf_all[:, f] = cf
         for jj in range(3):                       # edge opposite vs[jj] within the face
             e = tuple(sorted(v for k, v in enumerate(vs) if k != jj))
             s1[(f,) + e] = s[:, jj]
@@ -285,16 +308,14 @@ def tetrahedron_dual_pieces(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.n
         nrm /= np.linalg.norm(nrm, axis=1)[:, None]
         sgn = np.sign(np.einsum("ij,ij->i", X[:, f] - X[:, vs[0]], nrm))
         s2[:, f] = sgn * np.einsum("ij,ij->i", cT - cf, nrm)
-    signed = np.empty((n, 6))
-    unsigned = np.empty((n, 6))
+    pp = np.empty((n, 6, 2))
     L = np.empty((n, 6))
     for k, (i, j) in enumerate(_TET_EDGES):
         f_a, f_b = [v for v in range(4) if v not in (i, j)]   # face opposite f_a contains i, j, f_b
-        pa, pb = s1[(f_a, i, j)] * s2[:, f_a], s1[(f_b, i, j)] * s2[:, f_b]
-        signed[:, k] = 0.5 * (pa + pb)
-        unsigned[:, k] = 0.5 * (np.abs(pa) + np.abs(pb))
+        pp[:, k, 0] = s1[(f_a, i, j)] * s2[:, f_a]
+        pp[:, k, 1] = s1[(f_b, i, j)] * s2[:, f_b]
         L[:, k] = np.linalg.norm(X[:, j] - X[:, i], axis=1)
-    return signed, unsigned, L
+    return pp, L, cT, cf_all
 
 
 # --------------------------------------------------------------------------------------------------
