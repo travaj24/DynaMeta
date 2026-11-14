@@ -132,7 +132,7 @@ def test_cavity_design_formula_guards():
 
 
 def test_s2_7_lorentz_and_gain_ade_w0dt_guard_2d_and_3d():
-    """audit S2-7 (fixed in wave 4, 1154002, but never gated; tagged wave-7 2026-11-02). The
+    """audit S2-7 (fixed in wave 4, d969f84, but never gated; tagged wave-7 2026-11-02). The
     Lorentz and gain-line ADEs are the central-difference oscillator P^{n+1} = C1 P^n + C2 P^{n-1}
     + C3 E^n; undamped, its characteristic roots z^2 - C1 z - C2 = 0 (C1 = 2 - (w0 dt)^2, C2 = -1)
     leave the unit circle exactly when w0*dt > 2, so a far-above-band pole diverged silently. The

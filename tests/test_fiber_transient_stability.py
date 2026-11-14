@@ -1,7 +1,7 @@
 """Transient-march gates of 2026-11-02 (workstream eryb_fix): three defects of the co-doped Er:Yb
 march found while measuring its z_refine work, and the 2026-07-17 audit item S3-42.
 
-DEFECTS (each gate FAILS on the code before the fix -- measured against HEAD 1b1f394's
+DEFECTS (each gate FAILS on the code before the fix -- measured against HEAD 7b9481a's
 dynamics.py + eryb.py):
 
   1. PHOTODARKENING MISSING FROM THE MARCH. simulate_transient_eryb's frozen-population gain g_s

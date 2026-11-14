@@ -41,7 +41,7 @@ from validation._harness import Harness                                 # noqa: 
 DEFAULT_REF = os.path.join(os.path.dirname(os.path.dirname(HERE)), "DynaMeta")
 EPS = 2.220446049250313e-16
 
-# GATE B tolerances, from the MEASURED move (main 5cbd998 = 6595bde's flux -> this tree, 2026-11-04,
+# GATE B tolerances, from the MEASURED move (main 2db6a00 = ee0ad04's flux -> this tree, 2026-11-04,
 # scipy OpenBLAS; the numbers are printed by the gate): fields (Potential relative to its max |.|,
 # densities entry-wise) and terminal currents |dI| <= TOL_B |I| + 4 eps T, T an upper bound of each
 # drift / diffusion term of the region's edges, q V_t / min(h) max(mu_n n + mu_p p) (a majority

@@ -7,7 +7,7 @@ adds an opt-in step that makes the population change implicit and solves the res
 ASE-coupled power problem to the steady solver's own tolerance, on BOTH amplifier classes. The
 default march is unchanged -- asserted byte-for-byte, not argued.
 
-Branch `feat/march-self-consistent-ase`, merged onto main `1bef664` (v0.11.3: the Er:Yb
+Branch `feat/march-self-consistent-ase`, merged onto main `f62d29d` (v0.11.3: the Er:Yb
 migration calibration, the co-doped temperature laws and `eryb_fit`). Version
 `0.11.5 -> 0.11.6` -- the slot after PR #30 (0.11.4) and PR #27 (0.11.5), which merge
 ahead of this one.
@@ -170,7 +170,7 @@ Two independent halves, both in `tests/test_march_self_consistent_ase.py`:
 * **cross-path, EXACT.** `ase_mode="quasi_static"` returns `np.array_equal` arrays to the default
   call -- `nbar2_zt`, `signal_out_W`, `pump_out_W`, `signal_gain_dB`, `ase_fwd_W`, `ase_bwd_W`,
   `power_zt`, and the co-doped `beta_yb` / `beta_yb_coupled` / `beta_yb_uncoupled`.
-* **cross-version.** End states pinned to the values v0.11.2 (`21dff60`) produced, on the 400 W
+* **cross-version.** End states pinned to the values v0.11.2 (`dc3b77e`) produced, on the 400 W
   Yb booster, the C-band EDFA and the co-doped reference marched cold on a uniform 300 us grid.
 
   Two rules keep those pins from becoming flakes, both learned in this repo. (i) Every pinned
@@ -178,7 +178,7 @@ Two independent halves, both in `tests/test_march_self_consistent_ase.py`:
   the 1 uW signal, the co-doped 1 ms and 3 ms cold grids) carry no pinned value anywhere in the
   file, because an unstable iteration amplifies its own rounding -- they are asserted by
   INEQUALITY against `solve()`, the pattern `test_fiber_dynamics.py` already uses for them.
-  (ii) The tolerance is split by whether the fixture touches LSODA (commit `533ece0`: a pin on a
+  (ii) The tolerance is split by whether the fixture touches LSODA (commit `8fab01b`: a pin on a
   value that came through the steady solver's adaptive integrator is scipy-version dependent).
   The EDFA and the co-doped fixture are seeded EXPLICITLY, so their pins are pure march
   arithmetic and hold at `1e-9` -- seven decades above the BLAS-reduction-order noise the

@@ -2,7 +2,7 @@
 (tests/test_fd_mode_complete.py; docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md).
 
 It builds, through the PUBLIC bipolar API and with the LEGACY statistics (statistics unset), every path the
-FD-mode work touches -- so it runs unchanged on the pre-change tree (06b9ade):
+FD-mode work touches -- so it runs unchanged on the pre-change tree (2fb4b76):
   * 1-D pn region, fd_enhancement=True, bandgap narrowing (the n_ie node path), the built-in SRH channel at
     a shifted level, charged bulk levels (an intrinsic-referenced acceptor, a conduction-referenced donor,
     a valence-referenced neutral), a TUPLE of BTBT sets (edge assembly with n_ie@n0/@n1), and an SiO2 region
@@ -10,7 +10,7 @@ FD-mode work touches -- so it runs unchanged on the pre-change tree (06b9ade):
   * 2-D tensor-mesh slab, fd_enhancement=True, bandgap narrowing, one BTBT set (element assembly with
     n_ie@en<k>).
 It intercepts every DEVSIM model-, equation-, parameter- and solution-defining call and returns the ordered
-log. The gate hashes it and compares to the digest recorded on 06b9ade: equal digests mean the legacy
+log. The gate hashes it and compares to the digest recorded on 2fb4b76: equal digests mean the legacy
 definition is character-for-character unchanged. No solve, no circuit.
 
 CANONICAL FORM (2026-11-08). By default the log is recorded inside tests/_cr_libm.correctly_rounded(): every

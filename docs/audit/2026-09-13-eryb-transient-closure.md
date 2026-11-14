@@ -215,7 +215,7 @@ signal, C-band ASE in 8 bins. Steady gain 24.49151 dB at 161 nodes.
 | (c) mesh part of the same residual | `O(dz^2)` | **2.33e-4 / 5.81e-5 / 1.45e-5** at 81/161/321 nodes -- exactly 4x per doubling |
 | (d) steady closure | `< 1e-5` of launched pump after refinement | table in sec. 2: **2.14e-6** at 641 nodes |
 | (e) stiff regime | no NaN, populations in `[0,1]`, `dt` over 1e-8..1e-4 s | all finite and in range; `||dt J||_inf` spans **3.6e-4 .. 3.63** on the 1 m fixture and **4.0e-3 .. 40.5** on the core-pumped one. Population overshoot before the clip is **0.0** up to `||dt J|| = 12.8` and **8.6e-2** at 40.5 |
-| (f) single-ion path unchanged | unchanged | 14 values recorded on `main @ 3496a99` (march gains, `nbar2` sums, ASE sums, the full profile-matrix sum, a `frame_as_steady` frame, and the `wall_plug_efficiency` residual / eta / heat) reproduce to **1e-9 relative** (march-derived) and **1e-5** (solve-derived); `frame_as_steady`'s meta key set is unchanged; and a structural test asserts the three new branches are unreachable on a `FiberAmplifier`. See "A gate this work got wrong first" below |
+| (f) single-ion path unchanged | unchanged | 14 values recorded on `main @ f81566b` (march gains, `nbar2` sums, ASE sums, the full profile-matrix sum, a `frame_as_steady` frame, and the `wall_plug_efficiency` residual / eta / heat) reproduce to **1e-9 relative** (march-derived) and **1e-5** (solve-derived); `frame_as_steady`'s meta key set is unchanged; and a structural test asserts the three new branches are unreachable on a `FiberAmplifier`. See "A gate this work got wrong first" below |
 
 ### A gate this work got wrong first, and what CI proved
 

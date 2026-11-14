@@ -12,7 +12,7 @@ Materials: the D1a gate materials (GaAs chi 4.07 / E_g 1.424 eV; Al0.3Ga0.7As ch
 300 K) with band-temperature models anchored at 300 K (GaAs Table I law; Al0.3Ga0.7As by Eq. (4.1) over
 GaAs and AlAs with C = -0.127 + 1.310 x) and n_i derived from its 300 K value.
 
-FAILS ON THE OLD CODE (cc0bdf0): TransportModel has no band_temperature field and materials.band_temperature
+FAILS ON THE OLD CODE (481cd82): TransportModel has no band_temperature field and materials.band_temperature
 does not exist -- every test here errors (MEASURED, audit note). The size of what the old code could do at
 best (the v0.14 route: gaps and n_i supplied at T, chi tagged at T and used unchanged) is computed
 oracle-side in each gate and asserted to exceed 5x the gate's tolerance.

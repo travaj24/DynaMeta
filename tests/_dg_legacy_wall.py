@@ -7,11 +7,11 @@ Two users:
     are a carrier sink and converge to the wide-depletion branch) and the negative control that
     re-installs ONLY the pinned carrier row on the insulator wall (pin_carrier_row).
   * tests/_sgflux_reference.py's `dg` fixture -- the cross-version Scharfetter-Gummel gate compares
-    solved arrays with tests/data/sgflux_6595bde.json, recorded on 6595bde WITH these rows; the gate
+    solved arrays with tests/data/sgflux_6595bde.json, recorded on ee0ad04 WITH these rows; the gate
     is about the flux, so its wall stays the recorded one.
 
 install_legacy_hard_wall makes exactly the DEVSIM calls of the pre-v0.15 setup_dg_hard_wall, in order,
-with the same strings (copied from 48cfbc9). set_pin_fraction co-ramps the Lambda pin with the gamma
+with the same strings (copied from 9003030). set_pin_fraction co-ramps the Lambda pin with the gamma
 fraction (what set_dg_gamma did; it still does for one release, so calling both is the same value)."""
 from __future__ import annotations
 

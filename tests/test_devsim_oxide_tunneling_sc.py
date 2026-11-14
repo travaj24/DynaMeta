@@ -20,7 +20,7 @@ ORACLES (independent of the code under test; DEVSIM supplies only the solved arr
                     == the same SiO2 split into two regions.
 OLD CODE ("the post-processor", coupling="post", the v0.14 one-sided FN / Schuegraf-Hu / Tsu-Esaki on the
 ideal-capacitor solution) is evaluated inside the gates and FAILS each of them by the amounts stated; on the
-pre-v0.15 tree (8bbf36c) every test here fails outright (no setup_oxide_tunneling: the child raises).
+pre-v0.15 tree (76e8633) every test here fails outright (no setup_oxide_tunneling: the child raises).
 Runtime: ~85 s serial (children 2-18 s).
 """
 import math

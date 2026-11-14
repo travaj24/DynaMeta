@@ -5,7 +5,7 @@ NARROWED band edge under bandgap narrowing: n1 = N_c exp(-(E_c - E_t)/kT), p1 = 
 the mirror), while the default "intrinsic" level rides the narrowed effective intrinsic level,
 n1 = n_ie exp((E_t - E_ie)/kT).
 
-Gates (independent closed forms / scipy; every one FAILS on f7c82db, which has no energy_reference):
+Gates (independent closed forms / scipy; every one FAILS on e55ce28, which has no energy_reference):
   (a) BGN slab lifetime with a level at E_c - E_t = 0.25 eV == the closed form with n1 from the
       narrowed conduction edge, for conduction_fraction gamma = 0.2 and 0.8; the "intrinsic" reading of
       the same DLTS number (E_t - E_i = kT ln(N_c/n_i) - 0.25) is off by the factor quantified here.
@@ -357,7 +357,7 @@ def test_bgn_trapped_charge_band_reference(case):
 
 
 def test_reference_composes_with_dg_scale():
-    """The density-gradient `scale` (00e2c39) composes in the ONE kernel AFTER the reference
+    """The density-gradient `scale` (0042171) composes in the ONE kernel AFTER the reference
     conversion: n1' p1' = n_i'^2 s^2 on every reference, and scale=None is the unscaled output
     character for character. Checked symbolically on the strings and numerically by evaluation."""
     for bgn in (False, True):

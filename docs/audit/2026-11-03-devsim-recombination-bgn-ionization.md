@@ -1,7 +1,7 @@
 # Bipolar DD: Auger + radiative recombination, bandgap narrowing, incomplete ionization (R26 + R27)
 
 DEVSIM phase, release v0.14.0, workstream D1b, branch `wip/dv_recomb` (off `feat/devsim-2.11-v0.14`
-at 5cbd998). Closes roadmap items **R26** (Auger + radiative recombination in the bipolar model) and
+at 2db6a00). Closes roadmap items **R26** (Auger + radiative recombination in the bipolar model) and
 **R27** (bandgap narrowing + incomplete dopant ionization) of `docs/physics_depth_roadmap.md`.
 
 ## What changed
@@ -151,7 +151,7 @@ DEVSIM solution is always what gets measured.
 | R27-c | n+ (1e19, 15 um = 13.5 L_p) / p (1e17) long diode, del Alamo, tau 1 ns, V = 0.3 V, Boltzmann | J0p = q n_ie^2 D_p/(N_D L_p); ratio exp(dEg/kT) | -6.3e-4 (BGN), +6.7e-4 (off); ratio -1.3e-3 | 2e-3 | ratio 6.84, not 1 |
 | R27-d (x12) | Si:P 1e16 cm^-3, uncompensated and 30 % B-compensated, T = 50/77/100/150/200/300 K, 2 um bar, interior kicked 50 mV | brentq charge-neutrality root | <= 7.1e-15 (mid-bar AND contact pin) | 1e-11 | ionized fraction 0.051 / 0.009 at 50 K (full ionization off 19x / 111x) |
 | R27-e | Si:B 1e16 cm^-3, 77 K (g_A = 4 branch) | brentq root | passes 1e-11 (not tabulated separately) | 1e-11 | fraction < 0.5 |
-| off-a | v0.13.0 call-log digest (217 DEVSIM calls, two fixtures incl. a circuit contact) | sha256 recorded on main 5cbd998 | identical | exact | |
+| off-a | v0.13.0 call-log digest (217 DEVSIM calls, two fixtures incl. a circuit contact) | sha256 recorded on main 2db6a00 | identical | exact | |
 | off-b | `BipolarOptions()` vs `None`, forward-biased pn diode | bitwise arrays + contact currents | identical | exact | |
 | wiring (x4) | 3-D `phi_bi` == pinned contact field (BGN + ionization + 200 K, both polarities); TransportModel/Stacked3DSpec validation; 2-D layered bar builds the option models with n p = n_ie^2; BGN+FD advisory fires once (FD) / never (Boltzmann) | | 1e-14 V | | |
 

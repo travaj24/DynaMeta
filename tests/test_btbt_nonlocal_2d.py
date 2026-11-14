@@ -3,8 +3,8 @@ Every case that adds the term runs in a CHILD process (tests/_btbt_nonlocal_chil
 registration and circuits are permanent); the children run the suite's DC well-posedness hook too. numba is
 REQUIRED for 2-D (user decision 23).
 
-OLD CODE (ec67290): setup_btbt_nonlocal refuses every 2-D device (NotImplementedError, decision 21) -- each child
-below fails at its setup call (MEASURED by running this file against an export of ec67290).
+OLD CODE (22b1ba7): setup_btbt_nonlocal refuses every 2-D device (NotImplementedError, decision 21) -- each child
+below fails at its setup call (MEASURED by running this file against an export of 22b1ba7).
 
   L2  LATERALLY UNIFORM 2-D Zener (4 rows, DEVSIM tensor mesh) at 0.9 V reverse: (a) every 2-D path == the 1-D
       model on its own row of the 2-D solution; (b) q Int G per width == the 1-D Zener DEVICE (its own solve);

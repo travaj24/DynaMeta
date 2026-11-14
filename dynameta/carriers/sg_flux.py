@@ -30,7 +30,7 @@ THE FORM: BOTH Bernoullis, B(v) and B(-v), each with DEVSIM's accurate B, combin
 
 so the Bernoulli identity is only ever used with the Bernoulli of the NON-NEGATIVE argument, where
 B(|v|) + |v| has no cancellation, and within each branch the n@n1 and n@n0 terms SHARE one Bernoulli.
-Why not the plain bracket n@n1 B(-v) - n@n0 B(v) (a4f00d9's bipolar DG form, the first proposal):
+Why not the plain bracket n@n1 B(-v) - n@n0 B(v) (e36e808's bipolar DG form, the first proposal):
 it is exactly as accurate at large |v|, but its two Bernoullis -- and in the Jacobian their two
 dBdx -- are rounded INDEPENDENTLY, while near equilibrium (|v| small, n@n1 ~ n@n0, the flux a tiny
 difference of two large terms) the shared Bernoulli makes its rounding common-mode, multiplied by
@@ -56,7 +56,7 @@ its B(v) always was. The density-gradient fluxes keep upper_clamp=True, B(min(ar
 in value (it moves B by < 2.8e-85 where it binds) kept as belt-and-braces for the log-singular
 Lambda of a hard wall in Newton transients. The branch selected for |v| > 200 always carries the
 linear c v term, so even a clamped Bernoulli never zeroes a Jacobian column (the two-sided clamp
-under a4f00d9's plain bracket did: "Convergence failure!" / "umfpack numeric failed" on the bipolar
+under e36e808's plain bracket did: "Convergence failure!" / "umfpack numeric failed" on the bipolar
 DG wall gates, docs/audit/2026-11-03-devsim-bipolar-density-gradient.md sec. 1.6); a lower clamp is
 still never used.
 """

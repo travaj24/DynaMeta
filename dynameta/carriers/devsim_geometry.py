@@ -69,7 +69,7 @@ MEASURED). That identity holds per element for the P1-FEM edge weights -V_T L_e 
 equal the circumcentric couples in 2-D only. A kernel that squares a per-element sum (noise_analysis's
 per-element Hooge source) was therefore biased in 3-D on every mesh (MEASURED S f N / (alpha I^2) = 1.125
 on the devsim_3d Kuhn bar, 1.000 on a 5-tet bar, with or without this correction); noise_analysis now uses
-the P1 element couples (ab3419e), so this correction and that one are independent.
+the P1 element couples (d08412e), so this correction and that one are independent.
 
 WHEN TO USE IT. The builders do it for you (exact_geometry=True; False reproduces DEVSIM's uncorrected
 geometry, 'raise' / 'clip' pick the other negative policies -- resolve_policy). By hand: on any raw-API

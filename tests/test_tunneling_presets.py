@@ -21,7 +21,7 @@ INDEPENDENT ORACLES (nothing below is imported from the code under test except t
     bowings (E_g 0.477 eV, m_e 0.0091, m_lh(001) 0.0202); Eq. (2.16) m0/m_lh[001] = gamma1 + 2 gamma2;
     Eq. (4.1) (1-x) A + x B - x(1-x) C at x(In) = 0.53.
 
-FAILS ON THE OLD CODE (66f6185; MEASURED by running this file there: 21 failed, the strict xfail fails
+FAILS ON THE OLD CODE (e7c469d; MEASURED by running this file there: 21 failed, the strict xfail fails
 too) -- SILICON_KAO_*, GERMANIUM_KAO*, IN053GA047AS_KANE, kane_direct_params, btbt_at_temperature and
 btbt_for_material do not exist (AttributeError); BTBTParams has no T_K / scale_B_with_gap / source / process /
 verification fields (TypeError). The strict xfail (Kao consistency) is the plan's P3.
@@ -86,7 +86,7 @@ def test_p1_germanium_is_the_tuple_of_both_processes():
 
 
 def test_p1_hurkx_set_is_bit_identical_to_v014():
-    """Defaults off (P7, devsim-free half): SILICON_HURKX keeps the v0.14 bits (float.hex re-typed from 66f6185:
+    """Defaults off (P7, devsim-free half): SILICON_HURKX keeps the v0.14 bits (float.hex re-typed from e7c469d:
     A_SI = 4000000000000000.5, B = 1.9e9, P = 2.5) and equals a bare BTBTParams of those numbers (provenance
     is not compared)."""
     p = TN.SILICON_HURKX

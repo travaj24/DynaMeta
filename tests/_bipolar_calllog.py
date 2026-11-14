@@ -2,7 +2,7 @@
 (tests/test_bipolar_recombination_bgn_ionization.py).
 
 It builds two small bipolar fixtures through the PUBLIC bipolar API WITHOUT the new `options` keyword
-(so it runs unchanged on v0.13.0 / main 5cbd998) while intercepting every DEVSIM model-, equation-,
+(so it runs unchanged on v0.13.0 / main 2db6a00) while intercepting every DEVSIM model-, equation-,
 parameter- and solution-defining call, and returns that ordered call log. The gate hashes it and
 compares to the digest recorded on v0.13.0 -- re-recorded 2026-11-04 for the two-Bernoulli SG flux
 (sg_flux), the one intended change: equal digests mean the defaults-off physics DEFINITION is

@@ -18,7 +18,7 @@ impedance-matched per end (`sig_max` scaled by `n`), and the incident reference 
 superstrate run so the reflection subtraction is exact in the incidence medium. `T0` carries the
 `n_sub/n_super` Snell power-flux ratio; the Poynting `R_flux`/`T_flux` already carry `n` through H.
 The seam (`make_fdtd_optical_solver`, `fdtd_sweep_spectrum`) accepts lossless non-vacuum for uniform
-AND structured stacks (shipped 29a580e, 2026-06-08; `validation/fdtd_structured_nonvacuum.py`); a lossy
+AND structured stacks (shipped 3b80732, 2026-06-08; `validation/fdtd_structured_nonvacuum.py`); a lossy
 (complex) end medium still routes to FEM/TMM.
 Oracle: `validation/fdtd_nonvacuum_vs_tmm.py` -- three-medium Airy TMM + lossless energy, 2D & 3D,
 `max|dR0|,|dT0| ~ 1e-3`, `|R_flux+T_flux-1| ~ 1e-5`.
@@ -30,7 +30,7 @@ polarization `PL`), so `eps(w) = eps_inf - wp^2/(w^2 + i w gd) + d_eps w0^2/(w0^
 natively across the band -- a bound-electron / interband resonance the bare Drude cannot represent.
 With `d_eps=0` the path is byte-identical (`lor=None`). `fit_drude_lorentz` (seam) fits both poles to
 sampled `eps(lambda)` with a scaled, multi-start least-squares (robust to the resonance overshoot).
-The Lorentz ADE runs in 2D and the full-vector 3D kernels since f768b53
+The Lorentz ADE runs in 2D and the full-vector 3D kernels since fbb415e
 (`validation/fdtd_3d_lorentz_vs_tmm.py`).
 Oracle: `validation/fdtd_drude_lorentz_vs_tmm.py` -- dispersive coherent TMM (same `eps(w)`), pure-Lorentz
 isolation, the fit, and cross-backend (numba == numpy) consistency.
@@ -89,17 +89,17 @@ max R@1500nm + min R@1300nm grows the spectral separation 12x to a binary design
 
 ## Formerly deferred -- shipped 2026-06-08
 - Full 3-D / structured tensor FDTD: SHIPPED -- `solve_fdtd_3d_mo` with the magnetized-Drude ADE
-  (81869cd, `validation/fdtd_3d_mo_vs_1d.py`) plus the per-cell structured 3D tensor (ba9498d,
+  (82ba1d5, `validation/fdtd_3d_mo_vs_1d.py`) plus the per-cell structured 3D tensor (df05e4d,
   `validation/fdtd_3d_structured_tensor.py`).
-- Oblique on the jax backend, p-pol (TM), and structured/3-D oblique: SHIPPED -- TM oblique (3c47729),
-  3D oblique (3257ac6), oblique JAX (7dac08c), each with its own validation.
+- Oblique on the jax backend, p-pol (TM), and structured/3-D oblique: SHIPPED -- TM oblique (803d0b5),
+  3D oblique (eebc49e), oblique JAX (455d0b0), each with its own validation.
 
 ## Resolved (was: blocked on environment)
 
 ### Numba-CUDA GPU kernel -- RESOLVED (2026-06-10)
-The fused `numba.cuda` GPU kernel shipped f1b72e6 (2026-06-09). CUDA 13.1 and an RTX 4070 Ti are now
-installed, and the kernel is hardware-validated: linear GPU == CPU to ~4e-15 (d2ca751), nonlinear worst
-2.6e-15 (d646875). The CuPy backend already runs the vectorized loop on a device when one is available;
+The fused `numba.cuda` GPU kernel shipped 6a51a37 (2026-06-09). CUDA 13.1 and an RTX 4070 Ti are now
+installed, and the kernel is hardware-validated: linear GPU == CPU to ~4e-15 (92fd534), nonlinear worst
+2.6e-15 (964ed57). The CuPy backend already runs the vectorized loop on a device when one is available;
 on Windows a JAX-GPU build is WSL2-only.
 
 ## Already resolved (correction)

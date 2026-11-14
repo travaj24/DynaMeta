@@ -63,8 +63,8 @@ def test_resolving_every_carriers_name_does_not_load_ngsolve():
     """v0.14 task 8 (user decision 2026-11-04): the FEM carrier modules (electrostatics_fem,
     electrothermal, fem_mesh, thermal_fem.*) import ngsolve LAZILY (dynameta.lazy_import.LazyModule).
     ngsolve's own OpenBLAS commits ~4 GB per process at load; MEASURED (box A) for this child: private
-    commit 6170 MB on 6595bde (ngsolve + netgen loaded) vs 1652 MB now, = `import dynameta.carriers`
-    alone (1649 MB). Fails on 6595bde ('ngsolve' in sys.modules). The FEM tests (test_fem_drivers,
+    commit 6170 MB on ee0ad04 (ngsolve + netgen loaded) vs 1652 MB now, = `import dynameta.carriers`
+    alone (1649 MB). Fails on ee0ad04 ('ngsolve' in sys.modules). The FEM tests (test_fem_drivers,
     test_electrothermal, ...) are the gate that the lazy proxy still solves."""
     code = "\n".join([
         "import sys, dynameta.carriers as c",

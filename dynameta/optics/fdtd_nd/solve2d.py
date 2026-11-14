@@ -530,7 +530,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     were the cell centres (k+1/2)*dz, a -dz/2 structure shift = a -n_super k0 dz bias on r0's phase;
     see fdtd_nd.grid.material_z). `z_subcell` 'average' (default, 2026-11-02) fill-averages each
     node's z control volume (fdtd_nd.grid.mix_profile; the painter's own lateral raster is untouched,
-    and the pad check then skips the mixed face nodes); 'point' = the 2b7a002 point rule bit-for-bit.
+    and the pad check then skips the mixed face nodes); 'point' = the 2531d5d point rule bit-for-bit.
     Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
@@ -558,7 +558,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                                   "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
                                   "for an absorbing incidence/exit medium).".format(n_super, n_sub))
     courant = courant_guard("solve_fdtd_2d", courant)        # audit D-11 (CFL bound, shared)
-    z_subcell = check_z_subcell("solve_fdtd_2d", z_subcell)  # 'average' default | 'point' (2b7a002)
+    z_subcell = check_z_subcell("solve_fdtd_2d", z_subcell)  # 'average' default | 'point' (2531d5d)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
@@ -938,7 +938,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     _drude_vals = {"eps_inf": [1.0] + [L.eps_inf for L in layers] + [1.0],
                    "wp": [0.0] + [L.drude_wp_rad_s for L in layers] + [0.0],
                    "gam": [0.0] + [L.drude_gamma_rad_s for L in layers] + [0.0]}
-    if z_subcell == "point":                                 # opt-out: 2b7a002 point rule, bit-for-bit
+    if z_subcell == "point":                                 # opt-out: 2531d5d point rule, bit-for-bit
         for L, m in layer_masks(material_z(nz, dz), pad, layers):
             eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
     else:

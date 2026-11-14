@@ -506,7 +506,7 @@ def test_gate7_cross_platform_q_anchor_unchanged():
 def test_gate7_anchor_converges_to_fabry_perot():
     """Companion of the re-pinned anchor (2026-11-03): the n_slab = 3.5 etalon Q converges to the
     closed-form Fabry-Perot Q between res 30 and res 60 with observed order >= 1.7. Measured:
-    |Q/Q_FP - 1| = 2.121% -> 0.253% (order 3.07); the 2b7a002 point rule gave 1.155% -> 0.370%
+    |Q/Q_FP - 1| = 2.121% -> 0.253% (order 3.07); the 2531d5d point rule gave 1.155% -> 0.370%
     (order 1.64 -- it would fail this gate)."""
     errs = []
     for res in (30, 60):
@@ -872,7 +872,7 @@ def test_nls_refinement_makes_the_fdtd_q_seed_independent():
 
 
 def test_q21_degenerate_modes_are_split_by_index_not_by_value():
-    """audit Q-21 (fixed in wave 1, d602866, without a gate): _nls_refine_real split refined vs
+    """audit Q-21 (fixed in wave 1, 37fd9d7, without a gate): _nls_refine_real split refined vs
     fixed modes with `m not in osc`, i.e. dataclass VALUE equality, so a mode whose exact duplicate
     was among the refined ones vanished from the design matrix AND from the output. Two
     value-identical seed modes, max_refine = 1: both must come back (one refined, one fixed)."""
@@ -911,7 +911,7 @@ def _growing_warnings(fn):
 @pytest.mark.parametrize("drift_rate", [-0.1, +0.1])            # growing / decaying drift
 def test_drift_i_resonance_plus_slow_drift(drift_rate):
     """(i) A decaying resonance plus a slow real drift: no growing-pole warning, Q recovered to fit
-    accuracy, the drift REPORTED (rate and amplitude). On the 2b7a002..f024801 fitter the growing
+    accuracy, the drift REPORTED (rate and amplitude). On the 2531d5d..2501e62 fitter the growing
     drift pole (rate -0.1) was dropped WITH a growing-pole warning (measured), and a decaying one
     came back as an omega = 0 Mode."""
     y, dt, w, g = _resonance_plus_drift(drift_rate)

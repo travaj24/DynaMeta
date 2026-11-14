@@ -271,7 +271,7 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     # explodes far enough that the emptied band surfaces as numpy's confusing "zero-size array to
     # reduction operation fmax" rather than anything naming the CFL bound.
     courant = courant_guard("solve_fdtd_mo_1d", courant)
-    z_subcell = check_z_subcell("solve_fdtd_mo_1d", z_subcell)   # 'average' default | 'point' (2b7a002)
+    z_subcell = check_z_subcell("solve_fdtd_mo_1d", z_subcell)   # 'average' default | 'point' (2531d5d)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -290,7 +290,7 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     # fdtd_nd.grid.material_z / layer_masks -- bit-identical here (same expression, same float
     # accumulation). Gates: tests/test_fdtd_mo_oblique.py::test_s2_14_* and
     # tests/test_fdtd_registration.py.
-    if z_subcell == "point":                                 # opt-out: 2b7a002 point rule, bit-for-bit
+    if z_subcell == "point":                                 # opt-out: 2531d5d point rule, bit-for-bit
         for L, m in layer_masks(material_z(nz, dz), pad, layers):
             exx[m] = L.eps_xx; eyy[m] = L.eps_yy
             wp[m] = L.drude_wp_rad_s; gam[m] = L.drude_gamma_rad_s; wc[m] = L.cyclotron_wc_rad_s

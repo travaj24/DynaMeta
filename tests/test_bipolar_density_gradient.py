@@ -4,7 +4,7 @@ seed_bipolar_dg). The physics oracles are the functions of validation/bipolar_de
 (run it for the full report); every one is independent of the code under test. Formulation and the
 measured numbers: docs/audit/2026-11-03-devsim-bipolar-density-gradient.md.
 
-On the integration base e46bd25 every physics gate here FAILS (there is no hole quantum potential and
+On the integration base 07587b4 every physics gate here FAILS (there is no hole quantum potential and
 no setup_bipolar_dg); the two defaults-off digest gates PASSED there by construction (they pinned that
 the pre-D2d definitions were unchanged) until the 2026-11-04 two-Bernoulli flux re-recorded them (the
 cross-version numeric half: tests/test_devsim_sg_flux.py)."""
@@ -23,22 +23,22 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 
 # sha256 of tests/_dg_calllog.record_call_log() -- the UNIPOLAR in-Newton DG definition, character-for-
 # character. RE-RECORDED 2026-11-04 (139 calls) for the two-Bernoulli SG flux (sg_flux; user decision):
-# the e46bd25 / 6595bde value 6bcbe925...febad4 (127 calls) is the kahan3 flux. The call logs differ
+# the 07587b4 / ee0ad04 value 6bcbe925...febad4 (127 calls) is the kahan3 flux. The call logs differ
 # ONLY in the flux models (measured: the ElectronCurrent / ElectronCurrentDG strings and derivatives,
 # Bern_g_dg's clamp, the new Bern_g_m / Bern_g_dg_m and their derivatives; +12 calls). What the old
 # digest pinned numerically is kept by tests/test_devsim_sg_flux.py's cross-version gate (the fixture
-# SOLVED vs 6595bde, to the flux change's measured round-off).
+# SOLVED vs ee0ad04, to the flux change's measured round-off).
 # RE-RECORDED 2026-11-06 (133 calls; v0.15 item 4.4.4, decision 53): the fixture's wall is now
 # setup_dg_insulator_wall (setup_dg_hard_wall is a deprecated shim onto it -- its log is gated EQUAL in
 # tests/test_density_gradient.py) and the seed passes walls=("wall",). Diffed against the 139-call log of
-# 48cfbc9: the ONLY differences are the wall rows (no wall_lambda_pin / _full parameters and their two
+# 9003030: the ONLY differences are the wall rows (no wall_lambda_pin / _full parameters and their two
 # set_dg_gamma co-ramp sets; the Lambda row 'Electrons - QSqrtN*QSqrtN' replaces 'QLambda +
 # wall_lambda_pin'; no pinned ElectronContinuityEquation contact row) and the seed's node values (plus
 # the seeded Electrons). Every region model, edge model and flux string is unchanged.
 # RE-RECORDED 2026-11-10 (v0.15.1) as the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
-# tests/_cr_libm.py) on an export of e95a638 (the commit that recorded the value above) with the current
+# tests/_cr_libm.py) on an export of 7e44010 (the commit that recorded the value above) with the current
 # recorder + helpers copied in: 6af06e07... on Windows AND in WSL (glibc), = this tree's on both. The raw
-# digest of e95a638 and of this tree is still 44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374
+# digest of 7e44010 and of this tree is still 44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374
 # on both platforms (the same log), but it carried numpy's np.tanh in the wall seed, which misses 3 of the
 # fixture's 15 arguments by 0.57-0.68 ulp (vs mpmath at 300 bits; identically on both platforms -- numpy's own
 # tanh, not the C library); cancellation in the seed turns that into 1-433726 ulp in 9 literals of 3 calls.
@@ -46,12 +46,12 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 _DG_CALLLOG_DIGEST = "6af06e078b7bdd3c41c02611e288dbd069b11228b9d7e97aebf25b4f7f29ef60"
 _DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
-# RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
-# e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
+# RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 2db6a00) /
+# 07587b4 / ee0ad04 value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
 # ElectronCurrent / HoleCurrent and their derivatives plus Bern_g_m / Bern_gp_m (+20 calls).
-# Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
+# Numerically pinned against ee0ad04 by tests/test_devsim_sg_flux.py.
 # 2026-11-10 (v0.15.1): now the CANONICAL log's digest (correctly rounded transcendentals, tests/_calllog.py),
-# re-recorded on an export of 273473b (the commit that recorded it): the SAME value, on Windows AND in WSL,
+# re-recorded on an export of f2b2842 (the commit that recorded it): the SAME value, on Windows AND in WSL,
 # raw and canonical, and = this tree's -- none of this log's transcendental results is a hard rounding case on
 # either platform. It is pinned canonically so that stays true on any other libm.
 _BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
@@ -59,7 +59,7 @@ _BIPOLAR_CALLLOG_CALLS = 237
 # v0.15.0 (2026-11-07, the default statistics 'fermi_dirac'): the two digests above are now those of the
 # EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
 # tests: default == explicit 'fermi_dirac').
-# 2026-11-10 (v0.15.1): both CANONICAL (tests/_calllog.py), re-recorded on an export of 8434cce (the commit that
+# 2026-11-10 (v0.15.1): both CANONICAL (tests/_calllog.py), re-recorded on an export of f7f245c (the commit that
 # recorded them), Windows AND WSL, = this tree's on both. DG: the raw digest on both platforms was
 # 89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded (the same np.tanh seed misses as
 # _DG_CALLLOG_DIGEST); bipolar: canonical = raw, unchanged (its ~1.4e6 np.power elements of the FD
@@ -75,7 +75,7 @@ _BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
 def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     """The shared kernel (_install_dg_variables), the generalized contact repoint and the hole-aware
     set_dg_gamma leave the UNIPOLAR DG's every DEVSIM definition call -- expression strings,
-    parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
+    parameter values, equation bindings, in order -- exactly as recorded (07587b4 up to the
     2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST). Canonical logs since 2026-11-10 (v0.15.1). STILL
     BITES (MEASURED on Windows and in WSL, canonical): lam = v_t ln(t t) written v_t (2 ln t) -- mathematically
     equal -- moves 6 seed literals by 1-12118 ulp and changes both digests; a text change of the DG contact
@@ -90,7 +90,7 @@ def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
 
 
 def test_bipolar_dd_without_dg_is_byte_identical():
-    """No bipolar DG requested -> the bipolar DD definition is the recorded one (v0.13 / e46bd25 up to
+    """No bipolar DG requested -> the bipolar DD definition is the recorded one (v0.13 / 07587b4 up to
     the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
     `scale` keyword defaults to None). Canonical logs since 2026-11-10 (v0.15.1); STILL BITES (MEASURED,
     Windows and WSL): see tests/test_bipolar_recombination_bgn_ionization.py::test_defaults_off_physics_
@@ -282,7 +282,7 @@ def test_dg_edge_flux_is_accurate_at_large_drift(carrier):
     c@n0 B(-v) (holes) with a 40-digit mpmath B, at the v DEVSIM computed. Gate 1e-13. The kahan3
     form (B(-v) spelled B(v) + v) FAILS it: measured 1.9e-7 at v = -21, 6.5e-5 at -27.6, 100 % at
     -40, so the gate fails on it for both carriers; the two-Bernoulli form measured 3.0e-16
-    (electrons) / 3.1e-16 (holes) on both OpenBLAS builds (a4f00d9's plain bracket), and the ONE SG
+    (electrons) / 3.1e-16 (holes) on both OpenBLAS builds (e36e808's plain bracket), and the ONE SG
     kernel's sign-selected bracket (dynameta.carriers.sg_flux, 2026-11-04) 3.3e-16 / 2.2e-16. Every
     other flux family: tests/test_devsim_sg_flux.py."""
     mp = pytest.importorskip("mpmath")
