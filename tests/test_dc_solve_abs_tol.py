@@ -247,7 +247,7 @@ def test_default_sizes_every_live_device():
     1 V) is left live -- as a module-scoped fixture of another test file is under xdist -- and a light
     1e22 slab is then solved by solve_dc(abs_tol=None): it must converge, to its solo answer within
     rel_tol (measured: bitwise), and default_abs_tol() must be the max over devices of 1024 u_d S_d.
-    FAILS ON 94e61fc (measured): default_abs_tol(device) sized the light slab alone (exactly 1e10,
+    FAILS ON 4a606c4 (measured): default_abs_tol(device) sized the light slab alone (exactly 1e10,
     0.11 ulp of the live 4e26 background), so the joint Newton ran its 60 iterations and raised -- the
     same mechanism as the order-dependent test_w1_layered_oxide_tunneling_extras_and_default_off
     failure (the leftover there: test_devsim_tunneling's module-scoped 9 V MOS, floor 2.0e11 against
@@ -288,7 +288,7 @@ def test_mixed_precision_devices_are_sized_by_the_double_one():
     """GATE: u is per device. A live extended-precision device (residual in 128-bit) must not shrink
     the tolerance of a DOUBLE device solved with it (its residual stays double inside the extended
     Newton): with an extended slab (8e25) live, default_abs_tol() = 1024 * 2^-53 * S of the double
-    ITO gate, and solve_dc converges the ITO ramp. FAILS ON 94e61fc (measured): XP.any_enabled() made
+    ITO gate, and solve_dc converges the ITO ramp. FAILS ON 4a606c4 (measured): XP.any_enabled() made
     u = 2^-113 for everything, so the default was exactly 1e10 (0.11 ulp of 4e26) and the first gate
     step exhausted its iterations."""
     from dynameta.carriers import dc_solve as DC

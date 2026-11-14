@@ -121,7 +121,7 @@ def main():
     # true-geometry TMM. (a) REGRESSION bound: per wavelength, max(|dR|, |dT|) <= C_GEOM_SWEEP * X^2
     # with this stack's own registration-sweep constant (see C_GEOM_SWEEP). (b) PHYSICS: observed order
     # >= 1.7 between res 28 and 56 on a cheaper probe of the same engine (solve_fdtd_2d on the same
-    # three layers, nx = 2; the 2x-res sweep of THIS config costs ~8x its ~21 s). Under the 2b7a002
+    # three layers, nx = 2; the 2x-res sweep of THIS config costs ~8x its ~21 s). Under the 2531d5d
     # point rule (b) FAILS here (the staircase does not converge on this near-AR stack: see the doc).
     ratio_a = float(np.max(err_a / (C_GEOM_SWEEP * X_a ** 2)))
     order_1, ep = _probe_order(d)

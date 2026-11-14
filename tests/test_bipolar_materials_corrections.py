@@ -7,7 +7,7 @@ EVERY ORACLE IS INDEPENDENT OF THE CODE UNDER TEST: literature constants are re-
 units and with the equation/table numbers of the primary sources; freeze-out roots are solved with
 scipy brentq on a hand-written residual; k/q come from scipy.constants.
 
-EVERY GATE FAILS ON THE PRE-FIX CODE (189c648), measured by running this file against it:
+EVERY GATE FAILS ON THE PRE-FIX CODE (3ba3a2a), measured by running this file against it:
   * del Alamo basis: the p-type 1e19 cm^-3 node gave dEg = 49.73 meV against the oracle's 0, the
     compensated (1e19 / 1e18) node 51.51 meV against 49.73 (+1.78 meV);
   * Sb: 39 meV against the table's 42.74 meV (-3.74 meV);

@@ -463,7 +463,7 @@ def test_defaults_off_same_tree_call_log_and_arrays():
     bulk level and on the 1-D MOS with a split D_it (surface SRH on): the logged DEVSIM call sequence
     (every node/edge model, equation, parameter, solution, contact model and node-value call, with its
     arguments) and every solved array are IDENTICAL, and no kinetic model exists. (ii) the call-log
-    digest gate (tests/test_bipolar_recombination_bgn_ionization.py) and (iii) the 6595bde numeric
+    digest gate (tests/test_bipolar_recombination_bgn_ionization.py) and (iii) the ee0ad04 numeric
     cross-version gate (tests/test_devsim_sg_flux.py) pass unchanged -- run, not re-recorded (audit note)."""
     la, aa = _ab_state(False)
     lb, ab = _ab_state(True)
@@ -1796,7 +1796,7 @@ def test_a_kinetic_level_holds_charge_and_conserves_it_in_ssac():
     E_c - 0.3 eV with e_n = 1e6 /s, so it responds at 1 MHz): (a) Kirchhoff Y_V1 + Y_V2 = 0 to 10x the trap-free
     ssac floor for the acceptor-like AND the donor-like kinetic level; (b) the FDT on the gate-B diode with the
     same charge kinds kinetic, S_I = 4kT Re Y to 1e-4 at 1 Hz and 1 MHz. MEASURED: floor 1.3e-8; acceptor
-    3.5e-10, donor 4.3e-9; FDT acceptor 3.3e-8 at 1 MHz. FAILS ON d543fa9 (the refusal does not exist; the
+    3.5e-10, donor 4.3e-9; FDT acceptor 3.3e-8 at 1 MHz. FAILS ON 862493a (the refusal does not exist; the
     neutral kinetic level it accepted broke Kirchhoff by 3.5e-3 of Y at 1 MHz -- 2.8e5 x the floor -- and the
     FDT by +0.39: it stored N_t f in its trap row's time term but not in Poisson). Both the DC state and 1 Hz were
     unaffected, which is why only the small-signal / noise gates saw it.)"""

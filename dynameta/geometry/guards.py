@@ -5,7 +5,7 @@ whose geometry it cannot build.
 WHY (2026-11-02, workstream B2 of the lumenairy-5.50 bridge PR): `Stack.features` (vias, T-patch
 stems) and `Inclusion.taper` (sidewall tapers) are VALIDATED data-model fields, so a Design carrying
 them constructs cleanly -- and then every backend that lays down `stack.layers` only simply never
-reads them. Measured on 810086b with a 300 nm cell, 120 nm + 80 nm lossless layers and one 100 x 100 nm
+reads them. Measured on 7bfea2e with a 300 nm cell, 120 nm + 80 nm lossless layers and one 100 x 100 nm
 Cu via (z 0..200 nm) at 1.31 um, normal incidence: the TMM solver, design_layer_stack,
 layered_stack_from_design, the RCWA / 1-D PMM / 2-D PMM / Berreman / EMT-screen bridges,
 design_to_fdtd_layers and the 2-D FDTD solver ALL ran and returned R/T bit-identical (repr) to the

@@ -470,7 +470,7 @@ def test_amplifier_saturation_energy_picks_the_right_ion():
 
 # ==================== gate (f): the single-ion paths are BYTE-IDENTICAL =====================
 
-# Recorded on main @ 3496a99 (pre-change) and re-read on this branch: the dispatch, the
+# Recorded on main @ f81566b (pre-change) and re-read on this branch: the dispatch, the
 # frame_as_steady fallback and the efficiency hook must not move the FiberAmplifier path.
 #
 # WHY TOLERANCES AND NOT `==`. The first version of this gate compared float64 hex with `==`.

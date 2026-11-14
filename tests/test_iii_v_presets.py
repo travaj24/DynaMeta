@@ -9,7 +9,7 @@ ORACLES are the papers' numbers RE-TYPED here in the units they quote, with thei
     B_eff = (0.78 +/- 0.07)e-10 cm^3/s of the 2 um DH (abstract, Sec. VII) -- read in the primary.
   Strauss, Ruhle & Kohler, APL 62, 55 (1993): C_eff = (7 +/- 4)e-30 cm^6/s (abstract record only).
   Semyonov et al., arXiv:1003.6095, Eq. (6): B_R = 1.2e-10 (1 - 0.092 n/1e18) cm^3/s -- read in the primary.
-FAILS ON OLD CODE (40b1ede): the presets and RadiativeModel(kind=, photon_recycling_factor=) do not exist --
+FAILS ON OLD CODE (bd925ac): the presets and RadiativeModel(kind=, photon_recycling_factor=) do not exist --
 the import below raises at collection (ImportError), which fails the file (no importorskip on purpose).
 """
 import dataclasses

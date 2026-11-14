@@ -127,7 +127,7 @@ def _declare_dg_variables(device: str, region: str, u: str, lam: str) -> None:
 # upper_clamp=True: B(min(v, 200)), a value no-op kept for the log-singular Lambda of a hard wall in
 # Newton transients (DEVSIM 2.11.2's B / dBdx are finite at any argument -- sg_flux header). The
 # unipolar DG's former TWO-SIDED clamp B(clamp(v, -200, 200)) is gone with its kahan3 flux: under
-# a4f00d9's plain two-Bernoulli bracket it froze BOTH Bernoullis once |v| > 200 and zeroed a wall
+# e36e808's plain two-Bernoulli bracket it froze BOTH Bernoullis once |v| > 200 and zeroed a wall
 # node's Jacobian column (MEASURED 2026-11-03 on the bipolar DG: "Convergence failure!" / "umfpack
 # numeric failed"); the kernel's sign-selected bracket keeps the linear c v term there anyway.
 
@@ -189,7 +189,7 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
 # DG Bernoulli argument, through the ONE SG kernel (sg_flux) --
 #     Jn ~ n@n1 B(-v) - n@n0 B(v) ,   Jp ~ -( p@n1 B(v) - p@n0 B(-v) ) ,
 # both Bernoullis evaluated, combined sign-selected (sg_flux header).
-# HISTORY. The bipolar DG switched first (a4f00d9, 2026-11-03, to the plain bracket above): the
+# HISTORY. The bipolar DG switched first (e36e808, 2026-11-03, to the plain bracket above): the
 # kahan3 spelling B(-v) = B(v) + v cancels for v << 0 (relative error ~ eps |v| e^|v|: 1.9e-7 at
 # v = -21, 6.5e-5 at -27.6, 100 % at -40), and an insulator-wall edge sits at |v| = ln(c@n1/c@n0) ~ 20-28 BY CONSTRUCTION (the wall
 # node holds c = u_floor^2 = 1e-12 c_cl); GATE C (validation/bipolar_density_gradient.py) then sat in

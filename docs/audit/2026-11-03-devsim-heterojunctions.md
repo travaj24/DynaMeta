@@ -146,7 +146,7 @@ algebra, Fermi-Dirac by direct quadrature, depletion approximation, Richardson l
 J(10 mV) = 4.005e7 A/m^2 = the ohmic `V/(L/(q mu n))` exactly; zero-offset TE 2.478e7 vs the analytic
 series value 2.46e7 (bulk + `kT/(q A* T^2 u e^Delta)`); TE with A* x 1e6 -> 4.005439e7 (1e-6).
 
-Every gate FAILS on v0.13.0 -- checked by running this test file against `git archive 5cbd998`
+Every gate FAILS on v0.13.0 -- checked by running this test file against `git archive 2db6a00`
 (18 non-slow tests: 7 failed + 11 errored): `NotImplementedError` "both solve carrier continuity" (9,
 every 2-D device fixture), `ModuleNotFoundError: dynameta.carriers.physics_heterojunction` (3),
 `TypeError` for the new `heterointerface` / `richardson_n_Am2K2` keywords (4: the 3-D DD heterostack
@@ -156,7 +156,7 @@ spec, the isotype fixture, the model-name test). The slow 2-D equilibrium gate r
 Run cost (box A, measured --durations): whole file 609 s; the slow equilibrium fixture 457 s, the rest ~150 s
 (3-D 53 s, isotype set 32 s, homojunction pair 18 s, p-n 10 s + 15 s of oracle quadrature).
 
-## 4b. Temperature (follow-up on the integration tip e46bd25)
+## 4b. Temperature (follow-up on the integration tip 07587b4)
 
 **Defect.** With `BipolarOptions.T_K != T_REF` the bulk ran at `V_t = k T_K / q`, but the heterointerface
 did not: `interface_models` used `V_T` in the barrier offsets and `A* T_REF^2`; the Anderson frame
@@ -197,9 +197,9 @@ direct input and must be given at T_K. The activity `L = ln u + Delta(u)` is dim
 | T-b N-AlGaAs / p-GaAs V_bi, 250 K | W_p - W_n at T (N_c(T), N_v(T), FD quadrature) = 1.541861 V | 1.541899 V (+3.9e-5 V); dE_c from densities 5e-15 eV; flat E_F | 2e-4 V |
 | T-b, 350 K | = 1.460468 V | 1.460492 V (+2.5e-5 V); dE_c 7.9e-8 eV; flat E_F (QFL checked where the carrier > 1e3 m^-3; minority AlGaAs holes at ~1 m^-3 sit on the Newton floor, 2.0e-4 eV) | 2e-4 V |
 | T-c refusals | mixed T_K (250 / 300 K bipolar), unipolar DD (T_REF) next to 250 K bipolar, n_i given at 300 K for 250 K | NotImplementedError "NON-ISOTHERMAL" x2, ValueError "AT that temperature" | -- |
-| T-d 300 K | the existing gates' solutions | SHA-256 of every solution array of the p-n (0, 0.7, 0.8 V), homojunction pair and 10-device isotype fixtures: IDENTICAL on e46bd25 and this tree (430b827a..., 8dd9d065..., 90cdd513...) | identical |
+| T-d 300 K | the existing gates' solutions | SHA-256 of every solution array of the p-n (0, 0.7, 0.8 V), homojunction pair and 10-device isotype fixtures: IDENTICAL on 07587b4 and this tree (430b827a..., 8dd9d065..., 90cdd513...) | identical |
 
-On e46bd25 (`git archive e46bd25` + the new test file): all 8 temperature tests fail. T-a and T-b are
+On 07587b4 (`git archive 07587b4` + the new test file): all 8 temperature tests fail. T-a and T-b are
 refused for the WRONG reason -- the band-gap check evaluates the 250/350 K n_i with the 300 K kT and the
 300 K N_c, N_v (E_g = 1.7229 eV vs 1.424); `ni_at_300K` shows the silent path: an n_i that is consistent
 at 300 K builds a 250 K heterojunction with NO error ("DID NOT RAISE") and runs its interface at 300 K;

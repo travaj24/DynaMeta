@@ -64,7 +64,7 @@ def test_legacy_trapspec_enabled_refuses_and_points_to_the_working_api():
     """materials.TrapSpec was read by nothing: TransportModel(traps=TrapSpec(enabled=True)) built and solved
     with the trap SILENTLY ignored (user decision 2026-11-04). enabled=True now raises at construction
     AND on later mutation (TrapSpec.__setattr__), naming TrapLevel / InterfaceTraps and the keywords that
-    work. Fails on 6595bde (no raise). enabled=False (the default) is unchanged."""
+    work. Fails on ee0ad04 (no raise). enabled=False (the default) is unchanged."""
     from dynameta.materials import TransportModel, TrapSpec
     with pytest.raises(NotImplementedError, match="TrapLevel") as ei:
         TrapSpec(enabled=True)
@@ -212,7 +212,7 @@ def test_defaults_off_byte_identical():
     """traps=None / traps=() / srh_trap_energy_eV=0.0 against the bare legacy call on a forward-biased
     1-D Si diode: the node-model inventory and every solved array (Potential, Electrons, Holes, USRH,
     PotentialNodeCharge, ElectronGeneration, contact current) are BYTE-identical. The cross-VERSION
-    half (this branch vs main 5cbd998, same fixture) is in validation/traps_oracles.py --old-vs-new."""
+    half (this branch vs main 2db6a00, same fixture) is in validation/traps_oracles.py --old-vs-new."""
     ref_models, ref = _diode_state("trp_off0")
     for kw in ({"traps": None}, {"traps": ()}, {"srh_trap_energy_eV": 0.0},
                {"srh_trap_energy_eV": 0.0, "traps": []}):

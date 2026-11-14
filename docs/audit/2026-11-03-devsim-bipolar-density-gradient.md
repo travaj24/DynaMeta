@@ -1,7 +1,7 @@
 # Bipolar density-gradient: a quantum potential for holes as well as electrons (D2d)
 
 DEVSIM phase, release v0.14.0, workstream D2d, branch `wip/dv_dg` (off `feat/devsim-2.11-v0.14` at
-`e46bd25`). Before this, the in-Newton density-gradient (DG) model existed only for electrons on a
+`07587b4`). Before this, the in-Newton density-gradient (DG) model existed only for electrons on a
 unipolar region (`physics_density_gradient.setup_dg_quantum_correction`). Its oxide hard wall
 (`setup_dg_hard_wall`) was EXPERIMENTAL and known to converge to a wrong, wide-depletion profile.
 
@@ -10,8 +10,8 @@ unipolar region (`physics_density_gradient.setup_dg_quantum_correction`). Its ox
 Everything is **opt-in and off by default**:
 
 * Nothing new runs unless `setup_bipolar_dg` is called.
-* The existing unipolar DG is byte-identical to `e46bd25`. Its full DEVSIM definition-call log
-  (127 calls) hashes to the digest recorded on `e46bd25`.
+* The existing unipolar DG is byte-identical to `07587b4`. Its full DEVSIM definition-call log
+  (127 calls) hashes to the digest recorded on `07587b4`.
 * The bipolar DD without DG is byte-identical too (the v0.13 digest, 217 calls).
 
 Section 4 lists both gates.
@@ -387,15 +387,15 @@ The largest change, 0.7 % at reverse bias, is the field-driven Wigner term in th
 `Lambda ~ b (E/2V_t)^2`, entering the generation through `quantum_srh`. It is physical, first order
 and linear in gamma.
 
-## 4. Defaults off (task e) and the "fails on e46bd25" check
+## 4. Defaults off (task e) and the "fails on 07587b4" check
 
 | Guard | Result |
 |---|---|
-| Unipolar DG call log (`tests/_dg_calllog.py`: `setup_dg_quantum_correction`, `setup_contact_dg`, `setup_dg_hard_wall`, `seed_dg_from_solution`, `set_dg_gamma`; 127 calls) | digest `6bcbe925...` recorded on `e46bd25` BEFORE any change: **identical** on the final tree |
+| Unipolar DG call log (`tests/_dg_calllog.py`: `setup_dg_quantum_correction`, `setup_contact_dg`, `setup_dg_hard_wall`, `seed_dg_from_solution`, `set_dg_gamma`; 127 calls) | digest `6bcbe925...` recorded on `07587b4` BEFORE any change: **identical** on the final tree |
 | Bipolar DD call log (`tests/_bipolar_calllog.py`, 217 calls) | v0.13 digest `ac63536e...`: **identical** |
 | `srh_rate_expr()` / `srh_reference_densities()` defaults | the legacy strings, pinned |
 | `validation/dg_dd_in_newton.py` (unipolar in-Newton DG) | gates A-D PASS with the same numbers as before (5.6e-16 / 8.4e-14 / 7.5e-16 / 0.0) |
-| `tests/test_bipolar_density_gradient.py` copied onto a pristine `e46bd25` worktree | **13 failed, 2 passed**. The two passes are the defaults-off digest gates, which must pass there. Every physics gate fails, including both p-channel (`holes`) oracles. |
+| `tests/test_bipolar_density_gradient.py` copied onto a pristine `07587b4` worktree | **13 failed, 2 passed**. The two passes are the defaults-off digest gates, which must pass there. Every physics gate fails, including both p-channel (`holes`) oracles. |
 
 **Regression.** `test_density_gradient`, `test_traps`, `test_bipolar_recombination_bgn_ionization`,
 `test_audit_2026_07_17_wave7_carriers`, `test_api_surface` and `test_validation_runner` run at
@@ -472,7 +472,7 @@ and linear in gamma.
    strings (`physics_bipolar_dd`, `physics_drift_diffusion`) still spell B(-v) as B(v) + v. That is
    harmless at classical |v|. A unipolar region given `setup_dg_insulator_wall` or
    `setup_dg_hard_wall` would carry the same wall-edge loss. Switching them changes the v0.13
-   bipolar and e46bd25 DG call-log digests and moves every DD result at round-off.
+   bipolar and 07587b4 DG call-log digests and moves every DD result at round-off.
 6. **Extended precision in the validation (section 1.6).** The validation's criteria are finer than
    double precision. The alternative to the extended Newton is to change REL_ERR / ABS_ERR to
    attainable values. That would loosen REL_ERR for every variable, because DEVSIM has one criterion

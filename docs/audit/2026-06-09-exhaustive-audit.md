@@ -1,6 +1,6 @@
 # DynaMeta exhaustive audit -- 2026-06-09
 
-**Git HEAD:** 1688913 (R1-R9 north-star set shipped, 295 tests green)
+**Git HEAD:** bdf7cbb (R1-R9 north-star set shipped, 295 tests green)
 **Method:** 14-unit multi-agent review (10 subsystems + 4 cross-cutting lenses) -> per-finding
 adversarial verification -> synthesis (103 agents, 87 raised, 37 survived the agents' own verify).
 **Then:** every load-bearing P0/P1 claim was RE-VERIFIED by hand against the actual source. That second

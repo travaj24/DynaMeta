@@ -104,7 +104,7 @@ is called, and it only READS the device (its DC operating point and models are l
      above treats every edge as an independent source -- right for the isotropic diffusion source,
      whose K is a multiple of the identity, and WRONG for the rank-one Hooge tensor: one element's
      edge currents share ONE xi, so the edge form drops their cross terms. For a uniform field at angle
-     theta to the mesh axes the edge sum is (cos^4 + sin^4) of the truth -- MEASURED on 6595bde (uniform
+     theta to the mesh axes the edge sum is (cos^4 + sin^4) of the truth -- MEASURED on ee0ad04 (uniform
      2-D DD resistor on a right-isosceles mesh, exact DEVSIM volumes): S f N/(alpha I^2) = 1.0000 at
      0 deg, 0.5000 at 45 deg; 0.688 on the gmsh-tet 3-D bar of gate A. Now, with a_e = J_e / sqrt(n_eff)
      (the edge-projected current and the SG density above), V_T the element volume and c_eT the P1

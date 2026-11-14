@@ -281,7 +281,7 @@ def test_reset_devsim_keeps_the_direct_solver_and_the_answer():
 # devsim's own call makes them; with the bound-ratio threshold forced below 1 the same matrix must be redone
 # as symmetric (the replacement branch; the real threshold on real matrices is gated by
 # test_dg_closure_jacobian_factorizes_without_fill_in and test_umfpack_2by2_guard_keeps_2by2_on_a_2d_diode).
-# On the v1 guard (e29fbd3, always replaces) the 2-by-2 case comes back symmetric; before v0.15.1 the wrapped
+# On the v1 guard (4cd3af7, always replaces) the 2-by-2 case comes back symmetric; before v0.15.1 the wrapped
 # method does not exist (AttributeError).
 
 def _umf_test_matrix(m, small, extra):
@@ -406,7 +406,7 @@ def test_umfpack_2by2_mode_is_validated(monkeypatch):
 # equals the symmetric one's (ratio 1.000) and so does the actual fill. The v2 guard must keep every one of them:
 # the guarded run is compared with an unguarded child (DYNAMETA_UMFPACK_2BY2=keep), factorization by
 # factorization (strategy used, nz(L) + nz(U)) and in the converged state bit for bit. On the v1 guard
-# (e29fbd3), which redid every 2-by-2 choice as symmetric, the strategies read 3 and the states differ.
+# (4cd3af7), which redid every 2-by-2 choice as symmetric, the strategies read 3 and the states differ.
 _DIODE_CHILD = "\n".join([
     "import dataclasses, json",
     "import validation.bipolar_diode_2d as D",

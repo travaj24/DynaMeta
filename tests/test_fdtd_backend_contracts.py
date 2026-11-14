@@ -421,10 +421,10 @@ def test_d13_cpml_is_plain_fdtd_off_the_pml_because_c_is_zero_not_because_b_is_o
 # ---------------------------------------------------------------------------------------------
 # S2-11 / S6-12 / S6-11 (wave-7, 2026-11-02): the 2-D reference kernel, the 3-D magneto-optic kernel
 # and the 3-D oblique kernel got run_3d's prealloc / roll-free out= rewrite. They must be
-# BIT-IDENTICAL to the pre-rewrite kernels (1b1f394). The REAL-valued kernels are pinned by sha256
+# BIT-IDENTICAL to the pre-rewrite kernels (7b9481a). The REAL-valued kernels are pinned by sha256
 # digests of their outputs on fixtures built from + - * / only (no exp/sin/pow: `p*p*p`, never
 # `p**3`), so the bytes are platform-independent (IEEE-exact ops; numpy never fuses two ufuncs).
-# The digests were produced by the 1b1f394 kernels and re-produced by the rewritten ones. The
+# The digests were produced by the 7b9481a kernels and re-produced by the rewritten ones. The
 # COMPLEX oblique kernel is compared against its pre-rewrite loop kept verbatim below (the P-7
 # pattern): numpy's SIMD complex multiply may use FMA on one CPU and not another, so a digest of
 # complex results would not be portable.
@@ -492,7 +492,7 @@ def _k2d_cases():
     return cases, (dx, dz, dt, src.size, 12, 20, 75, src, cp)
 
 
-# sha256[:16] of every output of kernels2d.run_2d_te at 1b1f394 (pre-S2-11) on _k2d_cases()
+# sha256[:16] of every output of kernels2d.run_2d_te at 7b9481a (pre-S2-11) on _k2d_cases()
 _K2D_PRE_S2_11 = {
     "passive": "7bb880c1aa4889bc", "drude": "f6d244a95b04bd54", "kerr": "9cbd5daef9a910a4", "drude_kerr": "408eb318b2caf306",
     "lorentz": "7033020b33ac4f16", "drude_lorentz_gain": "1455a2c1895fdbed", "chi2_raman": "9f8a99da2106d889",
@@ -547,12 +547,12 @@ def _k3d_mo_cases(g):
             "mo_aniso_nodrude": (exx, eyy, ezz, z, z, z, "y")}
 
 
-# sha256[:16] of kernels3d._run_3d_mo's four outputs at 1b1f394 (pre-S6-11) on _k3d_mo_cases()
+# sha256[:16] of kernels3d._run_3d_mo's four outputs at 7b9481a (pre-S6-11) on _k3d_mo_cases()
 _K3D_MO_PRE_S6_11 = {"mo_gyro_y": "e1e6d30b49e62dc2", "mo_gyro_x": "81fc52a739417fa4", "mo_aniso_nodrude": "810eda4dbaabf415"}
 
 
 def _oblique_pre_s6_11(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy):
-    """kernels3d._run_3d_oblique as it stood at 1b1f394 (before the S6-11 rewrite), verbatim."""
+    """kernels3d._run_3d_oblique as it stood at 7b9481a (before the S6-11 rewrite), verbatim."""
     from dynameta.constants import EPS0, MU0
     nx, ny, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
@@ -711,7 +711,7 @@ def test_s2_12_jax_3d_carries_lorentz_chi2_raman_gain(term):
     (and all four together) matches the numpy run_3d to < 1e-12 relative on all eight probe planes
     (measured 2.2e-15 .. 3.2e-15), where each term moves the probes by 5e-3 .. 5e-2 (so the parity
     is ~12 orders above the noise). With every term off the probes are bitwise the pre-port kernel's
-    (measured once against 1b1f394; the carry/trace is unchanged by construction)."""
+    (measured once against 7b9481a; the carry/trace is unchanged by construction)."""
     pytest.importorskip("jax")
     from dynameta.optics.fdtd_nd.kernels3d import run_3d
     from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax

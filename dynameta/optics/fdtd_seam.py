@@ -454,7 +454,7 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
                     "structured FDTD layer '{}' has lossy eps (Im != 0); the lateral grid carries real "
                     "eps_inf only -> use FEM/RCWA for lossy structured cells.".format(L.name))
             cells.append(cell.real)
-        if z_subcell == "point":                            # opt-out: the 2b7a002 point rule
+        if z_subcell == "point":                            # opt-out: the 2531d5d point rule
             lo, hi = pad_masks(zc, pad, z_struct)
             eps[:, :, lo] = ns2                             # superstrate semi-infinite pad (n_super^2)
             eps[:, :, hi] = nb2                             # substrate semi-infinite pad (n_sub^2)

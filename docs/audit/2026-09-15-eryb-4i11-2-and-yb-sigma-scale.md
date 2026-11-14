@@ -499,11 +499,11 @@ taken 16.
 
 ## 8. The py3.12 CI leg, and what the gates cost
 
-The first CI run on the merged head (31e1c93, run 34896908068) came back 8/9. The ninth,
+The first CI run on the merged head (43a5547, run 34896908068) came back 8/9. The ninth,
 `tests (py3.12)`, was **CANCELLED, not failed**: its `Run fast tests + coverage` step ran 74.6
 minutes into the job's `timeout-minutes: 75`. No assertion fired. That leg is the only one of the
 four interpreters carrying coverage instrumentation, and it runs about **1.7x** the plain legs --
-73 min against 35 / 44 / 53 min for py3.10 / 3.11 / 3.13 on main at 1bef664, the immediate parent
+73 min against 35 / 44 / 53 min for py3.10 / 3.11 / 3.13 on main at f62d29d, the immediate parent
 of the merge. So main itself had already arrived at two minutes of headroom under a cap whose own
 comment set it at "51-52 min measured on the runner, 2026-07-27"; #29's 19 gates and this build's
 20 pushed it over. This is a shared-budget artifact, and the honest reading is that the cap had

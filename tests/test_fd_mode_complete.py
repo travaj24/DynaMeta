@@ -10,7 +10,7 @@ documented ~0.3-1 S/m^2 floor. (2) Central differences of DEVSIM's own assembled
 the FD correction (|Delta| <= delta_max, the largest degeneracy offset on the device).
 
 EVERY GATE IS SHOWN FAILING on the legacy statistics (statistics=None, the unchanged default) with the SAME
-mechanism, and on 06b9ade (the pre-change tree) the FD-mode devices do not build at all: setup_bipolar_region
+mechanism, and on 2fb4b76 (the pre-change tree) the FD-mode devices do not build at all: setup_bipolar_region
 raised NotImplementedError for btbt / charged traps, install_interface_traps and setup_btbt_nonlocal refused
 statistics='fermi_dirac' (tests/test_si_bundles_devsim.py G6 on that tree). The adversarial half of each
 Jacobian gate knocks the FD degeneracy-factor derivatives out (the Jacobian a fixed-n_ie implementation would
@@ -282,18 +282,18 @@ def test_n_non_degenerate_limit_equals_legacy(opts):
 
 # sha256 of tests/_fdext_calllog.record_call_log() (501 calls: the 1-D legacy-statistics pn region with BGN, a
 # shifted built-in SRH level, charged + neutral bulk levels of all three energy references, a BTBT TUPLE, an
-# SiO2 region with interface traps; and a 2-D BGN slab with one BTBT set), RECORDED on 06b9ade (the commit this
+# SiO2 region with interface traps; and a 2-D BGN slab with one BTBT set), RECORDED on 2fb4b76 (the commit this
 # work was cut from) before any edit; this tree gives the same log (MEASURED: the JSON logs compare equal).
 # RE-RECORDED 2026-11-08 as the CANONICAL log (correctly rounded transcendentals, tests/_cr_libm.py), again on
-# an export of 06b9ade: 71a3219d... on Windows AND Linux, = this tree's on both. The pre-2026-11-08 digest
-# dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49 was of the raw Windows-UCRT log (06b9ade and
+# an export of 2fb4b76: 71a3219d... on Windows AND Linux, = this tree's on both. The pre-2026-11-08 digest
+# dcca0b093e85159a6a3e7dfdfce090fba3c6e63162035fa4290e4c5ae7501f49 was of the raw Windows-UCRT log (2fb4b76 and
 # this tree reproduce it there; glibc gives the canonical one raw): docs/audit/2026-11-08-v0.15-linux-ci-exactness.md.
 _FDEXT_CALLLOG_DIGEST = "71a3219d99b19df76013665cfe42c7a38e2157464c6a9ab7108526c68616a360"
 
 
 def test_d_legacy_statistics_definition_is_byte_identical():
     """GATE D (REVISED 2026-11-07 for the v0.15.0 default change). statistics='legacy' -- the v0.14 default,
-    kept reachable explicitly -- reproduces the recorded digest of every legacy path (recorded on 06b9ade, 501
+    kept reachable explicitly -- reproduces the recorded digest of every legacy path (recorded on 2fb4b76, 501
     calls) character-for-character; the DEFAULT (statistics unset) now equals statistics='fermi_dirac' and
     differs from it (the intended change: docs/audit/2026-11-06-v0.15.0-release.md, decision (a)).
     REVISED 2026-11-08 (Linux CI): the digest was of repr() of floats some of which pass through a C-library

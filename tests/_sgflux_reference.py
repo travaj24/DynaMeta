@@ -4,11 +4,11 @@ The call-log digests of tests/_bipolar_calllog.py and tests/_dg_calllog.py pin t
 character-for-character; the two-Bernoulli SG flux (2026-11-04) changed it on purpose, so they were
 re-recorded. This module keeps the guard's purpose -- an unintended physics change must fail -- by
 SOLVING the same fixtures and comparing every field and terminal current with the arrays recorded on
-6595bde (the last kahan3 tree; tests/data/sgflux_6595bde.json), at a tolerance set by the measured
+ee0ad04 (the last kahan3 tree; tests/data/sgflux_6595bde.json), at a tolerance set by the measured
 round-off of the flux change (TOL below).
 
 Fixtures (the calllog meshes, materials and setup calls, then a solve; public API only, so the same
-code runs on 6595bde):
+code runs on ee0ad04):
   fd   cl_fd: Si p+n diode (-1e24 | 3e25), FD g-factor, DC ohmic contacts; 0 -> +0.4 V forward and
        -0.5 V reverse on 'lo'.
   bz   cl_bz: the same diode, Boltzmann, 'hi' on a circuit node (source Vcl); hi at -0.3 V (forward)
@@ -30,7 +30,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data", "sgflux_6595bde.json")
 
-# TOLERANCES, from the change's measured round-off (2026-11-04: 6595bde vs this tree, same process
+# TOLERANCES, from the change's measured round-off (2026-11-04: ee0ad04 vs this tree, same process
 # recipe, scipy OpenBLAS, devsim 2.11.2; per-array numbers in docs/audit/2026-11-04-sg-flux-two-
 # bernoulli.md sec. 4):
 #  * densities (Electrons, Holes, QSqrtN), entry-wise |new/old - 1|: worst 7.7e-15 (fd_rev:Electrons);
@@ -83,7 +83,7 @@ def solve_fixtures(statistics=None):
     """`statistics` (v0.15.0; default: the SGFLUX_STATISTICS environment variable, else None): None passes no
     keyword (the tree's DEFAULT; on a pre-v0.15.0 tree the legacy statistics); a value goes to the FD
     fixture's setup_bipolar_region and the DG bar's setup_semiconductor_region_dd -- 'legacy' is the path the
-    6595bde arrays pin (the v0.15.0 default, 'fermi_dirac', moves fd and dg by physics: audit note
+    ee0ad04 arrays pin (the v0.15.0 default, 'fermi_dirac', moves fd and dg by physics: audit note
     2026-11-06-v0.15-fermi-dirac-mode-complete.md, section 10)."""
     import numpy as np
     if statistics is None:
@@ -92,7 +92,7 @@ def solve_fixtures(statistics=None):
     try:
         from dynameta.carriers.devsim_env import import_devsim
         ds = import_devsim()
-    except ImportError:                                 # a tree without devsim_env (never 6595bde)
+    except ImportError:                                 # a tree without devsim_env (never ee0ad04)
         import devsim as ds
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -208,7 +208,7 @@ def solve_fixtures(statistics=None):
         DG.setup_contact_dg(dev, "back", 4.0e26)
         # the RETIRED hard-wall rows (v0.15: setup_dg_hard_wall is a shim onto the insulator wall),
         # re-created call-for-call by the test fixture, so this flux gate still compares with the
-        # arrays recorded on 6595bde WITH those rows (tests/_dg_legacy_wall.py)
+        # arrays recorded on ee0ad04 WITH those rows (tests/_dg_legacy_wall.py)
         LW.install_legacy_hard_wall(dev, "wall", lambda_pin_factor=8.0)
         DG.seed_dg_from_solution(dev, "bar")
         z0 = np.asarray(nv(dev, "bar", "x"))

@@ -3,8 +3,8 @@ a custom_terms term). The kernel gates (closed forms, uniform-field identity, co
 tests/test_btbt_nonlocal_kernels.py; this file gates the coupling. Every case that adds the term runs in a
 CHILD process (tests/_btbt_nonlocal_child.py): DEVSIM's custom-equation registration is permanent.
 
-OLD CODE (66f6185): dynameta.carriers.btbt_nonlocal does not exist -- every child fails at its import and the
-in-process refusal tests fail at theirs (MEASURED by running this file against an export of 66f6185).
+OLD CODE (e7c469d): dynameta.carriers.btbt_nonlocal does not exist -- every child fails at its import and the
+in-process refusal tests fail at theirs (MEASURED by running this file against an export of e7c469d).
 The physical contrast is gated too: at V_r = 0.1 V the nonlocal Zener current is exactly 0 (no final state:
 every path is too long) while the local model gives 2.6e-2 A/m^2 (N7).
 
@@ -132,7 +132,7 @@ def test_d0_temperature_advisory():
 def test_d0_local_after_nonlocal_is_refused():
     """The reverse refusal (tunneling.setup_btbt): a region with a live nonlocal term refuses the local model
     with BTBTDoubleCountError and gets no BTBT_U model; a region without one installs normally. OLD CODE
-    (merge base c6aa0a4 + this branch's nonlocal module, tunneling.py unpatched): setup_btbt installs the
+    (merge base 26a6d5f + this branch's nonlocal module, tunneling.py unpatched): setup_btbt installs the
     second model silently -- MEASURED: raised None."""
     r = C.run_child("reverse_refusal")
     assert r["raised"] is not None and "NONLOCAL" in r["raised"]

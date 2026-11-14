@@ -8,7 +8,7 @@ v = 1 on the Potential columns. Well-posedness itself is shown dynamically (the 
 recipe of the R26 note): a well-posed device whose body is shifted re-converges to the reference; an
 ill-posed one does not (or hits the zero pivot).
 
-FAILS ON THE OLD CODE (9b6937f, measured 2026-11-06): no check existed -- the R26 floating slab solved
+FAILS ON THE OLD CODE (0e88d31, measured 2026-11-06): no check existed -- the R26 floating slab solved
 "successfully" through solve_dc and raw devsim.solve alike (its answer set by round-off: the old
 fixture's +20 mV body shift re-converges in place, or UMFPACK hits the exact zero pivot, depending on
 the BLAS build: docs/audit/2026-11-03-devsim-recombination-bgn-ionization.md), and a stalled Newton

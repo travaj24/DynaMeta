@@ -17,7 +17,7 @@ G -- are read back as DEVSIM parameters, never results):
         bridge's own two-point source (P = 2 kT G/q^2, the detailed-balance event rate of a linear
         conductance); the two terminal currents must cancel.
   Jacobian: central differences of the assembled residual (steps h and 2h) against the assembled matrix.
-OLD CODE (9b6937f): dynameta.carriers.custom_terms does not exist -> every gate FAILS with the import
+OLD CODE (0e88d31): dynameta.carriers.custom_terms does not exist -> every gate FAILS with the import
 error below (not a skip); and noise_analysis has no TwoPointSource, so the toy-B noise gate fails too.
 Runtime: ~45 s serial (each child 1-9 s).
 """
@@ -82,7 +82,7 @@ def test_registration_alone_changes_nothing(defaults_pair):
     (FD diode, Boltzmann diode on a circuit, DG bar: 26 arrays + currents) and the BTBT FDT diode's noise
     S, its GR part and ssac Y at 1 Hz - 1 GHz are BIT-IDENTICAL with the dispatcher registered first (no
     term) and without -- while the registered child's dispatcher really ran (> 100 assembly calls,
-    MEASURED 325). The registered arrays also pass the 6595bde cross-version gate."""
+    MEASURED 325). The registered arrays also pass the ee0ad04 cross-version gate."""
     plain, reg = defaults_pair
     assert plain["registered"] is False and reg["registered"] is True
     assert plain["dispatch_calls"] == 0 and reg["dispatch_calls"] > 100
@@ -330,7 +330,7 @@ def test_unified_inventory_lists_custom_terms_and_noise_refuses_through_it():
     (overrides noise_sources) and Jacobian exactness, read through custom_terms' DEVSIM-marker liveness.
     The noise refusals fire through it (in name order): the undeclared no-noise term first, then the
     inexact Jacobian; with both removed the noise runs. Re-creating the device under the same name lists
-    nothing (the marker parameter died with it). OLD CODE (8bbf36c): recombination_terms has no "custom"
+    nothing (the marker parameter died with it). OLD CODE (76e8633): recombination_terms has no "custom"
     key -> KeyError in the child (the test fails)."""
     r = _child("inventory")
     assert r["before"] == {}

@@ -24,7 +24,7 @@ exactly; the independent 3-D check of P2 W3 is NOT run (v0.15 follow-up, audit 2
 construction, and Devsim3DEquilibrium has no circuit-driven gate) -- the scaling's exactness argument is in the
 method's docstring. W7 (nightly, @slow): the 0 / +1 / 0 sequence on an extended-precision builder.
 
-OLD CODE (72e0fbd, MEASURED: this file + the child against `git archive 72e0fbd`): 11 of 11 fail (2 failed,
+OLD CODE (aacfe46, MEASURED: this file + the child against `git archive aacfe46`): 11 of 11 fail (2 failed,
 9 errors) -- every child dies with ImportError (no OhmicContactNoiseError / noise_spectrum), and the two
 in-process tests fail on the missing method.
 """

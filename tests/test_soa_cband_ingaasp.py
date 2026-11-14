@@ -23,7 +23,7 @@ can sit up to half a step (5e-4 x |dEg/dz| = 5e-4 x 0.502 eV = 0.251 meV -> 0.48
 tracks the gap one-for-one, test_soa_ingaas_gap_vurgaftman) plus one gain_peak grid step (0.25 eV / 4000 =
 62.5 ueV -> 0.121 nm) from 1550.0 nm: tolerance 0.61 nm.
 
-FAILS ON THE OLD CODE (0554410, MEASURED): "InGaAsP_LM_C", ingaasp_lm_gap_law and BulkGainParams.c_band do not
+FAILS ON THE OLD CODE (098553f, MEASURED): "InGaAsP_LM_C", ingaasp_lm_gap_law and BulkGainParams.c_band do not
 exist (ValueError "unknown material" / ImportError / AttributeError), and the nested quaternary spec raises
 "not a binary". The C-band device the v0.14 notes told users to build (tests/test_soa_qw.py CBAND_GAP, an
 uncited triple) misses the quaternary oracle by -30.72 / -26.71 / -5.51 / +5.09 meV at 0 / 77 / 298 / 400 K and
@@ -156,8 +156,8 @@ def test_only_lattice_matched_binary_or_ternary_end_points_are_accepted():
 
 def test_ternary_path_and_default_soa_are_bit_identical_to_v0_14():
     """Defaults-off rule, the in-suite third of the proof (the other two: the 1182-value SHA-256 census on
-    0554410 vs this tree, and the unchanged SOA suites; audit note). The ternary terms are structurally the v0.14
-    ones, and the pure-arithmetic gap values are pinned to their 0554410 bits (no transcendental call, so the
+    098553f vs this tree, and the unchanged SOA suites; audit note). The ternary terms are structurally the v0.14
+    ones, and the pure-arithmetic gap values are pinned to their 098553f bits (no transcendental call, so the
     bits are platform-independent IEEE arithmetic)."""
     terms, off = BT._gap_terms("InGaAs_LM")
     assert terms == ((1.0 - 0.53, BT.VARSHNI_PARAMS["GaAs"]), (0.53, BT.VARSHNI_PARAMS["InAs"]))

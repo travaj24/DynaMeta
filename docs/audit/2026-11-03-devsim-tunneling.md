@@ -1,7 +1,7 @@
 # DEVSIM tunneling: band-to-band generation in the bipolar Newton, gate-oxide tunneling current (2026-11-03)
 
 Workstream D1d of the DEVSIM phase (release v0.14.0). Branch `wip/dv_tunnel` off `feat/devsim-2.11-v0.14`
-(5cbd998). **Both features are opt-in and default off.** The defaults-off path is byte-identical to main.
+(2db6a00). **Both features are opt-in and default off.** The defaults-off path is byte-identical to main.
 That was checked by SHA-256 over 16 solution arrays of the 1-D and 2-D bipolar diode fixtures, giving the
 same hash on both trees (section 6).
 
@@ -210,7 +210,7 @@ MOS capacitor: 1-D, n-Si 1e24 / 5 nm SiO2, accumulation Vg = 4-9 V (E_ox 7.7e8-1
 * Byte-identity (defaults off): `validation.bipolar_diode` (1-D, +0.3 / -0.5 V) and
   `validation.bipolar_diode_2d`'s design through `LayeredDevsimBuilder` (+0.3 / -0.4 V). Potential,
   Electrons, Holes, the terminal current and the extras keys give SHA-256
-  `f04091e800a41a5f...` on **both** main (5cbd998) and `wip/dv_tunnel`.
+  `f04091e800a41a5f...` on **both** main (2db6a00) and `wip/dv_tunnel`.
 * Related existing tests (`-n 2`, not slow; 9 files: wave-7 carriers, conventions, Gummel,
   density-gradient, devsim smoke, gated builder, geometry guards, reliability ext, stacked-3D spec):
   155 passed after one fix. The conventions gate X-24 caught two literal `T_K = 300.0` defaults in the

@@ -39,7 +39,7 @@ assembly, which is what is under test), S_T = S_T^closed (1 + eta_T)^2 (1 + O(v^
 ratio is within (1 + max|eta|)^2 - 1 + the (a) terms. Both are evaluated in each test; the plan's 1e-4
 (gate F's budget) is asserted as the outer bound.
 
-OLD CODE (72e0fbd, MEASURED): every mapping gate fails at the call -- float(hooge_alpha) raises TypeError
+OLD CODE (aacfe46, MEASURED): every mapping gate fails at the call -- float(hooge_alpha) raises TypeError
 ("float() argument must be a string or a real number, not 'dict'"), asserted by name nowhere here because
 the new code does not raise; the audit note records the run. TransportModel had no hooge_alpha_n /
 hooge_alpha_p (TypeError on the keyword).
@@ -236,7 +236,7 @@ def test_region_missing_from_the_mapping_contributes_exactly_zero():
 def test_float_path_is_bit_identical_to_the_mapping_of_the_same_float():
     """GATE H3 (same tree). hooge_alpha=2e-3 (the v0.14 float path, whose arithmetic math.sqrt(float(a)) is
     unchanged) equals {region: 2e-3} and {region: (2e-3, 2e-3)} bit for bit (sha256 of S and every
-    by_region_mechanism array). The cross-version half -- the float path against 72e0fbd in separate
+    by_region_mechanism array). The cross-version half -- the float path against aacfe46 in separate
     processes -- is in the audit note (MEASURED identical)."""
     _series_bar_2d()
     a = 2e-3
