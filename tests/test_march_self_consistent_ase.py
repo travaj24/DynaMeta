@@ -95,7 +95,7 @@ def _march(amp, t, **kw):
 
 # ==================== (1) the default march did not move ====================================
 
-# End states MEASURED on v0.11.2 (commit 21dff60) before this work, with the modes' plumbing
+# End states MEASURED on v0.11.2 (commit dc3b77e) before this work, with the modes' plumbing
 # absent entirely. Pinned to 1e-9 RELATIVE rather than bit-for-bit: the co-doped rate assembly
 # goes through a BLAS matvec (eryb._rates_profile) whose reduction order is a build property, and
 # CI runs this on mixed CPU generations and on a numpy 1.24 / scipy 1.10 leg. 1e-9 is seven
@@ -110,7 +110,7 @@ def _march(amp, t, **kw):
 # flake, not a gate. They are asserted by INEQUALITY against solve() instead -- the same pattern
 # tests/test_fiber_dynamics.py uses for them.
 #
-# TOLERANCES ARE SPLIT BY WHETHER THE FIXTURE TOUCHES LSODA (commit 533ece0's lesson: a pin on a
+# TOLERANCES ARE SPLIT BY WHETHER THE FIXTURE TOUCHES LSODA (commit 8fab01b's lesson: a pin on a
 # value that came through the steady solver's adaptive integrator is scipy-version dependent and
 # cannot hold at 1e-9). The EDFA and the co-doped fixture are seeded EXPLICITLY (nbar2_0), so
 # their pins are pure march arithmetic and hold at 1e-9 -- the EDFA's value is also unchanged

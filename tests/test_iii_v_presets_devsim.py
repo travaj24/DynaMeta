@@ -13,7 +13,7 @@ written in the R26 module (_U_oracle), with B_eff = 3.3e-10 x (1 - 0.76) cm^3/s 
 et al. 2019 (never read from the preset). Tolerances are R26-d's (node-wise 1e-12, root 1e-9; measured
 there 0 / 2.2e-16).
 
-FAILS ON OLD CODE (40b1ede): semiconductor_presets has no III-V presets (ImportError at collection) and
+FAILS ON OLD CODE (bd925ac): semiconductor_presets has no III-V presets (ImportError at collection) and
 RadiativeModel takes no kind / photon_recycling_factor (TypeError). Runtime: ~3 s (4 tests).
 """
 import math

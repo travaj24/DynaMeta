@@ -1,6 +1,6 @@
 # A DynaMeta-side workaround for DEVSIM's unsigned box-method geometry
 
-DEVSIM phase, release v0.14.0, branch `wip/v014_ecfix` (off `feat/devsim-2.11-v0.14` at 189c648). DEVSIM 2.11.2
+DEVSIM phase, release v0.14.0, branch `wip/v014_ecfix` (off `feat/devsim-2.11-v0.14` at 3ba3a2a). DEVSIM 2.11.2
 (extended-precision build), Windows dev box. Nothing was filed or posted upstream (the user is holding
 the DEVSIM issue). The draft and the source excerpts are in the session scratchpad `devsim_verify/`.
 
@@ -34,7 +34,7 @@ the DEVSIM issue). The draft and the source excerpts are in the session scratchp
 - **Cross-branch finding (the noise row, not this branch).** The per-element Hooge source is biased
   in 3-D on EVERY mesh, including the default Kuhn tensor mesh: **S f N / (alpha I^2) = 1.125**
   (MEASURED). The cause is that its tensor identity does not hold per element for circumcentric
-  couples in 3-D (section 5). FIXED in v0.14.0 (merge ab3419e, docs/audit/2026-11-06-v0.14-hooge-3d.md:
+  couples in 3-D (section 5). FIXED in v0.14.0 (merge d08412e, docs/audit/2026-11-06-v0.14-hooge-3d.md:
   P1 element couples; the Kuhn bar now reads 1 - 5.8e-9).
 
 ## 1. Feasibility: what DEVSIM lets a caller replace (read in src/, then tested)
@@ -187,7 +187,7 @@ The check's refusal message could add one line: "or call
 Cost: one pass over the elements in numpy, about 0.35 s for a 10k-tet region (MEASURED), plus one
 `set_element_values`.
 
-## 5. Cross-branch finding: the per-element Hooge source is biased in 3-D (not fixed here; fixed in v0.14.0 by ab3419e)
+## 5. Cross-branch finding: the per-element Hooge source is biased in 3-D (not fixed here; fixed in v0.14.0 by d08412e)
 
 `noise_analysis` assembles Hooge per element as S_T ~ |sum_e c_eT a_e dy_e|^2 / V_T. Its docstring
 relies on "sum_e c_eT L_e t_e t_e^T = V_T I on a well-centred element".
@@ -229,7 +229,7 @@ relies on "sum_e c_eT L_e t_e t_e^T = V_T I on a well-centred element".
 
 At first no existing module changed; section 7 wires the builders. No digests moved.
 
-## 7. Automatic application (user decision 2026-11-06; branch `wip/v014_geomdefault` off 1fbcfb8)
+## 7. Automatic application (user decision 2026-11-06; branch `wip/v014_geomdefault` off 432ba47)
 
 The decision: apply the correction automatically, default negative policy `"warn"`, keep the gmsh
 mesher (no removal in v0.15).

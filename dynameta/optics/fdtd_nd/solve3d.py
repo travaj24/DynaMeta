@@ -87,7 +87,7 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     laterally UNIFORM (and the result reduces to 1D/TMM). `zc` = the material-registration z positions,
     the Yee E-NODES k*dz since 2026-11-02 (audit S2-14 siblings; were (k+1/2)*dz -- see
     fdtd_nd.grid.material_z). `z_subcell` 'average' (default, 2026-11-02) fill-averages each node's z
-    control volume (fdtd_nd.grid.mix_profile); 'point' = the 2b7a002 point rule bit-for-bit. Returns
+    control volume (fdtd_nd.grid.mix_profile); 'point' = the 2531d5d point rule bit-for-bit. Returns
     both the specular 0-order and the total-flux (all (kx,ky) orders) R/T.
 
     n_super / n_sub (default 1 = vacuum): the lossless semi-infinite superstrate / substrate indices
@@ -107,7 +107,7 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     # plain passive Drude film and return a bit-identical result (audit C5-7 policy: raise loudly).
     hot_carrier_guard("solve_fdtd_3d", layers)
     courant = courant_guard("solve_fdtd_3d", courant)        # audit D-11
-    z_subcell = check_z_subcell("solve_fdtd_3d", z_subcell)  # 'average' default | 'point' (2b7a002)
+    z_subcell = check_z_subcell("solve_fdtd_3d", z_subcell)  # 'average' default | 'point' (2531d5d)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -316,7 +316,7 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
 
     eps_inf = np.ones((nx, ny, nz)); wp = np.zeros((nx, ny, nz)); gam = np.zeros((nx, ny, nz))
     # audit S2-14 siblings (2026-11-02): E-node registration, the shared convention (was (k+1/2)*dz).
-    if z_subcell == "point":                                 # opt-out: 2b7a002 point rule, bit-for-bit
+    if z_subcell == "point":                                 # opt-out: 2531d5d point rule, bit-for-bit
         for L, m in layer_masks(material_z(nz, dz), pad, layers):
             eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
     else:                                                    # z-subcell averaging (s-pol: tangential E)

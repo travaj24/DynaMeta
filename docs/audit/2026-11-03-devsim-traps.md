@@ -1,7 +1,7 @@
 # D1c: SRH trap levels, trapped charge and interface traps (D_it) for bipolar DD (2026-11-03)
 
 Workstream D1c of the v0.14.0 DEVSIM phase. Branch `wip/dv_traps` (from `feat/devsim-2.11-v0.14`
-at 5cbd998), DEVSIM 2.11.2. New module `dynameta/carriers/physics_traps.py`, hooks in
+at 2db6a00), DEVSIM 2.11.2. New module `dynameta/carriers/physics_traps.py`, hooks in
 `physics_bipolar_dd.py`, wiring in `TransportModel`, `LayeredDevsimBuilder` and `Stacked3DSpec`.
 Everything is OPT-IN; with the defaults every model string and every solved array is unchanged
 (section 5).
@@ -167,7 +167,7 @@ passes, and G2, which FAILS for the pre-existing 3-D mesh reason in section 6.
 | (c-ii) flat-band shift | fixed Q_f = q x 5e15 m^-2; V_FB where psi_s = 0, from a cubic through the six nearest points (linear interpolation of the 20 mV sweep is 1.3e-4 V off on curvature alone); `-Q_f/C_ox = -0.23199 V` | abs err 1.9e-6 V | dV_FB = 0 (miss 0.232 V) |
 | (d) surface recombination | n-type slab, ohmic at x = 0, Si/SiO2 at x = L = 20 um, one midgap interface level, sigma = 1e-15 cm^2, v_th = 1e5 m/s, `charge="none"`, G = 1e23 m^-3 s^-1; S from inverting the analytic `dp(L; S)` of `D_p dp'' - dp/tau + G = 0`, `dp(0) = 0`, `-D_p dp'(L) = S dp(L)` | S = 10 / 100 / 1000 m/s, rel err -7.7e-4 / -1.1e-4 / -3.9e-5; profile <= 2.0e-5 of G tau | S_meas = 0 (reflecting) |
 | (e) defaults off | forward-biased 1-D Si diode: legacy call against `traps=None`, `()`, `srh_trap_energy_eV=0.0` | model inventory and Potential/Electrons/Holes/USRH/PotentialNodeCharge/ElectronGeneration/contact current BYTE-identical | -- |
-| (F) cross-version | the same fixtures (1-D diode with FD on, 1-D MOS swept to +0.6 V, 2-D layered bipolar bar) run on main 5cbd998 and on this branch | sha256 identical on all 3 fixtures (diode f344b6b7..., MOS 39553fc4..., layered 792b1278...) | -- |
+| (F) cross-version | the same fixtures (1-D diode with FD on, 1-D MOS swept to +0.6 V, 2-D layered bipolar bar) run on main 2db6a00 and on this branch | sha256 identical on all 3 fixtures (diode f344b6b7..., MOS 39553fc4..., layered 792b1278...) | -- |
 | (G1) 3-D wiring | `Stacked3DSpec(interface_traps=...)`, full-gate bipolar n-Si cap (12 nm square, 30 nm, 1e23 m^-3, 8 nm SiO2): interface weights | total = lateral^2 exactly; every weighted node on the semi/oxide face (730 nodes); per-node split differs from DEVSIM's `SurfaceArea` by up to 12 % of a node (barycentric thirds against DEVSIM's own partition, same total) | -- |
 | (G2) 3-D vs 1-D | D_it-induced psi_s shift at Vg = 0.5 V against the 1-D cap with the same stack and the same FD/phi_bi frame | **FAIL**: -15.8 mV (3-D) vs -19.7 mV (1-D), ratio 0.80. A pre-existing 3-D mesh defect, not the trap code (section 6) | -- |
 
@@ -290,7 +290,7 @@ For `InterfaceTraps` with a band reference:
 
 The built-in `srh_trap_energy_eV` channel keeps the intrinsic reference.
 
-**Composition with density-gradient (00e2c39).** `srh_reference_densities` / `srh_rate_expr` also take
+**Composition with density-gradient (0042171).** `srh_reference_densities` / `srh_rate_expr` also take
 the D2d `scale=` (s = exp((Lambda_n + Lambda_p)/2V_t)). The order is the reference conversion FIRST,
 then the DG scale: n1' -> n1' s, p1' -> p1' s, n_i'^2 -> n_i'^2 s^2. Every reference therefore keeps
 n1' p1' = n p|_eq. `scale=None` is the unscaled output character for character. Gate:
@@ -306,15 +306,15 @@ the gamma-independent factor `exp(dEg/2kT)` in n1 (and in p1), not by `exp(gamma
 gamma-dependent scaling describes a level held fixed in ABSOLUTE energy against the UNnarrowed edges,
 which neither reference (nor the user's choice) does. The gates pin gamma-independence explicitly.
 
-**Gates.** `tests/test_trap_energy_reference.py` has 16 tests. The original 15 all FAIL on f7c82db
+**Gates.** `tests/test_trap_energy_reference.py` has 16 tests. The original 15 all FAIL on e55ce28
 (12 failed + 3 errors: the keyword does not exist there). The 16th is the DG-scale composition gate,
-added after the rebase onto 00e2c39.
+added after the rebase onto 0042171.
 * **(a)** p-type slab, N_A = 1e25 m^-3, Slotboom dEg = 60.5 meV (n_ie = 3.22 n_i), tau_n0 = 1e-10 s,
   tau_p0 = 1e-6 s, level at E_c - 0.25 eV. The measured tau matches the closed form with
   n1 = N_c exp(-0.25/kT), p1 = n_ie^2/n1 to -1.8e-7, for gamma = 0.2 and 0.8.
   * The intrinsic reading of the same DLTS number (E_t - E_i = kT ln(N_c/n_i) - 0.25 eV) has n1 and p1
     3.22x higher and tau = 6.695e-10 s against 2.767e-10 s, a factor **2.419**. Its closed form also
-    matches, to -5.7e-7. f7c82db can express only this reading.
+    matches, to -5.7e-7. e55ce28 can express only this reading.
   * gamma = 0.2 and 0.8 give identical lifetimes (|ratio - 1| < 1e-8).
 * **(b)** With equivalent energies (narrowed diagram, as above), the node-evaluated n1'/p1' agree
   across the three references to 1e-11. This holds with no BGN, with gamma = 0.5, and (finding) with

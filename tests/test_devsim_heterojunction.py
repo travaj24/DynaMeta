@@ -514,7 +514,7 @@ def test_builder_rejects_unknown_interface_model():
 
 def _defaulted(tm, **kw):
     """`tm` with the given fields put back to the TransportModel DEFAULT (read from the dataclass, so the
-    test exercises whatever the default is: None since v0.14, 4.5 / 3.6 on 6595bde)."""
+    test exercises whatever the default is: None since v0.14, 4.5 / 3.6 on ee0ad04)."""
     import dataclasses
     from dynameta.materials import TransportModel
     dflt = {f.name: f.default for f in dataclasses.fields(TransportModel)}
@@ -532,7 +532,7 @@ def _build_or_raise(layers, tag):
 
 def test_transport_model_has_no_default_affinity_or_gap():
     """User decision 2026-11-04: chi_eV and band_gap_eV default to None (they were 4.5 / 3.6 -- a band
-    offset of ZERO by default, not by data). Fails on 6595bde."""
+    offset of ZERO by default, not by data). Fails on ee0ad04."""
     from dynameta.materials import TransportModel
     tm = TransportModel(n_bg_m3=1e23, eps_static=12.9, dos_mass_kg_of_n_m3=lambda n: 0.067 * 9.109e-31)
     assert tm.chi_eV is None and tm.band_gap_eV is None
@@ -541,7 +541,7 @@ def test_transport_model_has_no_default_affinity_or_gap():
 @pytest.mark.parametrize("which", ["one", "both"])
 def test_defaulted_affinity_at_a_heterointerface_refuses(which):
     """A GaAs / AlGaAs drift-diffusion heterointerface with a DEFAULTED affinity must refuse to build,
-    naming the field to set. MEASURED on 6595bde (defaults 4.5 / 3.6): both cases build SILENTLY --
+    naming the field to set. MEASURED on ee0ad04 (defaults 4.5 / 3.6): both cases build SILENTLY --
     'both' with a zero offset (the old AdvisoryWarning needed BOTH gaps at the 3.6 default too, and
     these gaps are explicit), 'one' with AlGaAs at chi = 4.5 against GaAs 4.07, i.e. a 0.43 eV
     conduction-band offset of the WRONG sign taken from the default -- "DID NOT RAISE" there."""
@@ -555,7 +555,7 @@ def test_defaulted_affinity_at_a_heterointerface_refuses(which):
 
 def test_defaulted_band_gap_at_a_bipolar_heterojunction_refuses():
     """The bipolar heterojunction reads band_gap_eV (its valence offset is checked against it): a
-    defaulted gap refuses, naming band_gap_eV. On 6595bde the 3.6 default met the gap check and raised
+    defaulted gap refuses, naming band_gap_eV. On ee0ad04 the 3.6 default met the gap check and raised
     the 'disagrees with its statistics' ValueError instead -- whose message does not say the gap was a
     default; the match below requires the new wording, so it fails there."""
     p = transport(GAAS, n_bg=1e23, physics="bipolar_dd", acceptor=True)
@@ -581,7 +581,7 @@ def test_defaults_still_build_where_no_offset_is_read():
 def test_3d_from_design_refuses_a_defaulted_heterostack_affinity():
     """Stacked3DSpec.from_design: an ITO / AZO-like heterostack whose AZO carries the defaulted chi_eV
     refuses at spec construction (band_alignment), naming TransportModel.chi_eV; an ITO / ITO stack
-    with defaults builds (same-material rule). On 6595bde both affinities defaulted to 4.5 and the
+    with defaults builds (same-material rule). On ee0ad04 both affinities defaulted to 4.5 and the
     heterostack built SILENTLY with zero offset -- fails there."""
     import dataclasses
     from dynameta.carriers.devsim_3d import Stacked3DSpec
@@ -660,7 +660,7 @@ def test_3d_dd_heterostack_wires_thermionic_emission_and_keeps_a_flat_fermi_leve
 
 # =====================================================================================================
 # TEMPERATURE (D1a follow-up): the heterointerface runs at the bulk's temperature (BipolarOptions.T_K ->
-# the region V_t, ONE source). At e46bd25 a T_K heterostack without BGN ran the interface, the Anderson
+# the region V_t, ONE source). At 07587b4 a T_K heterostack without BGN ran the interface, the Anderson
 # frame and the band-gap check at 300 K while the bulk ran at T_K.
 # =====================================================================================================
 T_GATES = (250.0, 350.0)
@@ -713,7 +713,7 @@ def _iso_oracle_T(prof, top, T):
 def test_t_gate_a_isotype_te_conductance_follows_the_richardson_law_at_T(isotype_T, T):
     """GATE T-a. The low-bias TE conductance at 250 K and 350 K equals 1/(R_bulk + kT/(q A* T^2
     e^{-phi_B/kT})) at THAT T (phi_B from the solve, N_c(T) from the masses, A* T^2 with the real T).
-    At e46bd25 the builder evaluated N_c at 300 K while the bulk ran at T_K, so the band-gap check
+    At 07587b4 the builder evaluated N_c at 300 K while the bulk ran at T_K, so the band-gap check
     refused the device (with an n_i at 300 K it would have run the interface silently at 300 K: a
     (T/300)^2 Richardson prefactor and a 300 K kT in every barrier exponent)."""
     r = isotype_T[(T, "thermionic")]

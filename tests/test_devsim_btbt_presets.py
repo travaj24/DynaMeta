@@ -27,12 +27,12 @@ Gates
       re-typed Vurgaftman Eq. (4.1)), no warning; a flagged set without a band model warns and says why;
       the 2-D LayeredDevsimBuilder and Stacked3DSpec.from_design pass the scaled set.
   P7  defaults off, three ways: (ii) the DEVSIM definition call log of a single SILICON_HURKX set hashes to
-      the digest recorded on 66f6185; (i) same tree: the bare v0.14 BTBTParams and a flagged set at 300 K
+      the digest recorded on e7c469d; (i) same tree: the bare v0.14 BTBTParams and a flagged set at 300 K
       give the identical log; (iii) is tests/test_devsim_sg_flux.py (run with this change, audit note).
 
-FAILS ON THE OLD CODE (66f6185, MEASURED by running this file there): collection error, AttributeError
+FAILS ON THE OLD CODE (e7c469d, MEASURED by running this file there): collection error, AttributeError
 (GERMANIUM_KAO_DIRECT and the other sets, btbt_at_temperature, tuples of sets do not exist). P7's digest is
-an IDENTITY gate: the helper tests/_btbt_calllog.py run against 66f6185 RECORDED it (306 calls), so it holds
+an IDENTITY gate: the helper tests/_btbt_calllog.py run against e7c469d RECORDED it (306 calls), so it holds
 there by construction -- its sensitivity is the tuple-of-one adversarial.
 Runtime ~70 s.
 """
@@ -512,10 +512,10 @@ def test_t_builders_pass_the_scaled_set(monkeypatch):
 # P7: defaults off
 # ------------------------------------------------------------------------------------------------
 # sha256 of tests/_btbt_calllog.record_call_log() (306 calls: a 1-D and a 2-D slab, btbt=SILICON_HURKX),
-# RECORDED on 66f6185 (the v0.15 integration commit this work was cut from) by running the helper against
+# RECORDED on e7c469d (the v0.15 integration commit this work was cut from) by running the helper against
 # that tree; this tree gives the same 306-call log (MEASURED: the two JSON logs compare equal).
 # 2026-11-10 (v0.15.1): now the digest of the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
-# tests/_cr_libm.py), re-recorded on an export of 66f6185 with the current recorder + helpers copied in: the
+# tests/_cr_libm.py), re-recorded on an export of e7c469d with the current recorder + helpers copied in: the
 # SAME value, raw and canonical, on Windows AND in WSL (glibc), = this tree's on both (no libm result of this log
 # is a hard rounding case there); pinned canonically so that holds on any libm.
 # docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.

@@ -110,7 +110,7 @@ Everything else can wait for your review of this document.
 5. **Defaults off, checked three ways.** P3's rule; **[C]** all four plans should use it (see 5.5).
    - (i) Same-tree A/B. In one process, compare the new keyword absent with the keyword present at its default. Model inventory, equation commands, model strings and arrays must be bit-identical.
    - (ii) The call-log digest. It hashes every DEVSIM model and equation definition, and was just re-recorded by the Scharfetter-Gummel (SG) branch.
-   - (iii) That branch's numeric cross-version gate against the 6595bde arrays, at measured round-off.
+   - (iii) That branch's numeric cross-version gate against the ee0ad04 arrays, at measured round-off.
 6. **CI budget.**
    - Every new DEVSIM test file goes on the solvers-leg list in the same pull request. A guard test, being added now, fails if a DEVSIM test file is on no leg.
    - Tests over about 60 s run nightly.
@@ -125,7 +125,7 @@ Everything else can wait for your review of this document.
 
 | Branch | State |
 |---|---|
-| **User decisions** | 9 commits, **merged into the integration branch (4ff95c2) on 2026-11-04**. They cover the gmsh warning, `GAMMA_WALL` guidance, quantum-SRH guidance, the shot-noise flag, `chi_eV`/`band_gap_eV` defaulting to None (a heterostack with a defaulted value now refuses to build), `TrapSpec(enabled=True)` raising, per-process in-memory 3-D meshes, lazy ngsolve, and the audit of non-exact-mesh fixtures. |
+| **User decisions** | 9 commits, **merged into the integration branch (3c91e8f) on 2026-11-04**. They cover the gmsh warning, `GAMMA_WALL` guidance, quantum-SRH guidance, the shot-noise flag, `chi_eV`/`band_gap_eV` defaulting to None (a heterostack with a defaulted value now refuses to build), `TrapSpec(enabled=True)` raising, per-process in-memory 3-D meshes, lazy ngsolve, and the audit of non-exact-mesh fixtures. |
 | **SG flux** | One commit; documentation edits still uncommitted. One flux kernel for every family, in sign-selected two-Bernoulli form. Accuracy ≤ 3.3e-16 in the value and ≤ 8.9e-16 in the Jacobian up to \|v\| = 40. The old form lost 6.5e-5 at v = −27.6 and was fully wrong at −40. Call-log digests re-recorded; a numeric cross-version gate added. |
 | **Release blockers** | **Hooge defect confirmed and fixed.** Off-axis current gave 0.49999999982 of the truth at 45° (exactly cos⁴ + sin⁴); the 3-D gmsh bar gave 0.688. The source is now assembled per element, as a rank-one conductivity-fluctuation tensor: 45° gives 0.99999999964, and 1-D is unchanged to 4e-16. **Stale-solve defect confirmed and fixed.** A solve after the noise-gate setup returned the previous state, 1.0 V off in potential and 0.22 off in ITO electron density; it is now ≤ 6e-16 from a fresh solve. **CI wiring: not yet committed.** |
 
@@ -143,7 +143,7 @@ On gmsh tetrahedra it is still off: 1.055 instead of 1. The cause is DEVSIM's un
 
 | # | What is wrong | Size | Fix (effort) | Released? | Block the tag? |
 |---|---|---|---|---|---|
-| 3.2-1 | DEVSIM test files on no CI leg. P2 counted 7; **[C]** a recount on 6595bde finds **12**: recombination/BGN, noise, extended precision, phase composition, traps, heterojunction, tunnelling, bipolar density gradient, 3-D mesh, transient dt floor, trap energy reference, and a carriers audit file. | Every v0.14 physics gate is unprotected. | Add them to the solvers leg; move the heterojunction slow gate (642 s locally) to nightly; add a guard test (0.5 d, in flight). | v0.14 | **Yes** |
+| 3.2-1 | DEVSIM test files on no CI leg. P2 counted 7; **[C]** a recount on ee0ad04 finds **12**: recombination/BGN, noise, extended precision, phase composition, traps, heterojunction, tunnelling, bipolar density gradient, 3-D mesh, transient dt floor, trap energy reference, and a carriers audit file. | Every v0.14 physics gate is unprotected. | Add them to the solvers leg; move the heterojunction slow gate (642 s locally) to nightly; add a guard test (0.5 d, in flight). | v0.14 | **Yes** |
 | 3.2-2 | Hooge cross terms dropped. | 0.5x at 45°. | Done on the blockers branch. | v0.14 | **Yes:** merge |
 | 3.2-3 | Stale operating point after the noise setup. | 1 V off, silently. | Done on the blockers branch. | v0.14 | **Yes:** merge |
 | 3.2-4 | **del Alamo BGN preset.** The fit is n-type only, in N_D: 18.7 meV · ln(N_D/7e17). Sources: IEDM 1985 Eq. 7, TED 1987 Eq. 11, read in the primary. The code applies it to N_D + N_A, and the cited SSE 28, 47 is not where the fit appears. | No change in pure n-type material. In p-type or compensated regions it applies a fit with no basis there: about 50 meV at 1e19 cm⁻³. | Evaluate in N_D only; correct the citation; advise or refuse on p-type nodes (0.5 d with the next two rows). | v0.14 | **Yes** (P2 D4) |
@@ -157,7 +157,7 @@ On gmsh tetrahedra it is still off: 1.055 instead of 1. The cause is DEVSIM's un
 | 3.2-12 | **2-D impact ionization is directional.** The edge form converges to ∫[α(\|E_x\|)\|J_x\| + α(\|E_y\|)\|J_y\|] instead of α(\|E\|)\|J\|. Recomputed here: 0.270 of the truth at 45° and b/E = 4. Exact only for mesh-aligned current. | Large at junction corners, current crowding and drain corners; it feeds HCI lifetimes. | Use the 3-D element kernel in 2-D as well, with an exact-mesh check (P4 item 3; 2-3 d). | **Released.** **[C]** Code dates from June 2026, before v0.13.0. | **Decision 2.** Recommend **v0.14.0**: v0.14.0 already moves results through the SG switch, and moving 2-D results in a patch release would be worse. |
 | 3.2-13 | **Element-based quantities on meshes that are not well-centred.** 3-D impact ionization checks for this; 2-D/3-D BTBT and the new Hooge source do not. | Example: Hooge 1.055 on a gmsh bar. Library meshes are exact; user meshes and the deprecated gmsh path are not. | One shared exact-volume check, refusing with a named error (0.5 d, with 3.2-12). | v0.14 | With 3.2-12 (decision 6) |
 | 3.2-14 | **[C] InGaAs gap in the SOA temperature table.** P1 suspected it; checked here against the Vurgaftman 2001 text already in the scratchpad. The 0 K gap of 0.816 eV matches. But Vurgaftman's alloy rule (binary Varshni laws plus a temperature-independent bowing of 0.477 eV, Table XIII) gives E_g(300) ≈ 0.737 eV, while the repository's (0.816, 2.9e-4, 193 K) gives 0.763 eV. | 26 meV too wide at 300 K, in a shipped module outside DEVSIM. | Use a temperature law consistent with Vurgaftman, gate it against the re-typed tables, and measure the moved SOA numbers (0.5-1 d). | Released (SOA) | Not a DEVSIM blocker (decision 5) |
-| 3.2-15 | Stale documentation: integration-note item 6.8 (superseded by commit f7c82db) and the HCI docstring on 3-D quadrature. | — | Fix at close-out. | — | Yes (docs) |
+| 3.2-15 | Stale documentation: integration-note item 6.8 (superseded by commit e55ce28) and the HCI docstring on 3-D quadrature. | — | Fix at close-out. | — | Yes (docs) |
 
 **Effort.** Rows 3.2-1 and 3.2-4 to 3.2-11 take 3.5-4.5 agent-days. Rows 3.2-12/13 add 2.5-3.5, and row 3.2-14 adds 0.5-1. With 2-3 agents this is about 3 calendar days.
 

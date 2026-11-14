@@ -10,7 +10,7 @@ and RE-TYPED here (not imported): Eq. (2.13) E_g(T) = E_g(0) - alpha T^2/(T + be
 Table XII AlGaAs Gamma bowing C = -0.127 + 1.310 x, temperature-independent (Sec. IV.A.1). Every formula
 below is written out in the test.
 
-FAILS ON THE OLD CODE (cc0bdf0, MEASURED by running this file there: 10 of 10 fail): materials.band_temperature
+FAILS ON THE OLD CODE (481cd82, MEASURED by running this file there: 10 of 10 fail): materials.band_temperature
 does not exist (ImportError inside every test), physics_heterojunction has no affinity_temperature_tags, and
 TransportModel has no band_temperature field (KeyError in test_defaults_off); optics.soa.temperature had no
 AlAs row (varshni_eg_ev(T, "AlAs") raised ValueError).
@@ -97,7 +97,7 @@ def test_one_gap_kernel_for_the_whole_package():
     (the same function and dict objects, so its public names keep working), and no second Varshni law is
     defined anywhere in the package. SOA results are bit-identical: MEASURED -- 178 SOA values (every gap
     law x 8 temperatures, slopes, peak drifts, qd_params_at_temperature, the BulkGainParams band edge, gain
-    peak and a 64-point gain spectrum) hash to the same SHA-256 on cc0bdf0 and on this tree (audit note)."""
+    peak and a 64-point gain spectrum) hash to the same SHA-256 on 481cd82 and on this tree (audit note)."""
     import ast
     import os
     import dynameta

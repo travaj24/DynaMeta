@@ -2,7 +2,7 @@
 
 **What this is.** An implementation and verification plan for seven deferred items from DynaMeta's DEVSIM v0.14 work. It is a plan only: no code has been written and nothing in the repository was changed.
 
-**Reference tree.** `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14`, commit 6595bde. pyproject still says 0.13.0 and there is no v0.14 tag, so **nothing from v0.14 has been released yet**. That matters for item 1: the presets that are already in the tree can still be corrected without breaking any user.
+**Reference tree.** `DynaMeta_wt/dv_integ`, branch `feat/devsim-2.11-v0.14`, commit ee0ad04. pyproject still says 0.13.0 and there is no v0.14 tag, so **nothing from v0.14 has been released yet**. That matters for item 1: the presets that are already in the tree can still be corrected without breaking any user.
 
 **Concurrent change.** Another agent is changing `TransportModel`: `chi_eV` will default to None, and `TrapSpec(enabled=True)` will raise. Every preset below therefore sets `chi_eV` explicitly, never uses `TrapSpec`, and lands after that change has merged into `transport_model.py`.
 

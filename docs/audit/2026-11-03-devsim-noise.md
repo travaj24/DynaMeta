@@ -1,7 +1,7 @@
 # Small-signal noise of DEVSIM drift-diffusion devices (impedance-field method)
 
 DEVSIM phase, release v0.14.0, workstream D2a, branch `wip/dv_noise` (off `feat/devsim-2.11-v0.14`
-at d3a7012, with D1b merged). New capability: terminal current and voltage noise spectral densities
+at 232ca9b, with D1b merged). New capability: terminal current and voltage noise spectral densities
 `S_I(f)`, `S_V(f)` of any DEVSIM drift-diffusion device, split by mechanism, by region and by node.
 
 ## What changed
@@ -254,7 +254,7 @@ noise only, the FDT breaks to `S/(4kT Re Y) = 0.692`.
 
 ### Failure on the old code
 
-**Every gate fails on the old code.** On d3a7012 (pre-D2a), all 19 tests error at fixture setup
+**Every gate fails on the old code.** On 232ca9b (pre-D2a), all 19 tests error at fixture setup
 with `ImportError: dynameta.carriers.noise_analysis`. The fixture deliberately uses `pytest.fail`,
 not `importorskip`, so a missing module cannot become a skip.
 

@@ -59,9 +59,9 @@ Slab n = 2, d = 180 nm (|r| ~ 0.6), lambda 1.4 um, band 1.2-1.6 um, vacuum ends 
 signed dphi_r vs the exact tangential-field characteristic-matrix TMM over 8 MIDPOINT-uniform
 sub-cell pad offsets (pad/dz = m + (k+1/2)/8, which cancels the point-sampling sawtooth exactly);
 units of k0*dz (k0*dz = 0.0898 rad at res 30, 0.0449 at res 60). Measured with a one-off probe
-script (dev box, 2026-11-02; "before" = the HEAD d387eef package exported by `git archive`); the
+script (dev box, 2026-11-02; "before" = the HEAD ae96ff4 package exported by `git archive`); the
 same measurement, at 4 offsets, is gated per engine in tests/test_fdtd_registration.py, whose bias
-gates all fail on d387eef.
+gates all fail on ae96ff4.
 
 | engine | before res 30 | before res 60 | after res 30 | after res 60 |
 | --- | --- | --- | --- | --- |
@@ -87,7 +87,7 @@ validation/fdtd_seam_vs_tmm.py GATE 3b (dielectric 3-layer stack, res 28, 8 offs
 -5.195 deg (-0.99 k0dz) before, +0.066 deg after; bar 0.25 k0dz = 1.315 deg. GATE 3a (single
 geometry) tightened from 15 deg to 1.5 k0dz (sanity / convention bar).
 
-## Moved pins (2b7a002, E-node POINT sampling -- superseded by the averaging below)
+## Moved pins (2531d5d, E-node POINT sampling -- superseded by the averaging below)
 
 * tests/test_ringdown.py::test_gate7 (n_slab 3.5 etalon Q): 13.227438 -> 13.207623 (-0.15%). The
   slab keeps its 88 cells (pad/dz = 892.5, d/dz = 87.5): a rigid one-cell translation that moves the
@@ -106,7 +106,7 @@ geometry) tightened from 15 deg to 1.5 k0dz (sanity / convention bar).
     ENZ-crossing front slice doubled.
   * tests/test_fdtd_hot_carrier.py::test_lat_gate8 (2-ODE trajectory consistency 7.1e-4 -> 7.5e-3,
     bar 5e-3; peak T_e rise 139.8 -> 110.4 K): a 1.87-cell film, 1 cell -> 2 cells.
-* Unrelated failure (identical on d387eef): validation/fdtd_gpu_nonlinear.py -- the CUDA 13.1
+* Unrelated failure (identical on ae96ff4): validation/fdtd_gpu_nonlinear.py -- the CUDA 13.1
   headers fail to compile under numba's NVRTC (cuda_fp8/fp6/fp4.hpp syntax errors); environment.
 
 ## Why point sampling was not enough: it re-rounds every layer thickness
@@ -180,8 +180,8 @@ values into node maps for every engine:
   receive `zc` and paint as they like; the pad check skips the mixed face nodes.
 
 `z_subcell="point"` (every solve_fdtd_* entry point, make_structured_lateral,
-make_fdtd_optical_solver, fdtd_sweep_spectrum) reproduces 2b7a002 bit-for-bit. Measured on all
-seven engines against an exported 2b7a002 package (numpy backends; the numba 3-D kernel is not
+make_fdtd_optical_solver, fdtd_sweep_spectrum) reproduces 2531d5d bit-for-bit. Measured on all
+seven engines against an exported 2531d5d package (numpy backends; the numba 3-D kernel is not
 bitwise run-to-run, as before), and gated in-suite on the kernel input maps
 (`test_point_opt_out_reproduces_the_2b7a002_material_maps`).
 
@@ -243,9 +243,9 @@ rule, where each discriminating one fails): `test_true_geom_1d_*` (every offset 
 `test_true_geom_ppol_drude_slab_ez_fallback`, `test_true_geom_3d_and_3d_mo`, plus the mixer rules,
 the two-Drude error bound and the point opt-out identity.
 
-### The four 2b7a002 failures, against TRUE-geometry references
+### The four 2531d5d failures, against TRUE-geometry references
 
-| gate | bar | 2b7a002 (point) | averaged |
+| gate | bar | 2531d5d (point) | averaged |
 | --- | --- | --- | --- |
 | fdtd_seam_vs_tmm GATE 1 (dielectric R/T vs TMM) | 6e-3 | dR 4.05e-2, FAIL | dR 2.92e-3, PASS |
 | fdtd_drude_lorentz_vs_tmm GATE 2 (pure Lorentz) | 2e-2 | max dR0 2.82e-2, FAIL | max dR0 5.89e-4, PASS (GATE 1 Drude+Lorentz 4.98e-3 -> 8.80e-4) |
@@ -258,7 +258,7 @@ exact). The gate integrates ONE mean-field 2-ODE driven by the mask-averaged p_a
 with the mask-averaged T_e. Instrumenting the kernel with per-cell histories: the two cells absorb
 5.39e6 / 4.20e6 J/m^3 (a 25% gradient across the ENZ film), and an EXACT per-cell 2-ODE oracle
 (each cell driven by its own recorded p_abs) matches the FDTD to 7.8e-4 / 6.8e-4 -- the level of
-d387eef's single-cell 7.1e-4 -- in BOTH the point and the averaged runs, while the mean-field
+ae96ff4's single-cell 7.1e-4 -- in BOTH the point and the averaged runs, while the mean-field
 oracle gives 7.5e-3 / 7.4e-3. So the kernel and the fill weighting are right; the gate's mean-field
 oracle is exact only for a one-cell (spatially uniform) film, which the fixture had only because
 1.87 cells were rounded to 1. Proposed, not done: expose per-cell p_abs histories in hot_out and
@@ -266,7 +266,7 @@ integrate the oracle per cell (measured 7.8e-4 < 5e-3), or refine the fixture.
 
 ### Moved pins and non-green items under averaging (STOP-AND-REPORT where a value moved away)
 
-(As of f7d7c47. The 2026-11-03 decisions below supersede the gate7 / gate8 / sweep / 3-D GATE A
+(As of 3904633. The 2026-11-03 decisions below supersede the gate7 / gate8 / sweep / 3-D GATE A
 entries: gate7 re-pinned with a convergence companion, gate8 per-cell, the two validations
 converted to convergence gates.)
 
@@ -452,13 +452,13 @@ are exempt from the growing-pole warning, never appear in the returned Modes / (
 reported separately (`matrix_pencil(..., drift_out=...)`, `EtalonRingdown.drift`) with rate and
 amplitude. Not detrending (that would move every ringdown pin). Gates (test_ringdown.py):
 `test_drift_i_*` (resonance + growing or decaying drift: no warning, Q to 1e-6, drift rate and
-amplitude to 1e-4; on f024801 the growing case warned and the decaying one came back as an omega = 0
+amplitude to 1e-4; on 2501e62 the growing case warned and the decaying one came back as an omega = 0
 Mode -- measured), `test_drift_ii_*` (a growing resonance with omega != 0 still warns),
 `test_drift_iii_*` (drift only: no resonance, drift reported, ringdown_q refuses naming it).
 
 Gate9 at start_frac 0.10 / 0.20 / 0.25 / 0.30 / 0.40 (n_slab 3.5, res 30) -- growing-pole warning:
 
-| rule | before (f024801) | after | Q after | drift terms reported (gamma, |A|/peak) |
+| rule | before (2501e62) | after | Q after | drift terms reported (gamma, |A|/peak) |
 | --- | --- | --- | --- | --- |
 | point | yes / no / yes / yes / yes | none | 13.401 / 13.285 / 13.322 / 13.443 / 13.313 | e.g. 0.25: -3.7e7 1/s, 2.6e-4 |
 | averaged | yes / yes / no / no / no | none | 13.334 / 13.492 / 13.283 / 13.310 / 13.307 | e.g. 0.20: -3.0e7 1/s, 3.1e-3 |
@@ -495,5 +495,5 @@ fdtd_3d_reduces 319 s. ruff clean.
 * The 3-D kernels carry one eps array for Ex/Ey/Ez (arithmetic channel); exact for laterally
   uniform stacks (Ez = 0), approximate for Ez in structured cells (as before).
 * The nonuniform refine grid already put interfaces on nodes; averaging there equals the tie rule
-  (identical results to 2b7a002). User z_edges with mid-cell interfaces are now averaged too.
+  (identical results to 2531d5d). User z_edges with mid-cell interfaces are now averaged too.
 * inverse_design's index-based design region is not a layered stack and is not averaged.

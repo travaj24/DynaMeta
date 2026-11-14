@@ -28,7 +28,7 @@ Gates
   @slow: the slant reference re-measured; the corner's 2 / 1 nm currents re-measured with the band and the order
       (its 58k-node 0.5 nm reference mesh stays a standalone measurement: CORNER_I); the slant's fine meshes silent.
   Measured numbers: the audit note, section 5.
-FAILS ON THE OLD CODE (0554410): btbt_quadrature_error returns None in 2-D / 3-D (TypeError on rep["error"]);
+FAILS ON THE OLD CODE (098553f): btbt_quadrature_error returns None in 2-D / 3-D (TypeError on rep["error"]);
 btbt_generation_current emits no warning in 2-D (Q2's pytest.warns fails).
 """
 import math

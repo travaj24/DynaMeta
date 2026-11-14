@@ -2,7 +2,7 @@
 audit (docs/audit/2026-07-17-exhaustive-audit.md): S3-19, S3-21, S3-22, S3-23, S3-26, S3-28, S5-14,
 plus the H6a leftovers in soa/qd_gain.py (__all__, T_REF defaults, ONE lazy-njit shim).
 
-Every correctness gate here FAILS on the pre-wave-7 code (HEAD 1b1f394); the measured old values
+Every correctness gate here FAILS on the pre-wave-7 code (HEAD 7b9481a); the measured old values
 are quoted in each test."""
 import ast
 import inspect
@@ -109,7 +109,7 @@ def _fin_exact(q, dz, kA, Rp, ends):
 
 
 def _fin_dense_old(q, dz, kA, Rp, ends):
-    """VERBATIM algebra of the pre-wave-7 dense steady solve (HEAD 1b1f394)."""
+    """VERBATIM algebra of the pre-wave-7 dense steady solve (HEAD 7b9481a)."""
     n = q.size
     c = kA / dz ** 2
     s = 1.0 / Rp
@@ -251,7 +251,7 @@ def test_s3_28_noise_figure_internal_loss():
 # --------------------------------------------------- S5-14: implicit Optional in fiber_amp
 def test_s5_14_no_implicit_optional_in_fiber_amp():
     """Every `x: T = None` in optics/fiber_amp spells Optional[T] (the package convention). The
-    audit counted 21 implicit-Optional annotations; 16 were left at HEAD 1b1f394 (calibration,
+    audit counted 21 implicit-Optional annotations; 16 were left at HEAD 7b9481a (calibration,
     detection x3, pulse x6, rare_earth, spectroscopy x3, transverse_eryb x2) -- FAILS there."""
     import dynameta.optics.fiber_amp as fa
     hits = []

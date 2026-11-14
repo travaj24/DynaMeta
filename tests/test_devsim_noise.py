@@ -8,7 +8,7 @@ the solved DC current, the closed-form ambipolar GR Lorentzian, Hooge's alpha I^
 independent scipy solve of the adjoint system built from ds.get_matrix_and_rhs. Constants in the
 oracles come from scipy.constants (validation/devsim_noise.py), not dynameta.constants.
 
-EVERY GATE FAILS ON THE PRE-D2a CODE (feat/devsim-2.11-v0.14 at d3a7012): there is no
+EVERY GATE FAILS ON THE PRE-D2a CODE (feat/devsim-2.11-v0.14 at 232ca9b): there is no
 dynameta.carriers.noise_analysis (ImportError), no drive= keyword on the circuit contacts and no
 physics_drift_diffusion.setup_contact_ohmic_dd_circuit. So that a stub returning "4kT Re Y" could not
 pass either, gate E (diffusion vs shot) requires S = 2qI = (1/2) 4kT G_d on a forward diode AND

@@ -8,8 +8,8 @@ DEFAULTS OFF (plan section 2 item 5). (i) Same tree, one process: adding the shi
 new keywords and with them at their defaults gives the SAME DEVSIM call log (every model / equation string,
 in order) and bit-identical solved arrays, and the composites are the version-1 strings re-typed here. (ii)
 The call-log digest (tests/_bipolar_calllog.py, gated in tests/test_bipolar_recombination_bgn_ionization.py)
-and (iii) the 6595bde numeric cross-version gate (tests/test_devsim_sg_flux.py) are unchanged -- run, not
-re-recorded. The cross-VERSION call log of every shipped term path (8bbf36c vs this tree) is in the audit note.
+and (iii) the ee0ad04 numeric cross-version gate (tests/test_devsim_sg_flux.py) are unchanged -- run, not
+re-recorded. The cross-VERSION call log of every shipped term path (76e8633 vs this tree) is in the audit note.
 
 ORACLES (closed forms re-derived here; inputs -- mobility, V_t, doping, n_i, the knobs G0 / k -- are read
 back as DEVSIM parameters or set here, never results):
@@ -39,7 +39,7 @@ back as DEVSIM parameters or set here, never results):
 ADVERSARIAL: carrier="both" breaks (a)'s other-carrier current (the hole rows then get the sink); the wrong
 carrier breaks (a)'s profile; a partner row on the hole equation collapses (b); deleting the composite's
 TrU derivative (what version 1 builds: Electrons / Holes only) breaks (c)'s Jacobian gate by 100 %.
-OLD CODE (8bbf36c, MEASURED by running this file against `git archive 8bbf36c`): every gate except the
+OLD CODE (76e8633, MEASURED by running this file against `git archive 76e8633`): every gate except the
 A/B identity FAILS -- add_recombination_term has no carrier= / wrt= keywords (TypeError) and
 recombination_terms has no "node_electron" / "node_hole" / "custom" kinds (KeyError); the A/B identity
 fails too, on the same TypeError (the explicit-default call). Runtime ~25 s serial.

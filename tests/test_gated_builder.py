@@ -141,7 +141,7 @@ def test_bipolar3d_expr_requires_body_doping():
 
 
 # ---- v0.14.0 blocker (2026-11-04): solve() after set_ssac_gate ---------------------------------------
-# MEASURED on 6595bde before the fix (reference modulator, top_contact): solve(1 V) -> set_ssac_gate ->
+# MEASURED on ee0ad04 before the fix (reference modulator, top_contact): solve(1 V) -> set_ssac_gate ->
 # circuit_alter(V1, 1 V) + DC solve -> builder.solve(2 V) returned the 1 V state -- every node Potential
 # equal to it to 1.1e-16 V, and 1.0 V (upper_al2o3) / 0.80 V (upper_hfo2) / 0.12 V (ito) off a fresh
 # builder solved at 2 V. The ramp wrote only the `top_contact_bias` parameter, which the circuit-driven
@@ -236,7 +236,7 @@ def test_solve_after_set_ssac_gate_drives_the_circuit_source(physics):
     round-off), and the circuit node follows; a contact made circuit-driven behind the builder's back
     (2-D raw setup_circuit_contact, or ANY circuit-driven contact on the 3-D builder, which has no
     set_ssac_gate) is refused instead of silently returning the previous operating point.
-    On 6595bde: dev = 1.0 V, vac = 1.0 V (the stale 1 V state), and both raw solves 'returned'."""
+    On ee0ad04: dev = 1.0 V, vac = 1.0 V (the stale 1 V state), and both raw solves 'returned'."""
     pytest.importorskip("devsim")
     import json
     import os

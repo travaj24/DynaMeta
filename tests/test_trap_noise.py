@@ -275,7 +275,7 @@ def test_dilute_kinetic_level_reproduces_the_ambipolar_gr_lorentzian():
     grew as (N_t omega)^2 (+0.223 at 100 f_c for N_t = 1e15) was NOT a finite-speed effect -- it was the
     kind='neutral' kinetic level, which stored N_t f in its trap row but not in Poisson (not charge-
     conserving; now refused, NeutralKineticTrapError). The SAME level as an acceptor or a donor: -3.0e-5 at
-    100 f_c for N_t = 1e15 and 1e14 alike (MEASURED on d543fa9), i.e. the D1 floor."""
+    100 f_c for N_t = 1e15 and 1e14 alike (MEASURED on 862493a), i.e. the D1 floor."""
     n0, p0, Da, tau, GR2 = V.gr_constants()
     LD = math.sqrt(Da * tau)
     L = 50.0 * LD

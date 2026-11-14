@@ -29,7 +29,7 @@ __all__ = ["thermal_profile_steady_1d", "thermal_profile_transient_1d", "sample_
 # O(n^2) memory, O(n^3) factor, O(n^2) per implicit step) although the docstring promised a
 # tridiagonal solve. They now build only the three diagonals and use LAPACK's banded LU with
 # partial pivoting (dgbtrf once + dgbtrs per right-hand side: O(n) memory and work).
-# Measured vs the old dense path (HEAD 1b1f394 copy) and vs an EXACT rational (fractions.Fraction)
+# Measured vs the old dense path (HEAD 7b9481a copy) and vs an EXACT rational (fractions.Fraction)
 # Thomas solve, 2026-11-02, kappaA 2e-5, Rth' 5e-4, L 1 mm, random q:
 #   * 'insulated': old vs new max|dT|/max|T - T0| 3.5e-15 (n = 60) .. 7.6e-15 (n = 2000, 400
 #     implicit steps) -- rounding only; kappaA = 0 bit-identical; n = 2, 3 bit-identical.
