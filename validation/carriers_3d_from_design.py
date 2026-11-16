@@ -15,25 +15,26 @@ from dynameta.carriers.devsim_3d import Stacked3DSpec
 from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
 
 PERIOD = 300e-9
-N_BG = 4e26
+N_BG = 3e26
+EPS_OXB = 20.0
 
 
 def build_design():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("HfO2", ConstantOptical(4.0 + 0j), eps_static_dc=18.0))
-    reg.add(Material("Si", ConstantOptical(12.0 + 0j)))
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
-                      transport=TransportModel(n_bg_m3=N_BG, eps_static=9.5,
-                                                dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
+    reg.add(Material("oxB", ConstantOptical(2.00 ** 2 + 0j), eps_static_dc=EPS_OXB))
+    reg.add(Material("glass", ConstantOptical(1.45 ** 2 + 0j)))
+    reg.add(Material("ITO", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14),
+                      transport=TransportModel(n_bg_m3=N_BG, eps_static=9.0,
+                                                dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E)))
     cell = UnitCell.square(PERIOD)
-    layers = [Layer("ito", 10e-9, "ITO"), Layer("hfo2", 8e-9, "HfO2")]
-    stack = Stack(layers=layers, superstrate_material="air", substrate_material="Si")
+    layers = [Layer("ito", 10e-9, "ITO"), Layer("gate_ox", 8e-9, "oxB")]
+    stack = Stack(layers=layers, superstrate_material="air", substrate_material="glass")
     electrodes = [
-        Electrode("gate", "hfo2", centered_square(cell, 150e-9), role="biased"),  # 150nm patch
+        Electrode("gate", "gate_ox", centered_square(cell, 150e-9), role="biased"),  # 150nm patch
         Electrode("gnd", "ito", "x_lo", role="ground", fixed_voltage_V=0.0),
     ]
-    return Design(name="gated_ito", unit_cell=cell, stack=stack, electrodes=electrodes,
+    return Design(name="gated_film", unit_cell=cell, stack=stack, electrodes=electrodes,
                    materials=reg, mesh_3d=Mesh3DSpec(), optical=OpticalSpec(polarization="x"))
 
 
@@ -47,7 +48,8 @@ def main():
 
     derived_ok = (spec.field_region_name == "ito" and abs(spec.semi_thk_m - 10e-9) < 1e-12
                    and abs(spec.oxide_thk_m - 8e-9) < 1e-12 and abs(spec.lateral_m - PERIOD) < 1e-12
-                   and abs(spec.eps_oxide - 18.0) < 1e-9 and abs(spec.n_bg_m3 - N_BG) < 1e18
+                   and abs(spec.eps_oxide - EPS_OXB) < 1e-9 and abs(spec.n_bg_m3 - N_BG) < 1e18
+                   and spec.eps_semi == 9.0 and spec.dos_mass_kg == 0.30 * M_E
                    and abs(spec.gate_patch_frac - 150e-9 / PERIOD) < 1e-3)
     print("[t] (1) spec derived from Design correctly: {}".format(derived_ok), flush=True)
 

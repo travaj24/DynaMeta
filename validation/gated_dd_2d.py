@@ -19,7 +19,7 @@ GATE B: a physical gated response -- the accumulation peak n_max rises monotonic
         Vg=0 the DD reduces EXACTLY to the equilibrium baseline (zero-current limit).
 INFO  : the DD-vs-equilibrium profile rel-diff. It is ~0 at Vg=0 and tight at low bias, then grows
         at high bias HERE because this oxide-free test over-drives the accumulation past the FD
-        g-factor fit's validity (eta ~ 32; n_max ~ 3e27 -> eta ~ 90). With the real gate oxide
+        g-factor fit's validity (eta ~ 32; n_max ~ 3e27 -> eta ~ 100). With the real gate oxide
         limiting the accumulation (as in the 1D validation/gated_dd, eta < 32) the DD matches the
         equilibrium Fermi-Dirac profile to ~1e-4. So the residual is the g-factor limit, NOT the
         contact / convergence.
@@ -45,7 +45,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.constants import M_E
 
 P, X_EDGE, T_ITO = 200e-9, 20e-9, 12e-9
-EPS_ITO, N_BG, DOS_MASS, MU = 9.5, 4e26, 0.35 * M_E, 30e-4
+EPS_ITO, N_BG, DOS_MASS, MU = 9.0, 3e26, 0.30 * M_E, 40e-4
 BIASES = [0.0, 0.5, 1.0, 2.0]
 REL_TOL = 1.0e-5
 

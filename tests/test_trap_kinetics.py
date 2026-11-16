@@ -1583,9 +1583,18 @@ def test_dc_form_has_the_same_root_and_makes_the_gated_builder_converge(monkeypa
     the forward diode solved by solve_dc and by a raw ds.solve (physical form) agree to K1-2's 1e-10 / 1e-12 V,
     and the switch is back at 0 afterwards; (b) the gated bipolar GaAs LayeredDevsimBuilder with kinetic interface bins
     (tests/_trap_noise_child.design) converges and its zero-bias state equals the quasi-static build's to
-    1e-10. ADVERSARIAL: with the DC form disabled (kinetic_dc_form a no-op) the same builder's Newton FAILS
-    (MEASURED: w of the bins near the valence edge reached 1e190 and the carriers diverged in 60 iterations;
-    without the slaving, in the earlier linear (1 + w) form, the factorization hit an FPE)."""
+    1e-10; (c) every coupled DC Newton of that build runs with each kinetic level in the DC form, and the switch
+    is back at 0 afterwards (a spy on the Newton call reads KineticDCForm on every kinetic region).
+
+    WHY (c) AND NOT "the Newton fails without it". The DC form exists because the physical row's linearization
+    in w at a saturated level divides by (1 - f)^2: from a neutral seed one Newton step can fling w past 1e150
+    (MEASURED once: w of the bins near the valence edge reached 1e190 and the carriers diverged in 60
+    iterations; in the earlier linear (1 + w) form the factorization hit an FPE). Whether a given device then
+    fails is a property of the Newton's basin, not of the equations: on this gated GaAs stack with eps-20
+    oxides it fails at 4 / 4.5 / 5 nm and converges at 3 / 6 / 7 / 8 nm (MEASURED), so a "fails without the
+    form" assertion would be a fact about one geometry. What the library guarantees is deterministic: the
+    root is unchanged ((a), (b)) and solve_dc applies the form ((c)). CONTROL: with kinetic_dc_form a no-op
+    the same spy reads the physical rows (0), so (c) fails when the form is removed."""
     import contextlib as _cl
     import sys as _sys
     from dynameta.carriers import dc_solve as DC
@@ -1620,7 +1629,7 @@ def test_dc_form_has_the_same_root_and_makes_the_gated_builder_converge(monkeypa
               PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
                                 bin_eV=0.2))
         b = LayeredDevsimBuilder(TN.design(), mesh_name="kdfb_m", device_name="kdfb",
-                                 interface_traps={("gaas", "upper_hfo2"): it})
+                                 interface_traps={("gaas", "up_ox"): it})
         try:
             with V.quiet():
                 b.solve(BiasPoint({}, "eq"), rel_tol=1e-10)
@@ -1630,17 +1639,45 @@ def test_dc_form_has_the_same_root_and_makes_the_gated_builder_converge(monkeypa
     assert np.max(np.abs(states[True]["Potential"] - states[False]["Potential"])) < 1e-12
     for k in ("Electrons", "Holes"):
         assert np.max(np.abs(states[True][k] / states[False][k] - 1.0)) < 1e-10, k
+    # (c) the DC form is what solve_dc's Newton sees; the no-op form is the control
+    def _spied_build(tag):
+        dev, seen, real = "kdf" + tag, [], DC.XP.solve
+
+        def spy(*a, **k):
+            if k.get("type") == "dc":
+                seen.append([float(ds.get_parameter(device=dev, region=r, name=PT.KINETIC_DC_PARAMETER))
+                             for r in ds.get_region_list(device=dev)
+                             if PT.KINETIC_DC_PARAMETER in ds.get_parameter_list(device=dev, region=r)])
+            return real(*a, **k)
+        monkeypatch.setattr(DC.XP, "solve", spy)
+        b = LayeredDevsimBuilder(TN.design(), mesh_name=dev + "_m", device_name=dev,
+                                 interface_traps={("gaas", "up_ox"): PT.InterfaceTraps(
+                                     dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
+                                     dynamic=True, kinetic_bin_eV=0.2)})
+        try:
+            try:
+                with V.quiet():
+                    b.solve(BiasPoint({}, "eq"), rel_tol=1e-10)
+            except Exception:                       # the control may or may not converge (see docstring)
+                if tag == "d":
+                    raise
+            after = [float(ds.get_parameter(device=dev, region=r, name=PT.KINETIC_DC_PARAMETER))
+                     for r in ds.get_region_list(device=dev)
+                     if PT.KINETIC_DC_PARAMETER in ds.get_parameter_list(device=dev, region=r)]
+        finally:
+            b.teardown()
+            monkeypatch.setattr(DC.XP, "solve", real)
+        return seen, after
+
+    def _all_dc_form(seen):
+        return bool(seen) and all(s and all(v == 1.0 for v in s) for s in seen)
+
+    seen, after = _spied_build("d")
+    assert _all_dc_form(seen), seen
+    assert after and all(v == 0.0 for v in after), after
     monkeypatch.setattr(PT, "kinetic_dc_form", lambda *a, **k: _cl.nullcontext())
-    b = LayeredDevsimBuilder(TN.design(), mesh_name="kdfc_m", device_name="kdfc",
-                             interface_traps={("gaas", "upper_hfo2"): PT.InterfaceTraps(
-                                 dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
-                                 dynamic=True, kinetic_bin_eV=0.2)})
-    try:
-        with pytest.raises(Exception, match="onvergence|factoriz"):
-            with V.quiet():
-                b.solve(BiasPoint({}, "eq"))
-    finally:
-        b.teardown()
+    seen_ctl, _ = _spied_build("c")
+    assert seen_ctl and not _all_dc_form(seen_ctl), seen_ctl
 
 
 def test_transient_integrated_charge_through_the_n_contact():

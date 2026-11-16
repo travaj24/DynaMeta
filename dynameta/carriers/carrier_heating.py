@@ -189,9 +189,9 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
 
     audit C-1: this used to return the mass evaluated at the MEAN ENERGY, m0(1 + 2 a <E>) on a
     parabolic (3/5)E_F base -- the DOS-flavoured average, not the f-sum/conductivity mass
-    DrudeOptical documents ("m_opt_kg is the OPTICAL (conductivity) effective mass"). At the repo's
-    ITO preset (m0 = 0.35 m_e, alpha = 0.5/eV, n = 1e27) that ran 17.2% LOW, wp^2 20.8% high and put
-    the cold ENZ crossing 148.8 nm to the blue. The mu(T_e) closed form the auditor proposed instead
+    DrudeOptical documents ("m_opt_kg is the OPTICAL (conductivity) effective mass"). On a Kane band
+    with m0 = 0.25 m_e, alpha = 0.4/eV, n = 1e27 (eps_inf 4.0) that runs 18.1% LOW, wp^2 22.1% high and
+    puts the cold ENZ crossing 137.0 nm to the blue. The mu(T_e) closed form the auditor proposed instead
     (m0(1 + 2 a mu)) has the WRONG SIGN of the T_e dependence (mu FALLS with T_e at fixed n) -- the
     f-sum integral is the only correct route; the legacy average-energy form is retained (private,
     unused by the Drude path) as _kane_mass_mean_energy_of_Te for regression reference only.

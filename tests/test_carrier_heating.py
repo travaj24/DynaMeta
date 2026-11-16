@@ -11,8 +11,8 @@ from dynameta.carriers.carrier_heating import (TwoTempParams, two_temperature_re
                                                gamma_of_Te, fermi_energy_J)
 from dynameta.transient_optics import optical_transient_response
 
-M0, ALPHA_EV, GAMMA0, N = 0.35 * M_E, 0.5, 1.0e14, 1.0e27
-DRUDE0 = DrudeOptical(eps_inf=3.9, m_opt_kg=M0, gamma_rad_s=GAMMA0)
+M0, ALPHA_EV, GAMMA0, N = 0.25 * M_E, 0.4, 1.2e14, 1.0e27
+DRUDE0 = DrudeOptical(eps_inf=4.0, m_opt_kg=M0, gamma_rad_s=GAMMA0)
 GAMMA_E = (np.pi ** 2 / 2.0) * N * KB ** 2 / float(fermi_energy_J(N, M0, ALPHA_EV))
 PARAMS = TwoTempParams(C_e=lambda Te: GAMMA_E * Te, C_l=2.4e6, G_e_l=6.0e15, alpha_abs=1.0)
 
@@ -101,7 +101,7 @@ def test_legacy_mean_energy_mass_sommerfeld_coefficient_vs_exact_fd():
     from dynameta.carriers.carrier_heating import fermi_energy_J, _kane_mass_mean_energy_of_Te
     from dynameta.constants import HBAR, KB, M_E, Q_E
 
-    m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
+    m0, alpha, n = M0, ALPHA_EV, N
     a = alpha / Q_E
     pref = (2.0 * m0) ** 1.5 / (2.0 * np.pi ** 2 * HBAR ** 3)   # spin-2 3D DOS prefactor
 
@@ -141,7 +141,7 @@ def test_kane_mass_rejects_non_finite_inputs():
     from dynameta.carriers.carrier_heating import kane_mass_of_Te
     from dynameta.constants import M_E
 
-    m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
+    m0, alpha, n = M0, ALPHA_EV, N
     for bad_n, bad_te in ((np.nan, 300.0), (n, np.nan), (np.inf, 300.0), (n, np.inf)):
         with _pytest.raises(ValueError, match="finite"):
             kane_mass_of_Te(m0, alpha, bad_n, bad_te)
@@ -160,7 +160,7 @@ def test_kane_mass_rejects_non_finite_inputs():
 # ===================== audit C-1: the f-sum (Drude/conductivity) mass =====================
 # wp^2 = n e^2/(eps0 m) is an f-SUM-RULE quantity, so kane_mass_of_Te must return the conductivity
 # mass 1/m_c = (1/(3n)) Int g(E) f(E) [Lap_k E/hbar^2] dE -- NOT the mass evaluated at the mean
-# energy (which the module used to return: 17.2% low at the repo ITO preset). The auditor's proposed
+# energy (which the module used to return: 18.1% low on this file's Kane preset). The auditor's proposed
 # closed form m0(1 + 2 a mu(T_e)) is NOT the fix -- mu FALLS with T_e at fixed n, so it inverts the
 # sign of the whole R9 observable; only the direct integral is correct.
 
@@ -174,7 +174,7 @@ def test_c1_fsum_mass_T0_identity_is_fermi_surface_mass():
 
     for alpha in (0.05, 0.2, 0.5, 1.0, 2.0):
         for n in (1.0e24, 1.0e25, 1.0e26, 1.0e27, 5.0e27):
-            for m0 in (0.20 * M_E, 0.35 * M_E):
+            for m0 in (0.20 * M_E, 0.30 * M_E):
                 m_c = float(kane_mass_of_Te(m0, alpha, n, 0.0))
                 E_F = float(fermi_energy_J(n, m0, alpha))
                 closed = m0 * (1.0 + 2.0 * (alpha / Q_E) * E_F)
@@ -183,9 +183,9 @@ def test_c1_fsum_mass_T0_identity_is_fermi_surface_mass():
                                             rel=1e-10, abs=0), (alpha, n, m0)
     # continuity into the T=0 limit: at fixed n the 1 K mass sits above the T=0 one by the Sommerfeld
     # term -(pi^2/6)(kT)^2 [s' - s g'/g]/S0 (g = gam^1/2 D the DOS, s = gam^1/2 (1 - 4/3 a gam/D^2) the
-    # f-sum weight, S0 = 2/3 gam_F^1.5/D_F, gam = E + a E^2, D = 1 + 2 a E, all at E_F): 1.7428e-8 here.
-    # MEASURED shift 1.74268e-8, i.e. 4.2e-5 of it (7e-13 of m_c: the quadrature + mu-solve accuracy,
-    # ~1e-12 per the C-1 gate below); gated at 5e-4 = 10x that absolute error over the 1.74e-8 shift.
+    # f-sum weight, S0 = 2/3 gam_F^1.5/D_F, gam = E + a E^2, D = 1 + 2 a E, all at E_F): 9.7142e-9 here.
+    # MEASURED shift 9.7137e-9, i.e. 4.7e-5 of it (4.5e-13 of m_c: the quadrature + mu-solve accuracy,
+    # ~1e-12 per the C-1 gate below); gated at 5e-4 = 10x that absolute error over the 9.7e-9 shift.
     a, E = ALPHA_EV / Q_E, float(fermi_energy_J(N, M0, ALPHA_EV))
     gam, D = E + a * E * E, 1.0 + 2.0 * a * E
     s = np.sqrt(gam) * (1.0 - (4.0 / 3.0) * a * gam / D ** 2)
@@ -237,14 +237,17 @@ def test_c1_n5_rise_sign_in_both_aEF_regimes():
       (a) the TRUE f-sum mass rises monotonically with T_e in BOTH regimes -- the R9 sign
           (wp DROPS, Re(eps) moves toward eps_inf) never flips; and
       (b) the pre-fix mean-energy mass gets the SIZE of that rise wrong with a PARAMETER-DEPENDENT
-          SIGN of error: it UNDER-states below a*E_F ~ 0.15 (0.876x at a*E_F = 0.102, 600 K) and
-          OVER-states above it (1.219x at the repo ITO preset a*E_F = 0.378, 600 K). N5's point is
-          exactly that C-1 cannot be stated as a universal over-statement."""
+          SIGN of error: on this preset (m0 0.25 m_e, alpha 0.4/eV) it UNDER-states for 0.04 < a*E_F <
+          0.23 (0.849x at a*E_F = 0.113, n = 1e26, 600 K) and OVER-states above (1.263x at a*E_F = 0.413,
+          n = 1e27). N5's point is exactly that C-1 cannot be stated as a universal over-statement.
+    The pinned a*E_F and ratios are the INDEPENDENT oracle's (E_F by brentq of E(1 + aE) = gamma_F; f-sum mass
+    by energy-space quad + brentq mu; mean-energy mass from the closed-form Sommerfeld expression); the code
+    agrees with them to < 1e-12. A scan of n puts the sign change at a*E_F = 0.23."""
     from dynameta.constants import Q_E
     from dynameta.carriers.carrier_heating import _kane_mass_mean_energy_of_Te
 
     cases = {}
-    for n in (1.0e26, 1.0e27):                      # a*E_F = 0.1019 (low) and 0.3780 (high)
+    for n in (1.0e26, 1.0e27):                      # a*E_F = 0.1129 (low) and 0.4129 (high)
         a_EF = ALPHA_EV * float(fermi_energy_J(n, M0, ALPHA_EV)) / Q_E
         Tes = np.linspace(0.0, 6000.0, 61)
         m = np.asarray(kane_mass_of_Te(M0, ALPHA_EV, n, Tes), dtype=float)
@@ -255,43 +258,46 @@ def test_c1_n5_rise_sign_in_both_aEF_regimes():
         cases[n] = (a_EF, (l_t6 / l_t0 - 1.0) / (m_t6 / m_t0 - 1.0))
     a_lo, ratio_lo = cases[1.0e26]
     a_hi, ratio_hi = cases[1.0e27]
-    assert a_lo == pytest.approx(0.10188, rel=1e-3) and a_hi == pytest.approx(0.37802, rel=1e-3)
-    assert ratio_lo < 1.0 and ratio_lo == pytest.approx(0.8757, rel=1e-3)   # (b) UNDER-states
-    assert ratio_hi > 1.0 and ratio_hi == pytest.approx(1.2193, rel=1e-3)   # (b) OVER-states
+    assert a_lo == pytest.approx(0.112941, rel=1e-3) and a_hi == pytest.approx(0.412925, rel=1e-3)
+    assert ratio_lo < 1.0 and ratio_lo == pytest.approx(0.849072, rel=1e-3)   # (b) UNDER-states
+    assert ratio_hi > 1.0 and ratio_hi == pytest.approx(1.262868, rel=1e-3)   # (b) OVER-states
 
 
-def test_c1_ito_preset_cold_mass_and_enz_crossing_goldens():
-    """GATE 4 (C-1) -- the repo ITO preset (m0 = 0.35 m_e, alpha = 0.5/eV, n = 1e27, a*E_F = 0.378).
-    RE-BASELINED at C-1: the cold (300 K) conductivity mass is 1.7587969739 m0, +20.7629% above the
-    pre-fix mean-energy value 1.4564050460 m0 (equivalently, the old mass was 17.193% LOW and every
-    wp^2 built from it 20.763% HIGH), and the cold ENZ crossing moves 148.802 nm to the RED,
-    1493.4033 -> 1642.2053 nm. New values pinned at rtol 1e-8 (BLAS-safe)."""
+def test_c1_kane_preset_cold_mass_and_enz_crossing_goldens():
+    """GATE 4 (C-1) -- this file's Kane preset (m0 = 0.25 m_e, alpha = 0.4/eV, n = 1e27, a*E_F = 0.413;
+    Drude eps_inf 4.0, gamma 1.2e14 rad/s). The cold (300 K) conductivity mass is 1.8274463231 m0,
+    +22.0607% above the mean-energy value 1.4971613719 m0 (the mean-energy mass is 18.0736% LOW and every
+    wp^2 built from it 22.0607% HIGH), and the cold ENZ crossing sits 136.950 nm to the RED of the
+    mean-energy one, 1296.3412 -> 1433.2907 nm. Every golden is the INDEPENDENT oracle's: the f-sum mass
+    by energy-space adaptive quad + brentq mu (the code agrees to 3e-16 / 1e-14 / 2e-13 at 300 / 600 /
+    3000 K), the mean-energy mass from the closed-form Sommerfeld expression with E_F by brentq (exact
+    agreement), the crossing from the closed form below. Pinned at rtol 1e-8 (BLAS-safe)."""
     from dynameta.constants import EPS0, C_LIGHT, Q_E
     from dynameta.carriers.carrier_heating import _kane_mass_mean_energy_of_Te
 
     m_new = float(kane_mass_of_Te(M0, ALPHA_EV, N, 300.0))
     m_old = float(_kane_mass_mean_energy_of_Te(M0, ALPHA_EV, N, 300.0))
-    assert m_new / M0 == pytest.approx(1.7587969739, rel=1e-8)             # NEW golden (C-1)
-    assert m_old / M0 == pytest.approx(1.4564050460, rel=1e-8)             # pre-fix, for the delta
-    assert m_old / m_new - 1.0 == pytest.approx(-0.171931, rel=1e-5)       # mass was 17.19% low
-    assert m_new / m_old - 1.0 == pytest.approx(+0.207629, rel=1e-5)       # wp^2 was 20.76% high
-    # hot points on the same preset (the R9 modulation observable), also re-baselined
-    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 600.0)) / M0 == pytest.approx(1.7670575837, rel=1e-8)
-    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 3000.0)) / M0 == pytest.approx(2.0014807657, rel=1e-8)
+    assert m_new / M0 == pytest.approx(1.8274463231, rel=1e-8)             # f-sum mass (C-1)
+    assert m_old / M0 == pytest.approx(1.4971613719, rel=1e-8)             # mean-energy, for the delta
+    assert m_old / m_new - 1.0 == pytest.approx(-0.180736, rel=1e-5)       # mean-energy mass 18.07% low
+    assert m_new / m_old - 1.0 == pytest.approx(+0.220607, rel=1e-5)       # its wp^2 22.06% high
+    # hot points on the same preset (the R9 modulation observable)
+    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 600.0)) / M0 == pytest.approx(1.8322359744, rel=1e-8)
+    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 3000.0)) / M0 == pytest.approx(1.9777539937, rel=1e-8)
 
     # cold ENZ crossing: Re(eps) = eps_inf - wp^2/(w^2 + gamma^2) = 0 for the module's own Drude
-    def lam_enz(m, eps_inf=3.9, gamma=GAMMA0):
+    def lam_enz(m, eps_inf=4.0, gamma=GAMMA0):
         wp2 = N * Q_E ** 2 / (EPS0 * m)
         return 2.0 * np.pi * C_LIGHT / np.sqrt(wp2 / eps_inf - gamma ** 2)
 
     lam_new, lam_old = lam_enz(m_new), lam_enz(m_old)
-    assert lam_new * 1e9 == pytest.approx(1642.2053088, rel=1e-8)          # NEW golden (C-1)
-    assert lam_old * 1e9 == pytest.approx(1493.4032846, rel=1e-8)          # pre-fix
-    assert (lam_new - lam_old) * 1e9 == pytest.approx(148.802, rel=1e-5)   # 148.8 nm to the RED
+    assert lam_new * 1e9 == pytest.approx(1433.2907233, rel=1e-8)          # f-sum mass (C-1)
+    assert lam_old * 1e9 == pytest.approx(1296.3411791, rel=1e-8)          # mean-energy mass
+    assert (lam_new - lam_old) * 1e9 == pytest.approx(136.9495, rel=1e-5)  # 137.0 nm to the RED
     # the crossing is a genuine Re(eps) = 0 of the shipped DrudeOptical, not just of the closed form
-    eps = complex(DrudeOptical(eps_inf=3.9, m_opt_kg=m_new,
+    eps = complex(DrudeOptical(eps_inf=4.0, m_opt_kg=m_new,
                                gamma_rad_s=GAMMA0).eps(lam_new, n_m3=N))
-    assert abs(eps.real) < 1e-9 * 3.9
+    assert abs(eps.real) < 1e-9 * 4.0
 
 
 def test_transient_rejects_silent_callable_substitution():
@@ -305,16 +311,16 @@ def test_transient_rejects_silent_callable_substitution():
     ttm = TwoTempParams(C_e=3.0e4, C_l=2.5e6, G_e_l=3.0e16)
     t = np.linspace(0.0, 1e-12, 8)
     I = lambda tt: 0.0
-    d_mass = DrudeOptical(eps_inf=3.9, m_opt_kg=KaneOpticalMass(m0_kg=0.3 * M_E, alpha_eV=0.5),
+    d_mass = DrudeOptical(eps_inf=4.0, m_opt_kg=KaneOpticalMass(m0_kg=0.3 * M_E, alpha_eV=0.4),
                           gamma_rad_s=1.6e14)
     with pytest.raises(ValueError, match="m0_kg"):
         carrier_heating_transient(t, I, 1.5e-6, drude0=d_mass, ttm_params=ttm,
-                                  n_m3=6e26, alpha_per_eV=0.5)
-    d_gam = DrudeOptical(eps_inf=3.9, m_opt_kg=0.3 * M_E,
+                                  n_m3=6e26, alpha_per_eV=0.4)
+    d_gam = DrudeOptical(eps_inf=4.0, m_opt_kg=0.3 * M_E,
                          gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.6e14))
     with pytest.raises(ValueError, match="gamma_rad_s"):
         carrier_heating_transient(t, I, 1.5e-6, drude0=d_gam, ttm_params=ttm,
-                                  n_m3=6e26, alpha_per_eV=0.5, m0_kg=0.3 * M_E)
+                                  n_m3=6e26, alpha_per_eV=0.4, m0_kg=0.3 * M_E)
 
 
 def test_c7_pump_off_reproduces_gamma0_at_every_base_temperature():

@@ -13,7 +13,7 @@ code runs on ee0ad04):
        -0.5 V reverse on 'lo'.
   bz   cl_bz: the same diode, Boltzmann, 'hi' on a circuit node (source Vcl); hi at -0.3 V (forward)
        and +0.5 V (reverse), source current read from the circuit.
-  dg   dgcl: the unipolar in-Newton DG ITO bar (4e26), DG ohmic 'back', the pre-v0.15 setup_dg_hard_wall
+  dg   dgcl: the unipolar in-Newton DG film bar (3e26), DG ohmic 'back', the pre-v0.15 setup_dg_hard_wall
        rows on 'wall' (since v0.15 the test fixture tests/_dg_legacy_wall.py; the library name is a shim
        onto setup_dg_insulator_wall), wall-aware taper seed, gamma ramp to 1.
 
@@ -46,6 +46,8 @@ DATA = os.path.join(HERE, "data", "sgflux_6595bde.json")
 #    get_contact_current read-back, and shows no eps T floor (moved 4e-17 A/m^2 with T ~ 3e12 A/m^2
 #    at 'hi'), so it is gated relative only (T = 0). TOL_I_REL = 1e-11 (15x), TOL_I_TERM = 4 eps =
 #    8.9e-16 (9x the worst 0.43 eps).
+#  * the dg fixture's film bar (3e26 m^-3, eps_s 9.0, m* 0.30 m_e), this tree vs its record: MEASURED
+#    <= 3.3e-16 in every field, its terminal current at 4.5e-5 of the current tolerance.
 TOL_FIELD = 1e-13
 TOL_I_REL = 1e-11
 TOL_I_TERM = 4.0 * 2.220446049250313e-16
@@ -200,12 +202,12 @@ def solve_fixtures(statistics=None):
         ds.add_1d_region(mesh=mesh, material="ITO", region="bar", tag1="wall", tag2="back")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        mstar = 0.35 * M_E
-        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=4.0e26, eps_static=9.5,
+        mstar = 0.30 * M_E
+        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=3.0e26, eps_static=9.0,
                                       dos_mass_kg=mstar, mobility_m2Vs=0.004, **st)
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
-        DG.setup_contact_dg(dev, "back", 4.0e26)
+        DG.setup_contact_dg(dev, "back", 3.0e26)
         # the RETIRED hard-wall rows (v0.15: setup_dg_hard_wall is a shim onto the insulator wall),
         # re-created call-for-call by the test fixture, so this flux gate still compares with the
         # arrays recorded on ee0ad04 WITH those rows (tests/_dg_legacy_wall.py)

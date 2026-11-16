@@ -33,11 +33,11 @@ from dynameta.optics.tmm_reference import layered_rta
 Q_E = 1.602176634e-19
 EPS0 = 8.8541878128e-12
 LAM = 1550e-9
-ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
+ITO_DRUDE = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
 T_ITO, T_OX, EPS_OX, T_ACC = 60e-9, 20e-9, 9.0, 0.3e-9      # optical ITO; gate oxide (sets C); accum. depth
 T_DIEL, EPS_DIEL = 250e-9, 4.0                              # the dielectric resonator (gives R sensitivity)
-MU, PERIOD = 30e-4, 370e-9
-N_BG = 4.0e20                                               # cm^-3 background ITO density
+MU, PERIOD = 40e-4, 400e-9
+N_BG = 3.0e20                                               # cm^-3 background ITO density
 
 
 def _contrast(n_on_cm3):

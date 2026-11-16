@@ -17,7 +17,7 @@ from dynameta.core import NM, MaterialEpsMap, assemble_eps
 from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.core.lift import IdentityLift
 
-N_BG = 4e26
+N_BG = 3e26
 T_SEMI = 12e-9
 
 
@@ -28,7 +28,8 @@ def profile(cf):
 
 
 def main():
-    solver = SchrodingerPoissonCarrier(semi_thk_m=T_SEMI, n_bg_m3=N_BG, lateral_m=12e-9)
+    solver = SchrodingerPoissonCarrier(semi_thk_m=T_SEMI, n_bg_m3=N_BG, m_eff_kg=0.30 * M_E, eps_static=9.0,
+                                       lateral_m=12e-9)
     print("[t] ITO bulk E_F - E_c = {:.4f} eV (degenerate)".format(solver.E_F_J / 1.602176634e-19), flush=True)
     cf0 = solver.solve(BiasPoint({"gate": 0.0, "body": 0.0}, "0V"))
     cfV = solver.solve(BiasPoint({"gate": 0.3, "body": 0.0}, "+0.3V"))
@@ -51,13 +52,13 @@ def main():
     # (more carriers -> lower Re(eps)) relative to the unbiased profile. Compare the
     # MINIMUM Re(eps) over the stack (the most-accumulated / most-ENZ point).
     reg = MaterialRegistry()
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+    reg.add(Material("film", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
     align = GeometryAlignment(unit_scale=NM, fixed_eps_regions={},
         region_alignments=[RegionAlignment("semi", "semi", (0.0, 12e-9, 0.0, 12e-9, 0.0, T_SEMI), "z")])
     nmap = MaterialEpsMap(reg)
-    re0 = np.real(assemble_eps(cf0, align, nmap, IdentityLift(), 1300e-9, mesh_regions=["semi"])
+    re0 = np.real(assemble_eps(cf0, align, nmap, IdentityLift(), 1200e-9, mesh_regions=["semi"])
                    ["semi"].values_zyx).mean(axis=(1, 2))
-    reV = np.real(assemble_eps(cfV, align, nmap, IdentityLift(), 1300e-9, mesh_regions=["semi"])
+    reV = np.real(assemble_eps(cfV, align, nmap, IdentityLift(), 1200e-9, mesh_regions=["semi"])
                    ["semi"].values_zyx).mean(axis=(1, 2))
     print("[t] (4) eps via bridge: min Re(eps) 0V={:+.3f}  +0.3V={:+.3f} (accumulation deepens ENZ)".format(
         float(re0.min()), float(reV.min())), flush=True)

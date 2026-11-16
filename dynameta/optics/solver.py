@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING
 from dynameta.constants import Z0
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.ngsolve_layered import OpticalGeometry, S
+from dynameta.optics.resonance import _outgoing_sqrt
 from dynameta.warning_types import AdvisoryWarning, DynaMetaWarning, UnreliableResultWarning
 
 if TYPE_CHECKING:                       # type-only; OpticalSpec lives in geometry (no runtime dep)
@@ -839,7 +840,10 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # the old uniform eps_bg=1 drove a huge source through the whole substrate at the
     # WRONG (vacuum) wavevector. Reduces exactly to the plain incident wave when
     # n_sub==n_super==1 (R0=0, T0=1). Incidence medium assumed vacuum (kx=k0 sin th).
-    kz_sub = complex(np.sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2 - ky ** 2)))
+    # Principal root with an exactly-zero Im read as +0.0 (resonance._outgoing_sqrt): a lossless
+    # metal substrate whose index is (-0.0, +y) -- what _passive_sqrt returns for eps = -y^2 - 0j --
+    # or (0, -y) has (n k0)^2 with Im = -0.0, whose bare principal root is the GROWING wave.
+    kz_sub = _outgoing_sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2 - ky ** 2))
     if abs(kz_sub) <= 1e-6 * k0:
         # At the grazing cutoff the substrate 0-order is non-propagating and |kz_sub| ~ 0. kz_sub
         # is a DIVISOR in the p-pol interface BC matrix and the T power factor (and the s-pol
@@ -877,7 +881,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # A tensor that is DIAGONAL in (x, y, z) keeps both mirror parities (its principal axes are
             # the wall normals), so the PEC/PMC walls remain exact -- e.g. a uniaxial LC with the
             # director along x or y. Only an OFF-DIAGONAL (x-y / x-z / y-z) coupling breaks the parity.
-            # MEASURE it over the mesh instead of refusing every tensor (2026-09-25, exp31 coax):
+            # MEASURE it over the mesh instead of refusing every tensor (measured on a coaxial cell):
             # refuse unless the off-diagonal L2 norm is < 1e-12 of the diagonal's.
             _off = sum(ng.Integrate(ng.Norm(eps_cf[i, j]) ** 2, mesh)
                        for i in range(3) for j in range(3) if i != j)

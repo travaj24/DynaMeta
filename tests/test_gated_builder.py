@@ -16,15 +16,15 @@ def _design(physics):
     from dynameta.geometry import UnitCell, Stack, Layer, Electrode, Design
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("Au", ConstantOptical(-100 + 8j), is_metal=True))
+    reg.add(Material("metal", ConstantOptical(-60 + 4j), is_metal=True))
     mob = (None if physics == "equilibrium"
-           else (lambda n: np.full_like(np.asarray(n, float), 30e-4)))
+           else (lambda n: np.full_like(np.asarray(n, float), 40e-4)))
     reg.add(Material("semi", optical=ConstantOptical(4.0 + 0j),
-                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.5,
-                                              dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E,
+                     transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
+                                              dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E,
                                               physics=physics, mobility_m2Vs_of_n_m3=mob)))
     cell = UnitCell.square(200e-9)
-    layers = [Layer("metalpad", 20e-9, "Au"), Layer("ito", 12e-9, "semi")]
+    layers = [Layer("metalpad", 20e-9, "metal"), Layer("ito", 12e-9, "semi")]
     stack = Stack(layers=layers, superstrate_material="air", substrate_material="air")
     electrodes = [Electrode("gl", "ito", "x_lo", role="ground"),
                   Electrode("gr", "ito", "x_hi", role="ground")]
@@ -108,10 +108,10 @@ def test_2d_builder_refuses_lateral_isolation_cases():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
     reg.add(Material("hfo2", ConstantOptical(4.0 + 0j)))
-    reg.add(Material("ito", ConstantOptical(3.9 + 0j),
-                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.5,
+    reg.add(Material("ito", ConstantOptical(4.0 + 0j),
+                     transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
                                               dos_mass_kg_of_n_m3=lambda n: 3.2e-31)))
-    P = 370e-9
+    P = 400e-9
     bar = Inclusion(shape=Rectangle(P / 2, P / 4, 0.4 * P, P), material="ito")
     d = Design(name="t", unit_cell=UnitCell.square(P),
                stack=Stack(layers=[Layer("mix", 10e-9, "hfo2", inclusions=[bar])],
@@ -136,14 +136,16 @@ def test_bipolar3d_expr_requires_body_doping():
     # audit probe); the spec-level contract now requires the signed body-side doping
     pytest.importorskip("devsim")              # devsim_3d imports devsim at module load
     from dynameta.carriers.devsim_3d import Stacked3DSpec
-    spec = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e17, net_doping_expr="-1.0e23")
+    from dynameta.materials import M_E
+    spec = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e17, net_doping_expr="-1.0e23", n_bg_m3=1e23,
+                         eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E)
     assert spec.body_net_doping_m3 is None                     # guard fires at solve()
 
 
 # ---- v0.14.0 blocker (2026-11-04): solve() after set_ssac_gate ---------------------------------------
-# MEASURED on ee0ad04 before the fix (reference modulator, top_contact): solve(1 V) -> set_ssac_gate ->
+# MEASURED on ee0ad04 before the fix (reference cell, top_contact): solve(1 V) -> set_ssac_gate ->
 # circuit_alter(V1, 1 V) + DC solve -> builder.solve(2 V) returned the 1 V state -- every node Potential
-# equal to it to 1.1e-16 V, and 1.0 V (upper_al2o3) / 0.80 V (upper_hfo2) / 0.12 V (ito) off a fresh
+# equal to it to 1.1e-16 V, and 1.0 V (outer oxide) / 0.80 V (inner oxide) / 0.12 V (film) off a fresh
 # builder solved at 2 V. The ramp wrote only the `top_contact_bias` parameter, which the circuit-driven
 # Dirichlet no longer reads. Fixed: solve() drives the electrode's circuit source (LayeredDevsimBuilder.
 # _drive). After the fix the two states agree to <= 6e-16 (relative, Electrons; absolute V, Potential)
@@ -161,7 +163,7 @@ from dynameta.carriers import ac_analysis as AC, eq_registry as R, devsim_3d as 
 from dynameta.sweep import BiasPoint
 physics, GATE = sys.argv[1], "top_contact"
 # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the shared
-# validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so every build
+# validation device (validation/_reference_device.film_dos_mass) varies by 65 % over [0.1, 10] n_bg, so every build
 # of it warns once.
 # This child runs under -W error and the advisory is not what it tests: ignore exactly that message.
 import warnings

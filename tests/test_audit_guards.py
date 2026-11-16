@@ -18,10 +18,10 @@ from dynameta.core.lift import SeparableXYLift
 
 def test_drude_nonpositive_mass_raises():
     bad = DrudeOptical(eps_inf=4.0, m_opt_kg=(lambda n: np.zeros_like(np.asarray(n, float))),
-                       gamma_rad_s=1.0e14)
+                       gamma_rad_s=1.2e14)
     with pytest.raises(ValueError):
         bad.eps(1300e-9, n_m3=1e27)
-    ok = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)   # valid path unaffected
+    ok = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)   # valid path unaffected
     assert np.isfinite(complex(ok.eps(1300e-9, n_m3=1e27)))
 
 
@@ -34,7 +34,7 @@ def test_matthiessen_nonpositive_temperature_raises():
 
 
 def test_scattering_mobility_nonpositive_tau_raises():
-    sm = ScatteringModel(one_over_tau=0.0, m_cond_kg=0.35 * M_E)
+    sm = ScatteringModel(one_over_tau=0.0, m_cond_kg=0.30 * M_E)
     with pytest.raises(ValueError):
         sm.mobility_of_n()(1e27)
 
@@ -63,7 +63,7 @@ def test_feature_inverted_zrange_raises():
 # ---- B. SeparableXYLift depletion: sign IS preserved (refutes audit CRIT-1) ----
 
 def test_separable_xy_lift_depletion_preserves_sign():
-    N_BG, P, Nx, Nv = 4.0e26, 300e-9, 21, 3
+    N_BG, P, Nx, Nv = 3.0e26, 300e-9, 21, 3
     x = np.linspace(0.0, P, Nx)
     prof = -1.0e26 * np.exp(-((x - 0.5 * P) / (0.15 * P)) ** 2)          # PURE depletion (negative)
     n_2d = N_BG + prof[:, None] * np.ones((1, Nv))                       # (Nx, Nv), single-sign deviation
@@ -85,10 +85,10 @@ def test_weighted_objective_both_keys_raises():
 
 def test_drude_negative_gamma_raises_zero_allowed():
     # gamma < 0 = gain under exp(-iwt) -> reject; gamma = 0 (collisionless idealization) stays legal.
-    bad = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * M_E, gamma_rad_s=(lambda n: -1.0e14))
+    bad = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=(lambda n: -1.2e14))
     with pytest.raises(ValueError):
         bad.eps(1300e-9, n_m3=1e27)
-    lossless = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * M_E, gamma_rad_s=0.0)
+    lossless = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=0.0)
     e = complex(lossless.eps(1300e-9, n_m3=1e27))
     assert e.imag == 0.0 and np.isfinite(e.real)
 

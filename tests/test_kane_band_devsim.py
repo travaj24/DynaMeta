@@ -455,6 +455,7 @@ def test_builder_gated_film_with_the_kane_band(vg, bar):
 # 3-D Stacked3DSpec
 # ---------------------------------------------------------------------------------------------------
 EPS_OX_3D = 20.0
+K3D = dict(n_bg_m3=N_BG, eps_semi=EPS_S, eps_oxide=EPS_OX_3D)     # the film/oxide of the 3-D spec (no defaults)
 
 
 def test_stacked3d_kane_band_matches_the_oracle_on_its_column():
@@ -462,7 +463,7 @@ def test_stacked3d_kane_band_matches_the_oracle_on_its_column():
     film; tensor mesh): the laterally uniform solution at +2 V equals the oracle on the mesh's z nodes (Dirichlet
     body and gate) to 2e-5 in n (MEASURED 7.0e-11; every film node is degenerate at +2 V, the Sommerfeld
     branch); the spec reports the band's DOS mass."""
-    spec = Stacked3DSpec(n_bg_m3=N_BG, eps_semi=EPS_S, eps_oxide=EPS_OX_3D, bands={"semi": BAND})
+    spec = Stacked3DSpec(**K3D, bands={"semi": BAND})
     assert spec.dos_mass_kg == BAND.dos_mass_kg(N_BG)
     b = Devsim3DEquilibrium(spec)
     b.solve(BiasPoint({"gate": 2.0, "body": 0.0}, "k3"))
@@ -483,13 +484,15 @@ def test_stacked3d_kane_band_matches_the_oracle_on_its_column():
 def test_stacked3d_bands_validation_and_from_design():
     import _wiring_fixture as W
     with pytest.raises(NotImplementedError, match="EQUILIBRIUM closure only"):
-        Stacked3DSpec(bands={"semi": BAND}, physics="drift_diffusion")
+        Stacked3DSpec(**K3D, bands={"semi": BAND}, physics="drift_diffusion")
     with pytest.raises(ValueError, match="not a semiconductor region"):
-        Stacked3DSpec(bands={"oxide": BAND})
+        Stacked3DSpec(**K3D, dos_mass_kg=BAND.dos_mass_kg(N_BG), bands={"oxide": BAND})
     with pytest.raises(TypeError, match="must be a materials.KaneBand"):
-        Stacked3DSpec(bands={"semi": 0.3})
+        Stacked3DSpec(**K3D, bands={"semi": 0.3})
     with pytest.raises(ValueError, match="disagrees with its KaneBand"):
-        Stacked3DSpec(bands={"semi": BAND}, dos_mass_kg=0.3 * M_E)
+        Stacked3DSpec(**K3D, bands={"semi": BAND}, dos_mass_kg=0.3 * M_E)
+    with pytest.raises(TypeError, match="dos_mass_kg"):
+        Stacked3DSpec(**K3D)                            # no band on 'semi': the DOS mass is required
     with warnings.catch_warnings():
         warnings.simplefilter("error")                  # no density-dependent-DOS-mass advisory with a band
         spec = Stacked3DSpec.from_design(W.film_design(mats=_kane_materials(BAND)))

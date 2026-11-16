@@ -27,8 +27,11 @@ Combines three stages:
 
 ## Quick start
 
-A representative end-to-end build is below — the same shape the
-[validation/_reference_device.py](validation/_reference_device.py) test fixture uses:
+A representative end-to-end build is below: a square metal patch over a gated
+transparent-conductor film between two oxide layers, on a metal mirror (a gap-plasmon
+reflection cell). All numbers are round illustrative values, not a particular device.
+The same cell, with a density-dependent (Kane) DOS mass instead of the constant one here, is the
+shared validation fixture [validation/_reference_device.py](validation/_reference_device.py):
 
 ```python
 import numpy as np
@@ -44,51 +47,52 @@ from dynameta.pipeline import run_pipeline   # pulls in devsim + ngsolve
 #    is_metal=True tags a metal; everything else is a dielectric. The physics
 #    ROLE is derived here, per material -- it is NOT set on the geometry.
 reg = MaterialRegistry()
-reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-reg.add(Material("Si",  ConstantOptical(12.0 + 0j)))
+reg.add(Material("air",   ConstantOptical(1.0 + 0j)))
+reg.add(Material("glass", ConstantOptical(1.45 ** 2 + 0j)))
 # Dielectrics carry an OPTICAL eps (Stage 2/3) AND a DC eps (eps_static_dc) for
-# the Stage-1 gate capacitance. For gate oxides the two differ a lot (HfO2 ~4
-# optical vs ~18 DC) and eps_static_dc is REQUIRED -- Stage 1 RAISES if it is
-# unset (the optical eps would under-predict gate accumulation). See docs/dielectrics.md.
-reg.add(Material("Al2O3", ConstantOptical(2.756 + 0j), eps_static_dc=9.0))
-reg.add(Material("HfO2",  ConstantOptical(4.0 + 0j),   eps_static_dc=18.0))
-reg.add(Material("Al-Nd", ConstantOptical(-180 + 30j), is_metal=True))
-reg.add(Material("Au",    ConstantOptical(-100 + 8j),  is_metal=True))
-reg.add(Material("ITO",
-    optical=DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
+# the Stage-1 gate capacitance. For high-k gate oxides the two differ a lot, and
+# eps_static_dc is REQUIRED -- Stage 1 RAISES if it is unset (the optical eps
+# would under-predict gate accumulation). See docs/dielectrics.md.
+reg.add(Material("oxA", ConstantOptical(1.70 ** 2 + 0j), eps_static_dc=9.0))
+reg.add(Material("oxB", ConstantOptical(2.00 ** 2 + 0j), eps_static_dc=20.0))
+reg.add(Material("mirror_metal", ConstantOptical(-120 + 20j), is_metal=True))
+reg.add(Material("metal",        ConstantOptical(-60 + 4j),   is_metal=True))
+# A degenerate transparent-conductor film: Drude optics + the carrier model.
+# (dynameta.materials also has literature presets, e.g. materials.tco_presets.)
+reg.add(Material("TCO",
+    optical=DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14),
     transport=TransportModel(
-        n_bg_m3=4.0e20 * 1e6, eps_static=9.5,
-        # constant DOS mass here; validation/_reference_device.py uses a Kane m*(n).
-        dos_mass_kg_of_n_m3=lambda n: np.full_like(np.asarray(n, float), 0.27 * M_E),
-        band_gap_eV=3.6, chi_eV=4.5)))   # physics defaults to "equilibrium"
+        n_bg_m3=3.0e26, eps_static=9.0,
+        dos_mass_kg_of_n_m3=lambda n: np.full_like(np.asarray(n, float), 0.30 * M_E),
+        band_gap_eV=3.5, chi_eV=4.5)))   # physics defaults to "equilibrium"
 
 # 2. Geometry: a square unit cell + a bottom-to-top Stack of Layers. A Layer is
-#    a background material plus optional sub-cell Inclusions. The Au nanopatch is
-#    an air layer carrying one centred-square Au inclusion.
-cell = UnitCell.square(370e-9)
+#    a background material plus optional sub-cell Inclusions. The metal patch is
+#    an air layer carrying one centred-square metal inclusion.
+cell = UnitCell.square(400e-9)
 stack = Stack(
     layers=[
-        Layer("mirror",      70e-9, "Al-Nd"),
-        Layer("lower_al2o3",  1e-9, "Al2O3"),
-        Layer("lower_hfo2",   7e-9, "HfO2"),
-        Layer("ito",          5e-9, "ITO"),
-        Layer("upper_hfo2",   7e-9, "HfO2"),
-        Layer("upper_al2o3",  1e-9, "Al2O3"),
-        Layer("patch",       50e-9, "air",
-              inclusions=[Inclusion(centered_square(cell, 175e-9), "Au")]),
+        Layer("mirror", 80e-9, "mirror_metal"),
+        Layer("lo_oxa",  2e-9, "oxA"),
+        Layer("lo_oxb",  6e-9, "oxB"),
+        Layer("film",    6e-9, "TCO"),
+        Layer("up_oxb",  6e-9, "oxB"),
+        Layer("up_oxa",  2e-9, "oxA"),
+        Layer("patch",  40e-9, "air",
+              inclusions=[Inclusion(centered_square(cell, 150e-9), "metal")]),
     ],
-    superstrate_material="air", substrate_material="Si")
+    superstrate_material="air", substrate_material="glass")
 
 # 3. Electrodes: each attaches to a layer with a footprint that is a CrossSection,
 #    an edge selector ("x_lo"/"x_hi"/"y_lo"/"y_hi"), or "full" (the whole face).
 electrodes = [
     Electrode("bot_contact", "mirror", "full", role="biased"),
-    Electrode("top_contact", "patch", centered_square(cell, 175e-9), role="biased"),
-    Electrode("ito_gnd_left",  "ito", "x_lo", role="ground", fixed_voltage_V=0.0),
-    Electrode("ito_gnd_right", "ito", "x_hi", role="ground", fixed_voltage_V=0.0),
+    Electrode("top_contact", "patch", centered_square(cell, 150e-9), role="biased"),
+    Electrode("film_gnd_left",  "film", "x_lo", role="ground", fixed_voltage_V=0.0),
+    Electrode("film_gnd_right", "film", "x_hi", role="ground", fixed_voltage_V=0.0),
 ]
 
-design = Design(name="my_modulator", unit_cell=cell, stack=stack,
+design = Design(name="my_cell", unit_cell=cell, stack=stack,
                 electrodes=electrodes, materials=reg)
 # Mesh/optics defaults are sensible; override via Design(..., mesh_2d=Mesh2DSpec(),
 # mesh_3d=Mesh3DSpec(), optical=OpticalSpec(polarization="x", lift="auto"))
@@ -97,10 +101,10 @@ design = Design(name="my_modulator", unit_cell=cell, stack=stack,
 # 4. The (bias, wavelength) grid.
 sweep = Sweep(
     bias_points=[
-        BiasPoint({"top_contact": +2.0}, "patch+2V"),
-        BiasPoint({"top_contact": -2.0}, "patch-2V"),
+        BiasPoint({"top_contact": +3.0}, "patch+3V"),
+        BiasPoint({"top_contact": -3.0}, "patch-3V"),
     ],
-    wavelengths_nm=[1200, 1300, 1400, 1500])
+    wavelengths_nm=[1000, 1050, 1100, 1150, 1200])
 
 # 5. Run carriers -> Drude bridge -> optics. Returns a list of SweepRows held in
 #    memory (the pipeline writes nothing to disk; persistence is up to you).
@@ -122,7 +126,7 @@ Each `SweepRow` carries:
 
 | field | meaning |
 |---|---|
-| `row.bias_label` | the `BiasPoint` label, e.g. `"patch+2V"` |
+| `row.bias_label` | the `BiasPoint` label, e.g. `"patch+3V"` |
 | `row.lambda_nm` | the wavelength in nm |
 | `row.result` | an `OpticalResult` |
 
@@ -140,8 +144,8 @@ def spectrum(label):
     by_lambda = {r.lambda_nm: r.result.R for r in rows if r.bias_label == label}
     return [by_lambda[L] for L in lam]
 
-shift_nm = resonance_shift(lam, spectrum("patch-2V"), spectrum("patch+2V"))
-print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
+shift_nm = resonance_shift(lam, spectrum("patch-3V"), spectrum("patch+3V"))
+print("resonance shift, +3V vs -3V: {:+.1f} nm".format(shift_nm))
 ```
 
 ## What's new in v0.16
@@ -164,6 +168,9 @@ Changed defaults (old behaviour in brackets):
 - `SchrodingerPoissonCarrier`: `fermi_level="model"`, `gate_map="face_field"`
   [`"bulk3d_T0"`, `"flat_band_excess"`]; the depletion sign error is fixed.
 - `IntersubbandEffect(z_response="subbands")` [`"drude_plus_subbands"`, deprecated].
+- `SchrodingerPoissonCarrier` (`n_bg_m3`, `m_eff_kg`, `eps_static`; `eps_oxide` with an oxide) and
+  `Stacked3DSpec` (`n_bg_m3`, `eps_semi`, `eps_oxide`, `dos_mass_kg`) no longer assume a film: these are
+  required [pass them explicitly; `Stacked3DSpec.from_design` reads them from the Design].
 - Adjacent unlabelled `HydroLayer`s raise [`conductor_id=`, or `stack_rt(allow_walls=True)`].
 - Differentiable RCWA (`rcwa_stack_RT` / `rcwa_stack_jones`): `formulation='auto'` where lumenairy's Li rule
   traces under JAX (5.51) [`formulation='laurent'`].
@@ -219,8 +226,7 @@ omitted both later releases):
   `optics.hydro_fdtd`, `optics.harmonics`, `optics.hot_carrier`, and
   `dynameta.analysis` (Fano / Lorentzian fitting, KK checks).
 
-The reference
-gated-ITO modulator (the
+The generic gated-film metasurface cell (the
 [validation/_reference_device.py](validation/_reference_device.py) fixture) is the
 validated end-to-end run. Forward plan:
 [docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).
@@ -241,8 +247,8 @@ Known limitations:
   Scope: a centered, mirror-symmetric (c2v/c4v) cell at normal incidence with a
   scalar eps and rectangle/circle inclusions; the carrier-coupled (semiconductor),
   prismatic, and other-shape paths use the full periodic cell.
-- Peripheral ITO ground contacts at the unit-cell edges (`"x_lo"` / `"x_hi"`)
-  over-pin the ITO potential; physically the ground pads are mm-scale away.
+- Peripheral film ground contacts at the unit-cell edges (`"x_lo"` / `"x_hi"`)
+  over-pin the film potential; physically the ground pads are mm-scale away.
 - Stage 1 defaults to the equilibrium Fermi-Dirac Poisson solve (no currents);
   `TransportModel(physics="drift_diffusion", ...)` adds the full
   Scharfetter-Gummel continuity solve. Both defaults are classical, but quantum

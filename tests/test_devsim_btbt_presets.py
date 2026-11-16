@@ -495,8 +495,8 @@ def test_t_builders_pass_the_scaled_set(monkeypatch):
     # 3-D: from_design (devsim-free spec construction) on a bipolar body
     from dynameta.carriers.devsim_3d import Stacked3DSpec
     from validation.carriers_3d_multisemi import _design
-    layers = [("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"), ("ito_bot", 12e-9, "ITO"),
-              ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]
+    layers = [("mirror", 80e-9, "mirror_metal"), ("lower_oxb", 6e-9, "oxB"), ("ito_bot", 12e-9, "ITO"),
+              ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")]
     d3 = _design(layers)
     ito = d3.materials.get("ITO")
     body = dataclasses.replace(ito, name="InGaAsB", transport=_ingaas_tr(flagged, T))

@@ -17,7 +17,7 @@ physics, and it is what these gates use.
 
 THE FIXTURES are exactly uniform, so the closed form is valid on the DISCRETE device (asserted first: n
 uniform to 1e-12, I = sigma V A / L to 1e-9):
-  * a 2-D unipolar DD bar (ITO-like, n = 4e26, the gate of tests/test_devsim_noise_hooge.py) on DEVSIM's
+  * a 2-D unipolar DD bar (ITO-like, n = 3e26, the gate of tests/test_devsim_noise_hooge.py) on DEVSIM's
     rectilinear mesh, cut at x = L_a into two REGIONS joined by a carrier-continuous interface, the same
     material on both sides -- the regions differ only in their alpha, so the mapping is the only thing
     tested (a doping or mobility step would add a Debye-length space-charge layer, ~L_D / L = 4e-3 at
@@ -65,7 +65,7 @@ FF = np.array([1.0, 1.0e3])
 V_BIAS = 1e-3
 # 2-D series bar
 L_A, L_B, WIDTH = 120e-9, 280e-9, 60e-9     # L_a != L_b: a label swap is visible
-N_BG, MU = 4e26, 0.004
+N_BG, MU = 3e26, 0.004
 ALPHA_A, ALPHA_B = 1.0e-4, 1.0e-3           # Hooge 1994's perfect-lattice value and a "measured" one
 # 1-D intrinsic bipolar bar. Its neutral (ambipolar) perturbations are NOT screened, so the bias bends the
 # adjoint field over the WHOLE bar at O(V / V_T) (MEASURED: 3.6 % at 1 mV): bias it at 0.1 uV
@@ -109,7 +109,7 @@ def _series_bar_2d():
     ds.create_device(mesh=mesh, device=dev)
     with V.quiet():
         for r in ("ra", "rb"):
-            DD.setup_semiconductor_region_dd(dev, r, n_bg_m3=N_BG, eps_static=9.5, dos_mass_kg=0.35 * M_E,
+            DD.setup_semiconductor_region_dd(dev, r, n_bg_m3=N_BG, eps_static=9.0, dos_mass_kg=0.30 * M_E,
                                              mobility_m2Vs=MU)
         _continuous_interface(dev, "jab", (("Potential", "PotentialEquation"),
                                            ("Electrons", "ElectronContinuityEquation")))

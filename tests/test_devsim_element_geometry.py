@@ -330,11 +330,11 @@ def test_e3_hooge_refuses_the_gmsh_tet_bar_but_diffusion_noise_still_runs():
             ds.add_gmsh_contact(mesh=dev + "_m", gmsh_name="right", region="bulk", name="hi", material="metal")
             ds.finalize_mesh(mesh=dev + "_m")
             ds.create_device(mesh=dev + "_m", device=dev)
-            DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=4e26, eps_static=9.5,
-                                             dos_mass_kg=0.35 * M_E, mobility_m2Vs=0.004)
+            DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=3e26, eps_static=9.0,
+                                             dos_mass_kg=0.30 * M_E, mobility_m2Vs=0.004)
             DD.setup_contact_ohmic_dd(dev, "lo")
             DD.setup_contact_ohmic_dd_circuit(dev, "hi", node_name="vhi", source_name="V1")
-        ae = max(1e10, 4e26 * 1e-12)
+        ae = max(1e10, 3e26 * 1e-12)
         V._solve(ae, 1e-9)
         V.set_bias(1e-3, ae)
         r = check_element_geometry(dev, "bulk", raise_error=False)

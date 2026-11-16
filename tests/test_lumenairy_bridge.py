@@ -627,12 +627,12 @@ def test_drude_eps_jax_matches_material_model():
     from dynameta.constants import M_E
     from dynameta.materials.optical_model import DrudeOptical
     from dynameta.optics.lumenairy_bridge import drude_eps_jax
-    model = DrudeOptical(eps_inf=3.9, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+    model = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
     fn = drude_eps_jax(model)
-    n, lam = 4.0e26, 1.31e-6
+    n, lam = 3.0e26, 1.31e-6
     assert fn(n, lam) == pytest.approx(complex(model.eps(lam, n_m3=n)), rel=1e-14, abs=0)
     with pytest.raises(NotImplementedError):
-        drude_eps_jax(DrudeOptical(eps_inf=3.9, m_opt_kg=lambda x: 0.30 * M_E,
+        drude_eps_jax(DrudeOptical(eps_inf=4.0, m_opt_kg=lambda x: 0.30 * M_E,
                                    gamma_rad_s=1.2e14))
 
 

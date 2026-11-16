@@ -11,6 +11,7 @@ import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+from dynameta.constants import M_E
 from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.sweep import BiasPoint
 
@@ -24,7 +25,8 @@ def gate_ratio(cf, n_bg):
 
 def solve(physics, vg, n_bg):
     spec = Stacked3DSpec(lateral_m=12e-9, semi_thk_m=12e-9, oxide_thk_m=8e-9,
-                          n_bg_m3=n_bg, physics=physics)
+                          n_bg_m3=n_bg, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E,
+                          physics=physics)
     s = Devsim3DEquilibrium(spec)
     cf = s.solve(BiasPoint({"gate": vg, "body": 0.0}, "{}@{:+.0f}V".format(physics, vg)))
     top, bot = gate_ratio(cf, n_bg)
@@ -33,7 +35,7 @@ def solve(physics, vg, n_bg):
 
 
 def main():
-    n_bg = 4e26
+    n_bg = 3e26
     print("[t] 3D carriers: equilibrium vs drift-diffusion (gated MOS-cap, zero-current)", flush=True)
     eq_top, eq_bot = solve("equilibrium", 1.0, n_bg)
     print("[t] equilibrium  +1V: n_top/n_bg={:.3f}  n_body/n_bg={:.3f}".format(eq_top, eq_bot), flush=True)

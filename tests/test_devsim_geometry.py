@@ -543,7 +543,7 @@ def test_drift_diffusion_resistor_closed_form():
     MEASURED 1 - 1.1e-16 / 1 + 2.2e-16."""
     from dynameta.carriers import physics_drift_diffusion as DD
     from dynameta.constants import M_E, Q_E
-    nd, mu, v, Ls = 4e26, 0.004, 1e-3, 100e-9
+    nd, mu, v, Ls = 3e26, 0.004, 1e-3, 100e-9
     out = {}
     for case in ("lat5", "jit3"):
         if case == "lat5":
@@ -561,7 +561,7 @@ def test_drift_diffusion_resistor_closed_form():
                 with warnings.catch_warnings(record=True):
                     warnings.simplefilter("always")
                     G.apply_exact_geometry(name, "r", negative="warn")
-            DD.setup_semiconductor_region_dd(name, "r", n_bg_m3=nd, eps_static=9.5, dos_mass_kg=0.35 * M_E,
+            DD.setup_semiconductor_region_dd(name, "r", n_bg_m3=nd, eps_static=9.0, dos_mass_kg=0.30 * M_E,
                                              mobility_m2Vs=mu)
             DD.setup_contact_ohmic_dd(name, "lo")
             DD.setup_contact_ohmic_dd(name, "hi")

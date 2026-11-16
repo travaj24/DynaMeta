@@ -37,13 +37,14 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 # the seeded Electrons). Every region model, edge model and flux string is unchanged.
 # RE-RECORDED 2026-11-10 (v0.15.1) as the CANONICAL log (correctly rounded transcendentals: tests/_calllog.py,
 # tests/_cr_libm.py) on an export of 7e44010 (the commit that recorded the value above) with the current
-# recorder + helpers copied in: 6af06e07... on Windows AND in WSL (glibc), = this tree's on both. The raw
-# digest of 7e44010 and of this tree is still 44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374
-# on both platforms (the same log), but it carried numpy's np.tanh in the wall seed, which misses 3 of the
-# fixture's 15 arguments by 0.57-0.68 ulp (vs mpmath at 300 bits; identically on both platforms -- numpy's own
-# tanh, not the C library); cancellation in the seed turns that into 1-433726 ulp in 9 literals of 3 calls.
+# recorder + helpers copied in, = this tree's. The raw digest (the platform's libm) differs from the canonical
+# one: it carries numpy's np.tanh in the wall seed, which misses some of the fixture's arguments by a fraction
+# of an ulp (numpy's own tanh, not the C library); cancellation in the seed amplifies that in a few literals.
 # docs/audit/2026-11-10-v0.15.1-digest-svd-fragility.md.
-_DG_CALLLOG_DIGEST = "6af06e078b7bdd3c41c02611e288dbd069b11228b9d7e97aebf25b4f7f29ef60"
+# FIXTURE: the generic film bar (n_bg 3e26 m^-3, eps_s 9.0, m* 0.30 m_e). MEASURED (Windows, canonical): the
+# same digests (legacy and default) on exports of the two recording commits named here and below, with the
+# current recorder and fixture copied in.
+_DG_CALLLOG_DIGEST = "011ffb94b0308d0cbd169d1aa2bb52815d83f41ebc20342369cc7f8310444cae"
 _DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
 # RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 2db6a00) /
@@ -60,12 +61,11 @@ _BIPOLAR_CALLLOG_CALLS = 237
 # EXPLICIT statistics='legacy' (unchanged, gated); the default logs are re-recorded here (cross-checks in the
 # tests: default == explicit 'fermi_dirac').
 # 2026-11-10 (v0.15.1): both CANONICAL (tests/_calllog.py), re-recorded on an export of f7f245c (the commit that
-# recorded them), Windows AND WSL, = this tree's on both. DG: the raw digest on both platforms was
-# 89bd00d8113147a21844956c1a252968b9536c6d39595903132491fe1966bded (the same np.tanh seed misses as
-# _DG_CALLLOG_DIGEST); bipolar: canonical = raw, unchanged (its ~1.4e6 np.power elements of the FD
+# recorded them), Windows AND WSL, = this tree's on both. DG: the raw digest differs from the canonical one
+# (the same np.tanh seed misses as _DG_CALLLOG_DIGEST); bipolar: canonical = raw, unchanged (its ~1.4e6 np.power elements of the FD
 # equilibrium root go through the vectorized fast path of tests/_cr_libm.py: 19 s instead of 1.4 s raw).
 _DG_CALLLOG_DIGEST_V0150, _DG_CALLLOG_CALLS_V0150 = (
-    "cb2b24a2f73c50c0cd60b6f335903a99f049386c2331e6db3448c470abcf31fc", 157)
+    "0a2219f4cc157d95a2d9c7b45b178ea5dcdd2099a135cf300de7f347de6fb4da", 157)
 _BIPOLAR_CALLLOG_DIGEST_V0150, _BIPOLAR_CALLLOG_CALLS_V0150 = (
     "271e5d87f247959b3a3876a9d0d94ab73fed790f3e5868b98e6954556e37e18d", 302)
 
@@ -143,10 +143,10 @@ def test_unipolar_region_is_refused_and_wall_needs_a_solved_device():
             ds.add_1d_region(mesh=mesh, material="ITO", region="u", tag1="wall", tag2="sub")
             ds.finalize_mesh(mesh=mesh)
             ds.create_device(mesh=mesh, device=dev)
-            setup_semiconductor_region_dd(dev, "u", n_bg_m3=1e26, eps_static=9.5,
-                                          dos_mass_kg=0.35 * M_E, mobility_m2Vs=0.004)
+            setup_semiconductor_region_dd(dev, "u", n_bg_m3=1e26, eps_static=9.0,
+                                          dos_mass_kg=0.30 * M_E, mobility_m2Vs=0.004)
         with pytest.raises(ValueError, match="not a bipolar region"):
-            DG.setup_bipolar_dg(dev, "u", m_eff_n_kg=0.35 * M_E)
+            DG.setup_bipolar_dg(dev, "u", m_eff_n_kg=0.30 * M_E)
     finally:
         V._drop(dev, mesh)
     dev, mesh = "bdg_guard2", "bdg_guard2_m"

@@ -67,13 +67,13 @@ def _record(hard_wall_shim, statistics):
         ds.add_1d_region(mesh=mesh, material="ITO", region="bar", tag1="wall", tag2="back")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        mstar = 0.35 * M_E
-        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=4.0e26, eps_static=9.5,
+        mstar = 0.30 * M_E
+        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=3.0e26, eps_static=9.0,
                                       dos_mass_kg=mstar, mobility_m2Vs=0.004,
                                       **({} if statistics is None else {"statistics": statistics}))
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
-        DG.setup_contact_dg(dev, "back", 4.0e26)
+        DG.setup_contact_dg(dev, "back", 3.0e26)
         if hard_wall_shim:              # v0.15: the deprecated name (a shim; the CALLER handles its warning)
             DG.setup_dg_hard_wall(dev, "wall", lambda_pin_factor=8.0)
         else:

@@ -773,9 +773,10 @@ def test_transport_model_and_3d_spec_validate_and_thread_options():
                         hole_mobility_m2Vs_of_n_m3=common["mobility_m2Vs_of_n_m3"],
                         bipolar_options=opts, **common)
     assert tr.bipolar_options is opts
+    si = dict(n_bg_m3=1e24, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E)    # n-Si / SiO2 (no defaults)
     with pytest.raises(ValueError, match="bipolar_dd"):
-        Stacked3DSpec(physics="equilibrium", bipolar_options=opts)
-    s = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e16, tau_srh_s=1e-7, bipolar_options=opts)
+        Stacked3DSpec(physics="equilibrium", bipolar_options=opts, **si)
+    s = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e16, tau_srh_s=1e-7, bipolar_options=opts, **si)
     assert s.bipolar_options is opts
 
 

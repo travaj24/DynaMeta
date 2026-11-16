@@ -6,7 +6,7 @@ digests of their float64 bytes where bitwise identity is the gate.
 
     python tests/_noise_method_child.py <scenario>
 
-Scenarios: plain_1V, hand_ref, wrap_ref, fresh1_ref, seq_ref, seq_xp (the reference gated-ITO modulator,
+Scenarios: plain_1V, hand_ref, wrap_ref, fresh1_ref, seq_ref, seq_xp (the reference gated-film cell,
 validation/_reference_device; seq_xp on an extended-precision builder, nightly)
 and hand_te, wrap_te (a gated bipolar n-GaAs / N-Al0.3Ga0.7As heterostack with a thermionic interface).
 "hand_*" is the documented hand recipe -- solve, set_ssac_gate, circuit_alter, a library DC re-settle
@@ -35,7 +35,7 @@ from dynameta.carriers.dc_solve import solve_dc              # noqa: E402
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder, OhmicContactNoiseError   # noqa: E402
 from dynameta.sweep import BiasPoint                         # noqa: E402
 # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the shared
-# validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so every build
+# validation device (validation/_reference_device.film_dos_mass) varies by 65 % over [0.1, 10] n_bg, so every build
 # of it warns once.
 # This child runs under -W error and the advisory is not what it tests: ignore exactly that message.
 import warnings  # noqa: E402
@@ -92,8 +92,8 @@ def hand(b, ff, *, bipolar):
 
 
 def te_design():
-    """Gated bipolar heterostack: Al-Nd mirror (bottom gate) / 7 nm HfO2 / 20 nm n-GaAs (grounded on both
-    x edges) / 20 nm N-Al0.3Ga0.7As / 7 nm HfO2 / Au patch (top gate), 60 nm cell. Boltzmann statistics
+    """Gated bipolar heterostack: metal mirror (bottom gate) / 6 nm oxide (eps 20) / 20 nm n-GaAs (grounded on both
+    x edges) / 20 nm N-Al0.3Ga0.7As / 6 nm oxide / metal patch (top gate), 60 nm cell. Boltzmann statistics
     (carrier_statistics='boltzmann': the diffusion source is Nyquist-exact), A* x 1e-3 so the thermionic
     interface carries most of the gate's dissipation at 1 GHz."""
     from validation import _reference_device as RD
@@ -107,15 +107,15 @@ def te_design():
                                  richardson_p_Am2K2=1e-3 * richardson(0.55), hooge_alpha_n=an, hooge_alpha_p=ap)
         reg.add(Material(nm, ConstantOptical(12.0 + 0j), transport=tm))
     cell = UnitCell.square(60e-9)
-    layers = [Layer("mirror", 70e-9, "Al-Nd"), Layer("lower_hfo2", 7e-9, "HfO2"), Layer("gaas", 20e-9, "GaAs_n"),
-              Layer("algaas", 20e-9, "AlGaAs_n"), Layer("upper_hfo2", 7e-9, "HfO2"),
-              Layer("patch", 50e-9, "air", inclusions=[Inclusion(centered_square(cell, 30e-9), "Au")])]
+    layers = [Layer("mirror", 80e-9, "mirror_metal"), Layer("lo_ox", 6e-9, "oxB"), Layer("gaas", 20e-9, "GaAs_n"),
+              Layer("algaas", 20e-9, "AlGaAs_n"), Layer("up_ox", 6e-9, "oxB"),
+              Layer("patch", 40e-9, "air", inclusions=[Inclusion(centered_square(cell, 30e-9), "metal")])]
     el = [Electrode("bot_contact", "mirror", "full", role="biased"),
           Electrode(GATE, "patch", centered_square(cell, 30e-9), role="biased"),
           Electrode("gnd_left", "gaas", "x_lo", role="ground", fixed_voltage_V=0.0),
           Electrode("gnd_right", "gaas", "x_hi", role="ground", fixed_voltage_V=0.0)]
     return Design(name="te_gate", unit_cell=cell, stack=Stack(layers=layers, superstrate_material="air",
-                                                               substrate_material="Si"),
+                                                               substrate_material="glass"),
                   electrodes=el, materials=reg)
 
 
@@ -124,7 +124,7 @@ def ref_design():
     These scenarios test the noise
     method's state handling (bitwise repeats, restores, equality with the hand recipe, FDT through the method):
     nothing here is about mesh accuracy, and every comparison is between solves on one mesh. The v0.16 default
-    screening grading (188 instead of 17 z nodes across the film) made this file 7x slower (58 s -> 403 s; W7
+    screening grading (208 instead of 19 z nodes across the film) made this file 7x slower (58 s -> 403 s; W7
     65 s -> 865 s); semiconductor_refinement="legacy" is the v0.15.1 mesh these gates were measured on."""
     import dataclasses
     from validation._reference_device import build_reference_modulator
@@ -176,7 +176,7 @@ def run(scenario):
                      "units": tn.units, "S_V_ok": bool(np.array_equal(tn.S_V, tn.S_I / np.abs(tn.Y) ** 2))}
         # refusals (W6), none of which may touch the device
         try:
-            b.noise_spectrum(FF_REF, gate="ito_gnd_left")
+            b.noise_spectrum(FF_REF, gate="film_gnd_left")
             res["ohmic"] = "returned"
         except OhmicContactNoiseError as e:
             res["ohmic"] = "OhmicContactNoiseError:" + str(e)

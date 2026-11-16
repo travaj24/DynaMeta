@@ -135,15 +135,18 @@ def _ppol_normal_field_inside(E0: float, theta: float, eps_w: complex) -> comple
     driving field inside the metal). Uses the p-pol Fresnel E-field transmission.
       E_z_in = E0 * t_p * sin(theta_t),  t_p = 2 cos(theta)/(n2 cos(theta) + cos(theta_t)),
       n2 = sqrt(eps_w),  sin(theta_t) = sin(theta)/n2,  cos(theta_t) = sqrt(1 - sin^2/eps_w)."""
-    n2 = cmath.sqrt(complex(eps_w))
-    if n2.real < 0:                               # sqrt branch: pick Re>=0 (passive metal, n=n'+in'')
-        n2 = -n2
+    from dynameta.optics.resonance import _outgoing_sqrt
+    # Principal roots (Re >= 0) with an exactly-zero imaginary part read as +0.0: a lossless metal
+    # (eps < 0) gets the passive n2 = +i sqrt(-eps) whatever the sign of its zero Im, and a
+    # totally-reflected fundamental (0 < eps < sin^2 theta) gets the DECAYING cos(theta_t) = +i s.
+    # The argument 1 - (sth/n2)^2 of the second root carries Im = -0.0 from Python 3.14 on (mixed
+    # float - complex arithmetic keeps the sign of a zero), so without the rule the transmitted
+    # wave of that case would grow into the metal on 3.14 and decay on 3.13.
+    n2 = _outgoing_sqrt(complex(eps_w))
     sth = math.sin(theta)
     cth = math.cos(theta)
     sth_t = sth / n2
-    cth_t = cmath.sqrt(1.0 - (sth / n2) ** 2)
-    if cth_t.real < 0:
-        cth_t = -cth_t
+    cth_t = _outgoing_sqrt(1.0 - (sth / n2) ** 2)
     t_p = 2.0 * cth / (n2 * cth + cth_t)          # p-pol E-field amplitude transmission (n1=1)
     return E0 * t_p * sth_t
 
@@ -793,8 +796,8 @@ def _reconstruct_fundamental_field(geo, design, lambda_m, optical, eps_cf, order
         # module take.  Rejecting it by name is what keeps the two families from crossing.
         _reject_pol(pol, "_reconstruct_fundamental_field", vocabulary="lab_xyp",
                     param="OpticalSpec.polarization")
-    import numpy as _np
     from dynameta.optics.ngsolve_layered import S as _S
+    from dynameta.optics.resonance import _outgoing_sqrt
     from dynameta.optics.solver import (background_probe_pol, solve_fem_sourced,
                                         _layered_background)
     phi_deg = float(getattr(optical, "azimuth_deg", 0.0) or 0.0)
@@ -808,7 +811,9 @@ def _reconstruct_fundamental_field(geo, design, lambda_m, optical, eps_cf, order
     kx = k0 * math.sin(th)
     kz_s = math.sqrt(max((complex(n_super).real * k0) ** 2 - kx ** 2, 0.0))
     kz_s_c = complex(kz_s)
-    kz_sub = complex(_np.sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2)))
+    # Lossless-metal substrate: (n k0)^2 carries Im = -0.0 when n = (-0.0, +y) (the passive
+    # index _passive_sqrt returns for eps = -y^2 - 0j) or (0, -y); the rule takes the decaying root.
+    kz_sub = _outgoing_sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2))
     z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
              else geo.z_sub_interface_nm)
     eps_sup_c, eps_sub_c = complex(n_super) ** 2, complex(n_sub) ** 2

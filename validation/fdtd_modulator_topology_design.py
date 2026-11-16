@@ -27,10 +27,10 @@ from dynameta.optics.fdtd_seam import _eps_to_fdtd_layer
 C = 299792458.0
 LAM = 1500e-9
 EPS_HI = 12.0
-ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
+ITO_DRUDE = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
 N_ITO = 3                      # graded ITO sublayers (z-cells)
 # carrier density (m^-3) per ITO sublayer (front..back): OFF = background; ON = accumulation crossing ENZ
-N_OFF = np.array([4.0e26, 4.0e26, 4.0e26])
+N_OFF = np.array([3.0e26, 3.0e26, 3.0e26])
 N_ON = np.array([9.0e26, 6.0e26, 4.5e26])
 
 

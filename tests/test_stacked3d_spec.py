@@ -8,8 +8,8 @@ pytest.importorskip("devsim")  # devsim_3d imports the physics modules (devsim) 
 from dynameta.carriers.devsim_3d import Stacked3DSpec
 from dynameta.carriers.physics_equilibrium import M_E
 
-BASE = dict(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, semi_thk_m=12e-9,
-            oxide_thk_m=8e-9, n_bg_m3=4e26, eps_semi=9.5, eps_oxide=18.0, dos_mass_kg=0.35 * M_E)
+BASE = dict(semi_material="ITO", oxide_material="oxB", lateral_m=12e-9, semi_thk_m=12e-9,
+            oxide_thk_m=8e-9, n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E)
 
 
 def test_physics_value_validated():
@@ -30,20 +30,20 @@ def test_bipolar_requires_n_i_and_lifetimes():
 
 def test_extra_semiconductors_unique_names():
     with pytest.raises(ValueError):
-        Stacked3DSpec(extra_semiconductors=[("semi", "ITO", 5e-9, 9.5, 4e26)], **BASE)  # clashes with primary
+        Stacked3DSpec(extra_semiconductors=[("semi", "ITO", 6e-9, 9.0, 3e26)], **BASE)  # clashes with primary
     with pytest.raises(ValueError):
-        Stacked3DSpec(extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26),
-                                            ("xs", "ITO", 5e-9, 9.5, 4e26)], **BASE)     # duplicate
+        Stacked3DSpec(extra_semiconductors=[("xs", "ITO", 6e-9, 9.0, 3e26),
+                                            ("xs", "ITO", 6e-9, 9.0, 3e26)], **BASE)     # duplicate
 
 
 def test_multisemi_bipolar_guard():
     # v0.14.0 (D1a): a drift_diffusion heterostack is supported (physics_heterojunction carries the
     # semi-semi carrier interface); a BIPOLAR heterostack is still refused, naming what is missing (the
     # extra_semiconductors entries carry no hole statistics/doping).
-    s = Stacked3DSpec(physics="drift_diffusion", extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26)], **BASE)
+    s = Stacked3DSpec(physics="drift_diffusion", extra_semiconductors=[("xs", "ITO", 6e-9, 9.0, 3e26)], **BASE)
     assert s.heterointerface == "auto"
     with pytest.raises(ValueError, match="hole mobility"):
-        Stacked3DSpec(physics="bipolar_dd", extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26)],
+        Stacked3DSpec(physics="bipolar_dd", extra_semiconductors=[("xs", "ITO", 6e-9, 9.0, 3e26)],
                       n_i_m3=1e16, tau_srh_s=1e-7, mobility_p_m2Vs=0.02, **BASE)
     with pytest.raises(ValueError, match="heterointerface"):
         Stacked3DSpec(heterointerface="tunnelling", **BASE)
@@ -51,19 +51,20 @@ def test_multisemi_bipolar_guard():
 
 def test_heterostack_layer_stack_and_field_region():
     s = Stacked3DSpec(semi_thk_m=6e-9,
-                      extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 2e26)], **{k: v for k, v in BASE.items()
+                      extra_semiconductors=[("xs", "ITO", 6e-9, 9.0, 2e26)], **{k: v for k, v in BASE.items()
                                                                                 if k != "semi_thk_m"})
     stack = s.layer_stack_nm()
     names = [r[0] for r in stack]
     roles = [r[2] for r in stack]
     assert names == ["semi", "xs", "oxide"]                              # primary | extra | oxide
     assert roles == ["semiconductor", "semiconductor", "dielectric"]
-    # contiguous z-ranges: semi [0,6], xs [6,11], oxide [11,19] (nm)
+    # contiguous z-ranges: semi [0,6], xs [6,12], oxide [12,20] (nm)
     assert abs(stack[0][4] - 6.0) < 1e-9 and abs(stack[1][3] - 6.0) < 1e-9
-    assert abs(stack[1][4] - 11.0) < 1e-9 and abs(stack[2][3] - 11.0) < 1e-9
+    assert abs(stack[1][4] - 12.0) < 1e-9 and abs(stack[2][3] - 12.0) < 1e-9
+    assert abs(stack[2][4] - 20.0) < 1e-9
     assert s.field_devsim_region() == "xs"                               # gate-adjacent emitted
     assert abs(s.semiconductor_nbg("xs") - 2e26) < 1e18                  # per-region n_bg
-    assert abs(s.semiconductor_nbg("semi") - 4e26) < 1e18
+    assert abs(s.semiconductor_nbg("semi") - 3e26) < 1e18
 
 
 def test_single_semiconductor_unchanged():

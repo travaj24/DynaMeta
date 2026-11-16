@@ -110,11 +110,12 @@ from dynameta.core.lateral import check_periodic_axis, is_x_invariant, is_y_inva
 from dynameta.core.units import NM_PER_M
 # the ONE out-of-plane wavenumber kernel (principal branch; see resonance's BRANCH CHOICE note).
 # Every _kz call here takes a CLADDING eps = n**2 of a passive end medium (the superstrate is
-# refused unless lossless), so Im(eps) >= +0 -- CPython forms n**2 by multiplying up from 1+0j,
-# which also turns a -0.0 imaginary part of n into +0.0 -- and for such arguments the principal
-# root IS the passive / outgoing branch (both parts >= 0), bit for bit. (It differs from the
-# Im >= 0 flip only for Im(eps) < 0, a gain substrate, where the principal branch keeps
-# Re(kz) > 0: the outgoing wave.)
+# refused unless lossless). _kz reads an exactly-zero imaginary part of its argument as +0.0, so a
+# lossless cladding takes the decaying / propagating root whatever the sign of its zero Im -- a
+# lossless metal substrate given as n = (-0.0, +y) or (0, -y) has n**2 = -y^2 - 0j -- and for
+# every Im(eps) >= 0 the principal root IS the passive / outgoing branch (both parts >= 0). (It
+# differs from the Im >= 0 flip only for Im(eps) < 0, a gain substrate, where the principal
+# branch keeps Re(kz) > 0: the outgoing wave.)
 from dynameta.optics.resonance import _kz
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 

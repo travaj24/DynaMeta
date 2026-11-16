@@ -572,8 +572,8 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     """Least-squares fit of CONSTANT optical Drude params (eps_inf, m_opt, gamma)
     to measured / published complex permittivity samples.
 
-    Recovers representative near-IR ITO values eps_inf ~ 4.25, m*/m_e ~ 0.225,
-    gamma ~ 1.1e14. The fitted scalars plug straight into a DrudeOptical.
+    Typical near-IR transparent-conductor fits land at eps_inf ~ 4, m*/m_e ~ 0.2-0.4 and
+    gamma of order 1e14 rad/s. The fitted scalars plug straight into a DrudeOptical.
     Sign convention matches DrudeOptical (Im(eps) > 0 for passive loss).
 
     Returns dict: eps_inf, m_opt_kg, m_eff_ratio, gamma_rad_s, rms_residual, n_points.

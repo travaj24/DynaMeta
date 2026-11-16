@@ -98,7 +98,7 @@ def test_s5_16_no_aliased_warn_call_escapes_the_v17_census():
 # ============================================ S1-5 ================================================
 
 def _dg_step_bar(tag, *, x_step, length=40e-9, bias=0.01):
-    """1-D unipolar ITO-like bar, 4e26 -> 4e25 m^-3 doping step at x_step, ohmic DG contacts, gamma
+    """1-D unipolar ITO-like bar, 3e26 -> 3e25 m^-3 doping step at x_step, ohmic DG contacts, gamma
     ramped to 1, `bias` V on the right contact. Returns (I_left, I_right, J_DG edges, recorded
     contact edge_current_models); the device is torn down."""
     import contextlib
@@ -130,7 +130,7 @@ def _dg_step_bar(tag, *, x_step, length=40e-9, bias=0.01):
         with _quiet():
             ds.solve(type="dc", absolute_error=1e16, relative_error=1e-6, maximum_iterations=200)
 
-    mstar, nhi, nlo = 0.35 * M_E, 4e26, 4e25
+    mstar, nhi, nlo = 0.30 * M_E, 3e26, 3e25
     mesh, dev, reg = "s15m_" + tag, "s15d_" + tag, "bar"
     try:
         with _quiet():
@@ -143,7 +143,7 @@ def _dg_step_bar(tag, *, x_step, length=40e-9, bias=0.01):
             ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="left", tag2="right")
             ds.finalize_mesh(mesh=mesh)
             ds.create_device(mesh=mesh, device=dev)
-            setup_semiconductor_region_dd(dev, reg, n_bg_m3=nhi, eps_static=9.5, dos_mass_kg=mstar,
+            setup_semiconductor_region_dd(dev, reg, n_bg_m3=nhi, eps_static=9.0, dos_mass_kg=mstar,
                                           mobility_m2Vs=0.004)
             prof = ("({hi:.8e}*0.5*(1.0-tanh((x-{xj:.8e})/3.0e-10)) + "
                     "{lo:.8e}*0.5*(1.0+tanh((x-{xj:.8e})/3.0e-10)))").format(hi=nhi, lo=nlo, xj=x_step)
@@ -195,9 +195,9 @@ def test_s1_5_dg_terminal_current_is_the_density_gradient_flux():
     """S1-5: the ohmic CONTACT equation kept edge_current_model='ElectronCurrent' (classical SG on
     psi) after the in-Newton DG re-pointed the region continuity at ElectronCurrentDG, so the
     terminal current omitted the q mu n grad(Lambda) term on the contact edge. With the doping step
-    3 nm from the right contact (max |Lambda| 10 mV) at 10 mV: pre-fix |I_L + I_R|/|I_L| = 2.95e-2
-    (the right contact read the classical flux), post-fix 4.4e-16 -- and both terminals equal the
-    divergence-free interior DG current."""
+    3 nm from the right contact (max |Lambda| 9.3 mV) at 10 mV: with the contact re-point knocked out (the
+    pre-fix binding: both contacts read the classical flux) |I_L + I_R|/|I_L| = 4.4e-2 (MEASURED), post-fix
+    0 to round-off -- and both terminals equal the divergence-free interior DG current."""
     iL, iR, jdg, models = _dg_step_bar("a", x_step=37e-9)
     j = float(np.mean(jdg))
     assert (np.max(jdg) - np.min(jdg)) / abs(j) < 1e-10         # steady 1-D: J_DG uniform
@@ -226,11 +226,11 @@ def test_s1_5_contact_dg_before_the_quantum_correction_refuses():
         ds.add_1d_region(mesh=mesh, material="ITO", region="bar", tag1="l", tag2="r")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=4e26, eps_static=9.5,
-                                      dos_mass_kg=0.35 * M_E, mobility_m2Vs=0.004)
+        setup_semiconductor_region_dd(dev, "bar", n_bg_m3=3e26, eps_static=9.0,
+                                      dos_mass_kg=0.30 * M_E, mobility_m2Vs=0.004)
         setup_contact_ohmic_dd(dev, "l")
         with pytest.raises(ValueError, match="setup_dg_quantum_correction"):
-            setup_contact_dg(dev, "l", 4e26)
+            setup_contact_dg(dev, "l", 3e26)
     finally:
         _R.clear(dev)
         for dv in list(ds.get_device_list()):
@@ -560,8 +560,8 @@ def _spec(**kw):
     pytest.importorskip("devsim")
     from dynameta.carriers.devsim_3d import Stacked3DSpec
     from dynameta.constants import M_E
-    base = dict(semi_material="ITO", oxide_material="HfO2", lateral_m=4e-9, semi_thk_m=12e-9,
-                oxide_thk_m=4e-9, n_bg_m3=4e26, eps_semi=9.5, eps_oxide=18.0, dos_mass_kg=0.35 * M_E,
+    base = dict(semi_material="ITO", oxide_material="oxB", lateral_m=4e-9, semi_thk_m=12e-9,
+                oxide_thk_m=4e-9, n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E,
                 grid_n=(3, 3, 9), mesh_min_nm=1.0, mesh_max_nm=3.0)
     base.update(kw)
     return Stacked3DSpec(**base)
@@ -577,13 +577,13 @@ def test_s1_9_band_alignment_is_the_work_function_difference():
     from dynameta.carriers.physics_equilibrium import (V_T, F12_aymerich_humet, effective_dos_m3,
                                                        invert_F12)
     from dynameta.constants import M_E
-    m1, m2 = 0.35 * M_E, 0.25 * M_E
+    m1, m2 = 0.30 * M_E, 0.25 * M_E
     # (a) + (d): degenerate n+/n ITO, then a heterojunction with its own mass and affinity
-    for extra, chi_semi in (([("xs", "ITO", 12e-9, 9.5, 4e25)], None),
+    for extra, chi_semi in (([("xs", "ITO", 12e-9, 9.0, 3e25)], None),
                             ([("xs", "AZO", 12e-9, 9.0, 1e26, 4.62, m2)], 4.50)):
         s = _spec(extra_semiconductors=extra, chi_semi_eV=chi_semi)
         ba = s.band_alignment()
-        assert ba["semi"] == (pytest.approx(-invert_F12(4e26 / effective_dos_m3(m1)) * V_T, rel=1e-15, abs=0),
+        assert ba["semi"] == (pytest.approx(-invert_F12(3e26 / effective_dos_m3(m1)) * V_T, rel=1e-15, abs=0),
                               0.0)
         for (nm, *_r) in s.extra_semiconductor_entries():
             phi_c, psi_n = ba[nm]
@@ -591,29 +591,29 @@ def test_s1_9_band_alignment_is_the_work_function_difference():
             assert nc * F12_aymerich_humet((psi_n - phi_c) / V_T) == pytest.approx(
                 s.semiconductor_nbg(nm), rel=1e-9)
     # (b) Boltzmann limit (eta ~ -11): psi_bi -> V_t ln(n2/n1)
-    s = _spec(n_bg_m3=1e22, extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, 1e21)])
+    s = _spec(n_bg_m3=1e22, extra_semiconductors=[("xs", "ITO", 12e-9, 9.0, 1e21)])
     assert s.band_alignment()["xs"][1] == pytest.approx(V_T * math.log(1e21 / 1e22), rel=1e-3)
     # (c) the affinity step enters additively and with the work-function sign
-    base = _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.5, 4e25, 4.5, m1)], chi_semi_eV=4.5)
-    step = _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.5, 4e25, 4.6, m1)], chi_semi_eV=4.5)
+    base = _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.0, 3e25, 4.5, m1)], chi_semi_eV=4.5)
+    step = _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.0, 3e25, 4.6, m1)], chi_semi_eV=4.5)
     d = step.band_alignment()["xs"][1] - base.band_alignment()["xs"][1]
     assert d == pytest.approx(-0.1, abs=1e-12)
     # same material: identical to the explicit equal-affinity form
-    same = _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, 4e25)])
+    same = _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.0, 3e25)])
     assert same.band_alignment()["xs"][1] == pytest.approx(base.band_alignment()["xs"][1], abs=1e-15)
-    assert same.band_alignment()["xs"][1] < -0.3                # the n side sits ~0.45 V below the n+ side
+    assert same.band_alignment()["xs"][1] < -0.3                # the n side sits 0.432 V below the n+ side (FD)
 
 
 def test_s1_9_heterojunction_without_affinities_is_refused():
     with pytest.raises(ValueError, match="electron affinities"):
-        _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.5, 4e25)])
+        _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.0, 3e25)])
     with pytest.raises(ValueError, match="electron affinities"):
-        _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.5, 4e25, 4.6)])      # chi_semi missing
+        _spec(extra_semiconductors=[("xs", "AZO", 12e-9, 9.0, 3e25, 4.6)])      # chi_semi missing
     with pytest.raises(ValueError):
-        _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.5)])                  # short tuple
+        _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.0)])                  # short tuple
     with pytest.raises(ValueError, match="dos_mass_kg"):
-        _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, 4e25, None, 0.0)])
-    _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, 4e25)])               # legacy 5-tuple ok
+        _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.0, 3e25, None, 0.0)])
+    _spec(extra_semiconductors=[("xs", "ITO", 12e-9, 9.0, 3e25)])               # legacy 5-tuple ok
 
 
 def test_s1_9_build_device_installs_the_aligned_bands(monkeypatch, tmp_path):
@@ -632,7 +632,7 @@ def test_s1_9_build_device_installs_the_aligned_bands(monkeypatch, tmp_path):
         D3.PE.setup_phi_c0(device, region, n_bg_m3, dos_mass_kg)          # the legacy calibration
 
     monkeypatch.setattr(D3.PE, "setup_semiconductor_region", _stub)
-    s = _spec(extra_semiconductors=[("xs", "ITO", 6e-9, 9.5, 4e25)], semi_thk_m=6e-9)
+    s = _spec(extra_semiconductors=[("xs", "ITO", 6e-9, 9.0, 3e25)], semi_thk_m=6e-9)
     solver = D3.Devsim3DEquilibrium(s, device_name="s19d", mesh_name="s19m",
                                     msh_path=str(tmp_path / "s19.msh"))
     try:

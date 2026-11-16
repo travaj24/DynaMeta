@@ -1,9 +1,9 @@
-"""END-TO-END modulator SPEC SHEET: fuse the two validated halves of the gated ITO modulator into one
+"""END-TO-END modulator SPEC SHEET: fuse the two validated halves of the gated film modulator into one
 device characterization -- the project's culmination.
 
-  ELECTRICAL (DEVSIM 2D drift-diffusion + ssac): the reference metasurface gate response -> areal capacitance
+  ELECTRICAL (DEVSIM 2D drift-diffusion + ssac): the gated-film metasurface cell's gate response -> areal capacitance
     C, the access-RC switching bandwidth f_3dB, and the per-event switching energy E = 0.5 C V^2.
-  OPTICAL (FDTD dispersive broadband sweep): the gated ITO (carrier density background -> accumulation,
+  OPTICAL (FDTD dispersive broadband sweep): the gated film (carrier density background -> accumulation,
     free-carrier Drude eps shifting toward ENZ) -> the reflection modulation contrast dR(lambda).
 
 analysis.modulator_figure_of_merit combines them into the spec (contrast, f_3dB, energy, contrast-per-fJ).
@@ -35,13 +35,13 @@ from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.optics.fdtd_seam import run_fdtd_sweep
 from dynameta.optics.tmm_reference import layered_rta, layered_stack_from_design
 from dynameta.sweep import BiasPoint
-from validation._reference_device import build_reference_modulator
+from validation._reference_device import build_reference_modulator, FILM_MOBILITY, FILM_T, PERIOD as CELL_PERIOD
 
 from validation.fdtd_modulator_study import _design as _optical_design
 
 VG, GATE = 1.0, "top_contact"
-MU, T_ITO, PERIOD = 30e-4, 5e-9, 370e-9
-N_OFF, N_ON = 4.0e20, 1.2e21        # cm^-3 design-target ITO densities for the ENZ optical modulation
+MU, T_FILM, PERIOD = FILM_MOBILITY, FILM_T, CELL_PERIOD   # film mobility, thickness, cell (RC chain)
+N_OFF, N_ON = 3.0e20, 1.2e21        # cm^-3 design-target film densities for the ENZ optical modulation
 
 
 @contextlib.contextmanager
@@ -54,7 +54,7 @@ def _quiet():
 
 
 def _electrical_gate_C_per_area():
-    """DEVSIM 2D DD + ssac on the reference metasurface -> the gate areal capacitance [F/m^2]."""
+    """DEVSIM 2D DD + ssac on the gated-film metasurface cell -> the gate areal capacitance [F/m^2]."""
     d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="spec_m", device_name="spec_d")
     with _quiet():
@@ -68,7 +68,7 @@ def _electrical_gate_C_per_area():
 
 
 def _optical_contrast():
-    """FDTD dispersive sweep of the gated ITO at two carrier densities -> peak reflection modulation."""
+    """FDTD dispersive sweep of the gated film at two carrier densities -> peak reflection modulation."""
     targets = np.linspace(1250e-9, 1650e-9, 9)
     off = run_fdtd_sweep(_optical_design(N_OFF), targets, dim=2, resolution=30, band_pad=0.12)
     on = run_fdtd_sweep(_optical_design(N_ON), targets, dim=2, resolution=30, band_pad=0.12)
@@ -80,11 +80,11 @@ def _optical_contrast():
 def main():
     print("[ms] === END-TO-END modulator spec sheet (DEVSIM bandwidth + FDTD contrast) ===", flush=True)
 
-    print("[ms] [electrical] DEVSIM 2D DD + ssac on the reference metasurface ...", flush=True)
+    print("[ms] [electrical] DEVSIM 2D DD + ssac on the gated-film metasurface cell ...", flush=True)
     C_area = _electrical_gate_C_per_area()
-    rho_s = sheet_resistance_ohm_sq(N_OFF * 1e6, MU, T_ITO)
+    rho_s = sheet_resistance_ohm_sq(N_OFF * 1e6, MU, T_FILM)
 
-    print("[ms] [optical] FDTD dispersive sweep, ITO bias {:.0e}->{:.0e} cm^-3 ...".format(N_OFF, N_ON),
+    print("[ms] [optical] FDTD dispersive sweep, film bias {:.0e}->{:.0e} cm^-3 ...".format(N_OFF, N_ON),
           flush=True)
     contrast, lam_pk = _optical_contrast()
 
@@ -94,7 +94,7 @@ def main():
         cell_area_m2=PERIOD ** 2)
 
     print("[ms]", flush=True)
-    print("[ms] ===== ITO METASURFACE MODULATOR SPEC =====", flush=True)
+    print("[ms] ===== GATED-FILM METASURFACE MODULATOR SPEC =====", flush=True)
     print("[ms]   optical contrast |dR|   : {:.3f}  @ {:.0f} nm".format(
         spec["optical_contrast"], spec["contrast_lambda_nm"]), flush=True)
     print("[ms]   gate capacitance        : {:.3f} fF/cell  ({:.3e} F/m^2)".format(spec["gate_C_fF"], C_area),

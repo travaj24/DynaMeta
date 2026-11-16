@@ -739,14 +739,16 @@ def test_layered_builder_installs_interface_and_bulk_traps():
 
 def test_spec_guards_need_bipolar():
     from dynameta.carriers.devsim_3d import Stacked3DSpec
+    from dynameta.constants import M_E
     from dynameta.materials import TransportModel
+    film = dict(n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E)   # the spec has no defaults
     with pytest.raises(ValueError, match="bipolar_dd"):
-        Stacked3DSpec(interface_traps=PT.InterfaceTraps(fixed_charge_C_m2=1e-3))
+        Stacked3DSpec(interface_traps=PT.InterfaceTraps(fixed_charge_C_m2=1e-3), **film)
     with pytest.raises(ValueError, match="bipolar_dd"):
-        Stacked3DSpec(srh_trap_energy_eV=0.1)
+        Stacked3DSpec(srh_trap_energy_eV=0.1, **film)
     with pytest.raises(ValueError, match="bipolar_dd"):
         TransportModel(n_bg_m3=1e23, eps_static=11.7, dos_mass_kg_of_n_m3=lambda n: 1e-30,
                        srh_traps=(PT.TrapLevel(tau_n0_s=1e-9, tau_p0_s=1e-9),))
     s = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e16,
-                      interface_traps=PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12))
+                      interface_traps=PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12), **film)
     assert s.srh_traps == () and s.srh_trap_energy_eV == 0.0

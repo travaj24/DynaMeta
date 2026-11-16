@@ -23,7 +23,8 @@ SEMI = 12e-9
 
 def main():
     spec = Stacked3DSpec(lateral_m=LAT, semi_thk_m=SEMI, oxide_thk_m=8e-9,
-                          n_bg_m3=4e26, gate_patch_frac=0.5)     # centered 30nm gate patch
+                          n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E,
+                          gate_patch_frac=0.5)     # centered 30nm gate patch
     solver = Devsim3DEquilibrium(spec)
     cf = solver.solve(BiasPoint({"gate": 1.0, "body": 0.0}, "patch+1V"))
     v = cf.regions["semi"].grid_fields[ELECTRON_DENSITY]         # (nx, ny, nz)
@@ -39,10 +40,10 @@ def main():
 
     # bridge -> eps; min Re(eps) under the patch vs the gap
     reg = MaterialRegistry()
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+    reg.add(Material(spec.semi_material, DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
     align = GeometryAlignment(unit_scale=NM, fixed_eps_regions={},
         region_alignments=[RegionAlignment("semi", "semi", (0.0, LAT, 0.0, LAT, 0.0, SEMI), "z")])
-    ef = assemble_eps(cf, align, MaterialEpsMap(reg), IdentityLift(), 1300e-9, mesh_regions=["semi"])["semi"]
+    ef = assemble_eps(cf, align, MaterialEpsMap(reg), IdentityLift(), 1200e-9, mesh_regions=["semi"])["semi"]
     re = np.real(ef.values_zyx)                                  # (nz, ny, nx)
     re_patch = float(re[:, ic, ic].min())
     re_gap = float(re[:, 0, 0].min())

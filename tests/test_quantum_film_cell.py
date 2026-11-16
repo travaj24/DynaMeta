@@ -164,6 +164,24 @@ def test_refusals():
         FilmCell(P, _cell_layers(), lambda_m=LAM, polarization="y")
 
 
+def test_superstrate_index_with_a_negative_zero_imaginary_part():
+    """The top-port wavevectors k_m = sqrt(eps_s k0^2 - q_m^2) of a superstrate given as 1 with a
+    -0.0 imaginary part equal those of n_super = 1 bit for bit, and every evanescent order decays
+    (Im k_m > 0). eps_s = n * n keeps Im = -0.0 and k0 is a float here, so from Python 3.14 on
+    (mixed complex-real arithmetic keeps the sign of a zero) every evanescent order's argument
+    carried -0.0 and took the GROWING root; on older interpreters the -0.0 is lost when k0 is
+    promoted to complex, and this holds before the fix too (tests/test_outgoing_sqrt.py covers
+    the rule itself on every version)."""
+    a = FilmCell(P, _cell_layers(), lambda_m=LAM, theta_deg=20.0, polarization="p", order=2,
+                 n_harmonics=6)
+    b = FilmCell(P, _cell_layers(), lambda_m=LAM, theta_deg=20.0, polarization="p", order=2,
+                 n_harmonics=6, n_super=complex(1.0, -0.0))
+    evanescent = np.abs(a.q_nm) > a.k0
+    assert evanescent.sum() >= 10
+    assert np.all(a.k_m[evanescent].imag > 0.0)
+    assert a.k_m.tobytes() == b.k_m.tobytes()
+
+
 @pytest.mark.slow
 def test_strip_cell_tight_agreement_and_harmonic_convergence(response):
     """Order 5 / 150 harmonics / 8 levels vs fem_2d_tm order 7 / 12 levels: MEASURED |dr| 8.6e-8,

@@ -40,7 +40,7 @@ from dynameta.carriers.physics_equilibrium import M_E
 from dynameta.carriers.mobility import drift_velocity
 
 LX, LY, LZ = 100.0, 80.0, 80.0          # nm (short bar -> high field at modest bias)
-N_BG, MU, EPS = 4e26, 0.004, 9.5        # ITO-like
+N_BG, MU, EPS = 3e26, 0.004, 9.0        # ITO-like
 V_SAT = 1.0e5                            # m/s
 BETA = 2.0
 Q = 1.602176634e-19
@@ -73,7 +73,7 @@ def _current_at(dev, V, abs_tol, n_steps):
 
 def _setup(dev, *, field_mobility, v_sat):
     DD.setup_semiconductor_region_dd(dev, "semi", n_bg_m3=N_BG, eps_static=EPS,
-                                     dos_mass_kg=0.35 * M_E, mobility_m2Vs=MU,
+                                     dos_mass_kg=0.30 * M_E, mobility_m2Vs=MU,
                                      field_mobility=field_mobility, v_sat_ms=v_sat, ct_beta=BETA)
     for c in ("left", "right"):
         DD.setup_contact_ohmic_dd(dev, c)

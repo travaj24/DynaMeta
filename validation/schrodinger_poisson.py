@@ -3,7 +3,7 @@
  (2) triangular well U=qF z (hard wall at z=0): E_n = |a_n| (qF)^(2/3) (hbar^2/2m)^(1/3),
      a_n the n-th zero of the Airy function Ai;
  (3) degenerate 2D filling: total sheet density = sum_i n_s,i recovered consistently;
- (4) self-consistent accumulation: a gated ITO slab forms a ~nm quantum accumulation
+ (4) self-consistent accumulation: a gated degenerate-film slab forms a ~nm quantum accumulation
      layer that converges (Trellakis predictor-corrector) and integrates to the gate
      sheet charge (Gauss).
 Run:  python -m validation.schrodinger_poisson
@@ -16,7 +16,7 @@ from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid
 from dynameta.carriers.schrodinger_poisson import (
     SchrodingerPoisson1D, HBAR, M_E, Q, KB, EPS0)
 
-MSTAR = 0.35 * M_E         # ITO effective mass
+MSTAR = 0.30 * M_E         # degenerate-film (TCO) effective mass
 TOL = 0.02                 # 2% on discretized eigenvalues
 
 
@@ -30,7 +30,7 @@ def test_square_well():
     n = np.arange(1, 5)
     E_an = (n ** 2 * np.pi ** 2 * HBAR ** 2 / (2.0 * MSTAR * L ** 2)) / Q
     ok = True
-    print("[t] (1) infinite square well L=10nm, m*=0.35 m_e:", flush=True)
+    print("[t] (1) infinite square well L=10nm, m*={:.2f} m_e:".format(MSTAR / M_E), flush=True)
     for i in range(4):
         rel = abs(E_eV[i] - E_an[i]) / E_an[i]
         ok = ok and rel < TOL
@@ -51,7 +51,7 @@ def test_triangular_well():
     pref = (Q * F) ** (2.0 / 3.0) * (HBAR ** 2 / (2.0 * MSTAR)) ** (1.0 / 3.0)
     E_an = np.abs(a) * pref / Q
     ok = True
-    print("[t] (2) triangular well F=1e8 V/m (Airy), m*=0.35 m_e:", flush=True)
+    print("[t] (2) triangular well F=1e8 V/m (Airy), m*={:.2f} m_e:".format(MSTAR / M_E), flush=True)
     for i in range(4):
         rel = abs(E_eV[i] - E_an[i]) / E_an[i]
         ok = ok and rel < TOL
@@ -92,12 +92,12 @@ def test_degenerate_filling():
 
 
 def test_self_consistent_accumulation():
-    # ITO slab, gate field via a Dirichlet phi step; expect a nm-scale accumulation
+    # degenerate-film slab, gate field via a Dirichlet phi step; expect a nm-scale accumulation
     # layer that converges and whose excess sheet charge matches Gauss eps*E_field.
     t = 20e-9
     z = np.linspace(0.0, t, 401)
     sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
-    eps_r = 9.5               # ITO static
+    eps_r = 9.0               # film static permittivity
     Nd = np.full_like(z, 1.0e25)     # light background donor (m^-3) so a flatband ref exists
     E_F = 0.0                  # reference Fermi level (J)
     dphi = 0.5                 # 0.5 V across the slab (gate side positive -> accumulation)
@@ -115,7 +115,7 @@ def test_self_consistent_accumulation():
     body_peak = float(np.max(n_full[half:-1]))
     converged = bool(getattr(res, "converged", False))
     accum = np.isfinite(phi).all() and gate_peak > body_peak     # gate-side accumulation present
-    print("[t] (4) self-consistent accumulation (0.5V, ITO 20nm, slab mode):", flush=True)
+    print("[t] (4) self-consistent accumulation (0.5V, film 20nm, slab mode):", flush=True)
     print("[t]   n_states bound={}  E0={:.4f} eV".format(
         res.energies_J.size, res.energies_J[0] / Q), flush=True)
     print("[t]   gate-side peak={:.3e}  body-side peak={:.3e} m^-3  ratio={:.2f}  res.converged={}".format(

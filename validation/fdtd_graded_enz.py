@@ -1,4 +1,4 @@
-"""ENZ GRADED-eps coupling: make the gated-ITO optics QUANTITATIVE by feeding the carrier-density DEPTH
+"""ENZ GRADED-eps coupling: make the gated-film optics QUANTITATIVE by feeding the carrier-density DEPTH
 profile n(z) (the accumulation layer) into a GRADED eps(z) the FDTD resolves, instead of a single
 homogenized eps. A real accumulation is a steep near-interface profile that crosses ENZ; a single eps
 misses it. optics.fdtd_seam.eps_profile_from_carrier (n(z) -> eps(z) via the ITO Drude) +
@@ -12,7 +12,7 @@ GATE 2 (the profile matters): the graded R differs CLEARLY from a single homogen
 
 SCOPE: validated on a resolvable (thick) graded layer + an absorbing profile (Fabry-Perot-suppressed).
 A REAL few-nm ITO accumulation needs a correspondingly fine FDTD dz (the documented ENZ caveat); this
-validates the graded-eps MACHINERY that, at fine enough resolution, makes the ITO modulator quantitative.
+validates the graded-eps MACHINERY that, at fine enough resolution, makes the gated-film modulator quantitative.
 
 Run: python -m validation.fdtd_graded_enz
 """
@@ -31,12 +31,12 @@ from dynameta.optics.tmm_reference import layered_rta
 
 C = 299792458.0
 LAM = 1500e-9
-ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
+ITO_DRUDE = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
 ITO_D = 400e-9          # thick enough that the sublayers are FDTD-resolvable (the few-nm real layer = ENZ caveat)
 NSLICE = 10
 
 
-def _accumulation_eps(n_bg_cm3=4.0e20, dn_cm3=3.5e20, lam_D=100e-9, npts=80):
+def _accumulation_eps(n_bg_cm3=3.0e20, dn_cm3=3.5e20, lam_D=100e-9, npts=80):
     """Graded eps(z) of an accumulation layer n(z) = n_bg + dn*exp(-z/lam_D) (front = gate interface)."""
     z = np.linspace(0.0, ITO_D, npts)
     n_cm3 = n_bg_cm3 + dn_cm3 * np.exp(-z / lam_D)

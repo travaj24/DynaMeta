@@ -1,14 +1,14 @@
 """
-Frequency-resolved gate capacitance of the FULL reference metasurface (2D drift-diffusion) via ssac --
+Frequency-resolved gate capacitance of the FULL gated-film metasurface cell (2D drift-diffusion) via ssac --
 the resolved-bandwidth capability on the real geometry, completing the gated-DD arc.
 
-Builds the reference DD metasurface (LayeredDevsimBuilder, ITO = drift_diffusion with the full-edge
+Builds the DD metasurface cell of validation/_reference_device (LayeredDevsimBuilder, film = drift_diffusion with the full-edge
 ground), DC-solves to a gate operating point, then repoints the gate (top_contact) CIRCUIT-DRIVEN
 via the first-class builder API (LayeredDevsimBuilder.set_ssac_gate) and runs ssac -> C(omega),
 G(omega) of the gate.
 
-ORACLE: the ssac gate capacitance must equal the QUASI-STATIC dQ/dVg, where Q is the ITO
-accumulated electron charge q*sum(NodeVolume*(n - n_bg)) over the ITO region -- both in 2D per-unit-y
+ORACLE: the ssac gate capacitance must equal the QUASI-STATIC dQ/dVg, where Q is the film
+accumulated electron charge q*sum(NodeVolume*(n - n_bg)) over the film region -- both in 2D per-unit-y
 units (F/m), computed on the SAME device by a small bias difference. ssac (small-signal
 linearization) and dQ/dV (finite difference) must agree, confirming the unipolar NCharge model
 carries the carrier-charge capacitance through the full 2D metasurface.
@@ -33,7 +33,7 @@ from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim im
 ds = import_devsim()
 
 
-from validation._reference_device import build_reference_modulator
+from validation._reference_device import build_reference_modulator, FILM_MOBILITY, FILM_T, PERIOD as CELL_PERIOD
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import ac_analysis as AC
 from dynameta.sweep import BiasPoint
@@ -45,7 +45,7 @@ DV = 0.25
 FREQS = [1.0e3, 1.0e6, 1.0e9]
 GATE = "top_contact"
 FLAT_RTOL, ORACLE_RTOL = 1.0e-3, 1.0e-1
-MU, T_ITO, PERIOD = 30e-4, 5e-9, 370e-9
+MU, T_FILM, PERIOD = FILM_MOBILITY, FILM_T, CELL_PERIOD   # film mobility, thickness, cell (RC chain)
 
 
 @contextlib.contextmanager
@@ -57,10 +57,10 @@ def _quiet():
         sys.stdout.flush(); os.dup2(saved, 1); os.close(devnull); os.close(saved)
 
 
-def _ito_excess_charge_per_y(dev, n_bg):
-    """Q = q * sum(NodeVolume * (n - n_bg)) over the ITO region [C/m per unit y] (2D)."""
-    nv = np.array(ds.get_node_model_values(device=dev, region="ito", name="NodeVolume"), dtype=np.float64)
-    n = np.array(ds.get_node_model_values(device=dev, region="ito", name="Electrons"), dtype=np.float64)
+def _film_excess_charge_per_y(dev, n_bg):
+    """Q = q * sum(NodeVolume * (n - n_bg)) over the film region [C/m per unit y] (2D)."""
+    nv = np.array(ds.get_node_model_values(device=dev, region="film", name="NodeVolume"), dtype=np.float64)
+    n = np.array(ds.get_node_model_values(device=dev, region="film", name="Electrons"), dtype=np.float64)
     return Q_E * float(np.sum(nv * (n - n_bg)))
 
 
@@ -72,14 +72,14 @@ def _resolve_gate(dev, v):
 
 
 def main():
-    print("[t] === Frequency-resolved gate C(omega) on the reference metasurface (2D DD, ssac) ===",
+    print("[t] === Frequency-resolved gate C(omega) on the gated-film metasurface cell (2D DD, ssac) ===",
           flush=True)
     d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="rbm_m", device_name="rbm_d")
-    n_bg = float(d.materials.get("ITO").transport.n_bg_m3)
+    n_bg = float(d.materials.get("TCO").transport.n_bg_m3)
     with _quiet():
         b.solve(BiasPoint({GATE: VG}, "g{:+.0f}".format(VG)))     # DC operating point
-    print("[t] DD reference solved at gate +{:.1f} V; gate region = {}".format(
+    print("[t] DD cell solved at gate +{:.1f} V; gate region = {}".format(
         VG, b._contact_region.get(GATE)), flush=True)
 
     # repoint the gate circuit-driven via the first-class builder API, then re-settle
@@ -93,14 +93,14 @@ def main():
     c_pos = bool(np.all(C > 0))
 
     # quasi-static dQ/dVg on the SAME device (both ssac C and this are F/m per unit y)
-    _resolve_gate(b.device, VG + DV); q_hi = _ito_excess_charge_per_y(b.device, n_bg)
-    _resolve_gate(b.device, VG - DV); q_lo = _ito_excess_charge_per_y(b.device, n_bg)
+    _resolve_gate(b.device, VG + DV); q_hi = _film_excess_charge_per_y(b.device, n_bg)
+    _resolve_gate(b.device, VG - DV); q_lo = _film_excess_charge_per_y(b.device, n_bg)
     c_qs = abs(q_hi - q_lo) / (2.0 * DV)
     oracle_rel = abs(c_mean - c_qs) / max(abs(c_qs), 1e-30)
     oracle_ok = bool(oracle_rel < ORACLE_RTOL)
 
     c_perarea = c_mean / PERIOD                                   # F/m^2 (divide out the cell x-extent)
-    rho_s = sheet_resistance_ohm_sq(n_bg, MU, T_ITO)
+    rho_s = sheet_resistance_ohm_sq(n_bg, MU, T_FILM)
     R, C_cell, f3db = lumped_rc_bandwidth(c_perarea, rho_s, path_length_m=5e-6, pad_width_m=1e-6,
                                           cell_area_m2=PERIOD ** 2)
 
@@ -119,7 +119,7 @@ def main():
         "PASS" if gate_a else "FAIL"), flush=True)
     print("[t] GATE B (ssac C == quasi-static dQ/dVg within {:.0%}): {}".format(
         ORACLE_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
-    print("[t] *** RESOLVED-BANDWIDTH ssac (reference metasurface): {} ***".format(
+    print("[t] *** RESOLVED-BANDWIDTH ssac (gated-film metasurface cell): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall
 

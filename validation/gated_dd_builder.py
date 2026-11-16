@@ -1,5 +1,5 @@
 """
-Validate the builder-wired full-edge gated drift-diffusion on the REAL reference metasurface: the
+Validate the builder-wired full-edge gated drift-diffusion on the 2-D gated-film metasurface cell (validation/_reference_device): the
 LayeredDevsimBuilder now auto-carves a thin edge-metal strip at each DD-semiconductor edge ground
 (making it a region-region interface -> full-line node capture), so the GATED DD metasurface
 converges -- the thing that previously did not (carriers/devsim_layered.py). And it reduces to the
@@ -11,9 +11,9 @@ frequency-RESOLVED gate C(omega) via ssac on the gate is the small remaining fol
 unipolar-DD charge time-node model + a circuit-driven gate); the quasi-static C here is what the
 equilibrium path already provides, now reproduced by the full DD solve.
 
-GATE A: the gated DD reference metasurface CONVERGES at every gate bias (0, +1, +2 V) -- previously it
-        did not (weak 2-node ITO edge ground).
-GATE B: the DD ITO accumulation profile (x-averaged over the cell) matches the equilibrium
+GATE A: the gated DD metasurface cell CONVERGES at every gate bias (0, +1, +2 V) -- previously it
+        did not (weak 2-node film edge ground).
+GATE B: the DD film accumulation profile (x-averaged over the cell) matches the equilibrium
         Fermi-Dirac profile to < 3% (the oxide keeps eta within the FD g-factor's validity, as in
         the 1D validation/gated_dd).
 CHAIN : gate_cv on the DD CarrierFields -> C(Vg) > 0 -> lumped_rc_bandwidth -> a finite f_3dB.
@@ -32,7 +32,7 @@ from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim im
 ds = import_devsim()
 
 
-from validation._reference_device import build_reference_modulator
+from validation._reference_device import build_reference_modulator, FILM_MOBILITY, FILM_T, PERIOD as CELL_PERIOD
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import eq_registry as _R
 from dynameta.sweep import BiasPoint
@@ -41,11 +41,11 @@ from dynameta.analysis import gate_cv, sheet_resistance_ohm_sq, lumped_rc_bandwi
 
 GATE_BIASES = [0.0, 1.0, 2.0]
 PROFILE_RTOL = 3.0e-2
-MU, T_ITO, PERIOD = 30e-4, 5e-9, 370e-9          # ITO mobility, thickness, cell (for the RC chain)
+MU, T_FILM, PERIOD = FILM_MOBILITY, FILM_T, CELL_PERIOD   # film mobility, thickness, cell (RC chain)
 
 
 def _sweep(physics):
-    """Solve the reference metasurface (physics='equilibrium'|'drift_diffusion') at each gate bias;
+    """Solve the metasurface cell (physics='equilibrium'|'drift_diffusion') at each gate bias;
     return {vg: CarrierField} and a per-bias convergence flag. Each builder is torn down after."""
     d = build_reference_modulator(physics)
     b = LayeredDevsimBuilder(d, mesh_name=physics + "_m", device_name=physics + "_d")
@@ -65,14 +65,14 @@ def _sweep(physics):
     return fields, conv
 
 
-def _ito_zprofile(cf):
-    """x-averaged ITO electron z-profile from a CarrierField (robust to the ~1nm edge-metal seam)."""
-    g = np.asarray(cf.regions["ito"].grid_fields[ELECTRON_DENSITY], dtype=np.float64)  # (nx, nz)
+def _film_zprofile(cf):
+    """x-averaged film electron z-profile from a CarrierField (robust to the ~1nm edge-metal seam)."""
+    g = np.asarray(cf.regions["film"].grid_fields[ELECTRON_DENSITY], dtype=np.float64)  # (nx, nz)
     return g.mean(axis=0)
 
 
 def main():
-    print("[t] === Builder-wired full-edge gated DD on the reference metasurface ===", flush=True)
+    print("[t] === Builder-wired full-edge gated DD on the gated-film metasurface cell ===", flush=True)
     eq, eq_conv = _sweep("equilibrium")
     dd, dd_conv = _sweep("drift_diffusion")
 
@@ -81,7 +81,7 @@ def main():
     for vg in GATE_BIASES:
         if vg not in dd or vg not in eq:
             profile_ok = False; continue
-        pe, pd = _ito_zprofile(eq[vg]), _ito_zprofile(dd[vg])
+        pe, pd = _film_zprofile(eq[vg]), _film_zprofile(dd[vg])
         rel = float(np.max(np.abs(pd - pe) / np.maximum(pe, 1e20)))
         profile_ok = profile_ok and (rel < PROFILE_RTOL)
         print("[t]   Vg={:+.1f}V  DD n_max={:.3e}  EQ n_max={:.3e}  profile rel-diff={:.2e}".format(
@@ -90,8 +90,8 @@ def main():
     # CHAIN: gate C-V from the DD fields -> intrinsic RC f_3dB (item 2 quasi-static path)
     chain_ok = False
     if dd_all:
-        Vg, Q, Vmid, C = gate_cv(list(dd.values()), "ito", voltage_key="top_contact")
-        rho_s = sheet_resistance_ohm_sq(float(dd[GATE_BIASES[0]].n_bg_by_region["ito"]), MU, T_ITO)
+        Vg, Q, Vmid, C = gate_cv(list(dd.values()), "film", voltage_key="top_contact")
+        rho_s = sheet_resistance_ohm_sq(float(dd[GATE_BIASES[0]].n_bg_by_region["film"]), MU, T_FILM)
         R, C_cell, f3db = lumped_rc_bandwidth(C, rho_s, path_length_m=5e-6, pad_width_m=1e-6,
                                               cell_area_m2=PERIOD ** 2)
         chain_ok = bool(np.all(C > 0) and np.all(np.isfinite(f3db)) and np.all(f3db > 0))
@@ -109,7 +109,7 @@ def main():
         PROFILE_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
     print("[t] CHAIN (DD gate C-V -> C>0 -> finite f_3dB): {}".format(
         "PASS" if chain_ok else "FAIL"), flush=True)
-    print("[t] *** BUILDER-WIRED GATED DD (reference metasurface): {} ***".format(
+    print("[t] *** BUILDER-WIRED GATED DD (gated-film metasurface cell): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall
 

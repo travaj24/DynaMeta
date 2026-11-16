@@ -60,7 +60,7 @@ from dynameta.warning_types import UnreliableResultWarning                  # no
 ds = import_devsim()
 
 H = 20e-9                   # cell size [m]
-N_BG, MU = 4e26, 0.004      # uniform donor density [m^-3], mobility [m^2/Vs] (the gate-A ITO bar)
+N_BG, MU = 3e26, 0.004      # uniform donor density [m^-3], mobility [m^2/Vs] (the gate-A ITO bar)
 ALPHA, V_BIAS = 2e-3, 1e-3
 FLOOR = 1e-11               # summation round-off floor of the ratio (~1e3 elements, ~1e-16 each)
 
@@ -169,8 +169,8 @@ def _hooge_ratio(name, P, T, ext, *, exact=False, rotate=None):
         assert len(w) == int(rep.has_negatives)
         n_neg = rep.n_negative_couples
     with V.quiet():
-        DD.setup_semiconductor_region_dd(name, "bulk", n_bg_m3=N_BG, eps_static=9.5,
-                                         dos_mass_kg=0.35 * M_E, mobility_m2Vs=MU)
+        DD.setup_semiconductor_region_dd(name, "bulk", n_bg_m3=N_BG, eps_static=9.0,
+                                         dos_mass_kg=0.30 * M_E, mobility_m2Vs=MU)
         DD.setup_contact_ohmic_dd(name, "lo")
         DD.setup_contact_ohmic_dd_circuit(name, "hi", node_name="vhi", source_name="V1")
     ae = max(1e10, N_BG * 1e-12)
