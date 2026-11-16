@@ -52,9 +52,9 @@ def test_liquid_crystal_planar_tensor_and_isotropic_reduction():
     lc = LiquidCrystalModel(n_o=no, n_e=ne)
     e0 = lc.eps({"director_angle_rad": 0.0}, LAM)             # optic axis along x
     assert np.allclose(np.diag(e0), [ne ** 2, no ** 2, no ** 2])
-    assert np.allclose(e0 - np.diag(np.diag(e0)), 0.0)        # diagonal at theta=0
+    assert np.allclose(e0 - np.diag(np.diag(e0)), 0.0, atol=0)        # diagonal at theta=0
     assert np.allclose(LiquidCrystalModel(1.6, 1.6).eps({"director_angle_rad": 0.7}, LAM),
-                       1.6 ** 2 * np.eye(3))                  # n_e=n_o -> isotropic
+                       1.6 ** 2 * np.eye(3), atol=0)                  # n_e=n_o -> isotropic
 
 
 def test_liquid_crystal_uniaxial_eigenvalues_are_rotation_invariant():
@@ -62,7 +62,7 @@ def test_liquid_crystal_uniaxial_eigenvalues_are_rotation_invariant():
     lc = LiquidCrystalModel(n_o=no, n_e=ne)
     for th in (0.0, 0.4, 1.0, np.pi / 2):
         eps = lc.eps({"director_angle_rad": th}, LAM)
-        assert np.allclose(eps, eps.T)                        # symmetric tensor
+        assert np.allclose(eps, eps.T, atol=0)                        # symmetric tensor
         ev = np.sort(np.linalg.eigvals(eps).real)
         # AUDIT T-6: rtol=0.0 -- eigenvalues are O(3); numpy's default rtol=1e-5 would relax this
         # rotation-invariance gate to ~3e-5 absolute.

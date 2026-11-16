@@ -98,7 +98,7 @@ def test_the_resolved_solver_honours_the_yb_emission_scale_when_actually_resolvi
     assert float(lo.meta["yb_parasitic_gain_dB"]) < float(hi.meta["yb_parasitic_gain_dB"]) - 1e-2
     assert float(lo.meta["beta_yb_z"][0]) > float(hi.meta["beta_yb_z"][0])
     # and it is carried by the re-seed protocol rather than dropped on a metrics.* sweep
-    assert lo.meta["sigma_e_yb"][0] == pytest.approx(0.40 * hi.meta["sigma_e_yb"][0], rel=1e-12)
+    assert lo.meta["sigma_e_yb"][0] == pytest.approx(0.40 * hi.meta["sigma_e_yb"][0], rel=1e-12, abs=0)
     amp = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, yb_sigma_e_scale=0.40, **kw)
     assert amp.with_pumps([Pump(0.5, 0.976e-6, "fwd", cladding=True)]).yb_sigma_e_scale == 0.40
 
@@ -515,7 +515,7 @@ def test_result_duck_types_a_steady_state_result_and_carries_the_ring_extras():
     assert np.all(res.meta["beta_yb_uncoupled_z"] >= res.meta["beta_yb_coupled_z"] - 1e-15)
     # the quadrature cladding-pump overlap IS the analytic one, by construction
     from dynameta.optics.fiber_amp import cladding_pump_overlap
-    assert amp.gamma_quad[0] == pytest.approx(cladding_pump_overlap(fib), rel=1e-12)
+    assert amp.gamma_quad[0] == pytest.approx(cladding_pump_overlap(fib), rel=1e-12, abs=0)
     assert eryb_mean_field_equivalent(amp).fiber is fib
     assert np.allclose(np.sum(amp.profiles * grid.dA_m2[None, :], axis=1), 1.0, atol=1e-12)
 

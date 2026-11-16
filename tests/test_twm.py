@@ -321,7 +321,7 @@ def test_qpm_order_three_design_closed_form_matches_the_integrator():
         march = abs(twm_propagate(spec, 1.0, 1.0, 0.0 + 0j, n_out=241,
                                   rtol=1e-12, atol=1e-14).A3[-1]) ** 2
         closed = abs(sfg_undepleted(spec, 1.0, 1.0)["A3_L"]) ** 2
-        assert closed == pytest.approx(march, rel=2e-2), order
+        assert closed == pytest.approx(march, rel=2e-2, abs=0), order
 
 
 # --------------------------------------------------- gate 4c: degenerate spec contract (Q-14)
@@ -359,8 +359,8 @@ def test_degenerate_spec_is_refused_not_silently_nondegenerate():
     # (b) the SHG route carries the 1/2: |A3|_nondeg = 2 |A_s|_shg exactly (the Q-14 measurement)
     nd = sfg_undepleted(spec, A, A, distinct_modes=True)
     shg = shg_undepleted(spec, A)
-    assert abs(nd["A3_L"]) / abs(shg["A_s_L"]) == pytest.approx(2.0, rel=1e-14)
-    assert nd["I3_L"] / shg["I_s_L"] == pytest.approx(4.0, rel=1e-13)
+    assert abs(nd["A3_L"]) / abs(shg["A_s_L"]) == pytest.approx(2.0, rel=1e-14, abs=0)
+    assert nd["I3_L"] / shg["I_s_L"] == pytest.approx(4.0, rel=1e-13, abs=0)
 
     # (c) the opt-outs are BIT-IDENTICAL to the pre-fix nondegenerate path.  Reference values are
     #     rebuilt in-test from the closed form the module documents (A3 = i kappa3 A1 A2 L Phi at

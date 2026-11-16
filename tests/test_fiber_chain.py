@@ -87,7 +87,7 @@ def test_chain_nf_invariant_under_reference_bandwidth():
     for bw, r in rows.items():
         assert r.nf_total_dB == pytest.approx(ref.nf_total_dB, abs=1e-6), bw
         assert r.gain_total_dB == pytest.approx(ref.gain_total_dB, abs=1e-9)
-        assert r.rho_out_1pol_W_Hz == pytest.approx(ref.rho_out_1pol_W_Hz, rel=1e-12)
+        assert r.rho_out_1pol_W_Hz == pytest.approx(ref.rho_out_1pol_W_Hz, rel=1e-12, abs=0)
         # implied end-to-end n_sp stays above the quantum limit
         G = 10.0 ** (r.gain_total_dB / 10.0)
         F = 10.0 ** (r.nf_total_dB / 10.0)

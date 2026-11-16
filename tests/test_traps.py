@@ -91,7 +91,7 @@ def test_spec_validation():
         PT.TrapLevel(kind="weird", tau_n0_s=1e-9, tau_p0_s=1e-9)
     t = PT.TrapLevel(density_m3=1e21, sigma_n_m2=1e-19, sigma_p_m2=2e-19, v_th_n_ms=2e5,
                      v_th_p_ms=1e5, kind="donor")
-    assert t.lifetimes_s() == pytest.approx((1 / (1e-19 * 2e5 * 1e21), 1 / (2e-19 * 1e5 * 1e21)))
+    assert t.lifetimes_s() == pytest.approx((1 / (1e-19 * 2e5 * 1e21), 1 / (2e-19 * 1e5 * 1e21)), rel=1e-12, abs=0)
     with pytest.raises(ValueError):
         PT.InterfaceTraps(dit_eV_m2=1e16)                       # uniform needs a band
     with pytest.raises(ValueError):
@@ -264,8 +264,8 @@ def test_srh_lifetime_vs_trap_energy(E):
     tau, tau_full = _tau_closed_form(E, tau_n0, tau_p0, n0, p0)
     Lp = math.sqrt(0.048 * V_T * tau_full)
     tau_meas = dp / G / (1.0 - 1.0 / math.cosh(0.5 * L / Lp))
-    assert tau_meas == pytest.approx(tau, rel=1e-4)
-    assert tau_meas == pytest.approx(tau_full, rel=1e-4)
+    assert tau_meas == pytest.approx(tau, rel=1e-4, abs=0)
+    assert tau_meas == pytest.approx(tau_full, rel=1e-4, abs=0)
 
 
 def test_multilevel_lifetime():
@@ -280,7 +280,7 @@ def test_multilevel_lifetime():
     tau = 1.0 / inv
     Lp = math.sqrt(0.048 * V_T * tau)
     tau_meas = dp / G / (1.0 - 1.0 / math.cosh(0.5 * L / Lp))
-    assert tau_meas == pytest.approx(tau, rel=1e-4)
+    assert tau_meas == pytest.approx(tau, rel=1e-4, abs=0)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -638,12 +638,12 @@ def test_interface_node_area_2d():
     b = PT.interface_node_area(dev, "si", "side")
     y = _vals(dev, "si", "y")
     x = _vals(dev, "si", "x")
-    assert a.sum() == pytest.approx(100e-9, rel=1e-12)
-    assert b.sum() == pytest.approx(45e-9, rel=1e-12)
+    assert a.sum() == pytest.approx(100e-9, rel=1e-12, abs=0)
+    assert b.sum() == pytest.approx(45e-9, rel=1e-12, abs=0)
     assert np.all(a[np.abs(y - 50e-9) > 1e-15] == 0.0)
     corner = int(np.argmin(np.abs(x - 100e-9) + np.abs(y - 50e-9)))
     sa = _vals(dev, "si", "SurfaceArea")
-    assert a[corner] == pytest.approx(5e-9, rel=1e-12) and b[corner] == 0.0
+    assert a[corner] == pytest.approx(5e-9, rel=1e-12, abs=0) and b[corner] == 0.0
     assert np.all(a[b > 0] == 0.0)
     assert np.allclose(sa, a + b, rtol=1e-12, atol=0.0)           # same weights as DEVSIM's own
     _clear(dev)
@@ -668,8 +668,13 @@ def test_interface_trap_guards():
     ds.create_device(mesh=m, device=dev)
     PE.setup_dielectric_region(dev, "r0", 3.9)
     PE.setup_dielectric_region(dev, "r1", 3.9)
+    # v0.16: a fixed charge alone no longer needs a bipolar side -- it is installed as a plain
+    # sheet charge (it raised ValueError up to v0.15.1); trap LEVELS on a dielectric/dielectric interface
+    # still raise
+    out = PT.install_interface_traps(dev, "if", PT.InterfaceTraps(fixed_charge_C_m2=1e-3))
+    assert out["region"] == "r0" and out["sheet_charge_model"] == "QTerm_sheet0"
     with pytest.raises(ValueError):
-        PT.install_interface_traps(dev, "if", PT.InterfaceTraps(fixed_charge_C_m2=1e-3))
+        PT.install_interface_traps(dev, "if", PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12))
     _clear(dev)
 
 

@@ -129,7 +129,7 @@ def test_q1_laterally_uniform_estimate_equals_the_oracle_and_the_1d_estimate(dim
     # MEASURED (estimate - 1-D estimate): 2-D uniform +3e-16, long -4e-15, parabola +2e-16; 3-D uniform -8e-15,
     # parabola +1.0e-12 (the 8^3 rule; still 100x inside the budget)
     if kind == "long":                                   # the worst element is a cell of the 0.128 nm peak column
-        assert rep["worst_h_m"] == pytest.approx(0.128e-9, rel=1e-9)
+        assert rep["worst_h_m"] == pytest.approx(0.128e-9, rel=1e-9, abs=0)
         assert abs(rep["worst_centre_m"][0]) < 1e-15
 
 
@@ -352,11 +352,9 @@ def _zener_3d(dev, h):
     return "pc_bias"
 
 
-def test_q3_3d_solved_zener_warns_like_the_1d_twin(lateral):
-    """3-D (the estimator generalises unchanged: Q1 3-D is exact): the SOLVED laterally uniform Kuhn-bar Zener at
-    h = 0.5 nm and 0.9 V. Its current per area equals the 1-D twin's (the y/z-invariant 3-D continuum is the 1-D
-    one); its estimate lands in the Q2 band against the 1-D reference; it warns, naming the region and an element
-    on the junction column, and the value is unchanged by the check."""
+def _q3_measure():
+    """The Q3 device measurement, run in a FRESH interpreter by test_q3 (_child): (estimate report, current per
+    area, current through the check, UnreliableResultWarning texts)."""
     try:
         P._wipe()
         b = _zener_3d("tq_z3", 0.5e-9)
@@ -368,13 +366,27 @@ def test_q3_3d_solved_zener_warns_like_the_1d_twin(lateral):
             I_chk = TN.btbt_generation_current("tq_z3", "b") / 1e-18
     finally:
         P._wipe()
-    assert I_chk == I
-    meas = I / lateral["ref"][0.9] - 1.0
-    assert 1.0 <= rep["error"] / meas <= 2.0, (rep["error"], meas)
-    assert abs(rep["error"] / lateral[(0.5e-9, 0.9)]["e1"]["error"] - 1.0) < 0.05
-    unrel = [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]
+    return {"error": rep["error"], "worst_centre_m": list(rep["worst_centre_m"]), "I": I, "I_chk": I_chk,
+            "unrel": [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]}
+
+
+def test_q3_3d_solved_zener_warns_like_the_1d_twin(lateral):
+    """3-D (the estimator generalises unchanged: Q1 3-D is exact): the SOLVED laterally uniform Kuhn-bar Zener at
+    h = 0.5 nm and 0.9 V. Its current per area equals the 1-D twin's (the y/z-invariant 3-D continuum is the 1-D
+    one); its estimate lands in the Q2 band against the 1-D reference; it warns, naming the region and an element
+    on the junction column, and the value is unchanged by the check.
+    The 6507-equation 3-D device is solved in a FRESH interpreter (_child): in an xdist worker that had run many
+    DEVSIM tests before it, DEVSIM's UMFPACK allocation failed once ("OUT OF MEMORY / bad allocation", v0.16 full
+    run; the same test passed alone and on a rerun). An allocator failure is retried once, logged, and reported
+    as such if it recurs -- a physics assertion is never retried."""
+    r = _child("Q._q3_measure()", "q3 3-D Kuhn-bar Zener")
+    assert r["I_chk"] == r["I"]
+    meas = r["I"] / lateral["ref"][0.9] - 1.0
+    assert 1.0 <= r["error"] / meas <= 2.0, (r["error"], meas)
+    assert abs(r["error"] / lateral[(0.5e-9, 0.9)]["e1"]["error"] - 1.0) < 0.05
+    unrel = r["unrel"]
     assert len(unrel) == 1 and "region 'b' of 'tq_z3'" in unrel[0], unrel
-    assert abs(rep["worst_centre_m"][0] - ZC) <= 1.0e-9, rep["worst_centre_m"]
+    assert abs(r["worst_centre_m"][0] - ZC) <= 1.0e-9, r["worst_centre_m"]
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -590,22 +602,61 @@ def test_q6_limitation_abrupt_junction_across_the_mesh_is_not_covered():
     assert I_chk / SLANT_REF[0.9] - 1.0 == meas
 
 
-def _at_bias_child(geom, h, vr):
-    """_at_bias in a FRESH interpreter (one per mesh): (estimate, current), so no large mesh shares a worker's
-    DEVSIM memory with the meshes before it (the measurements ran one mesh per process too)."""
+# DEVSIM allocator failures (its UMFPACK factorisation or a C++ allocation running out of memory): what F4 of the
+# v0.16 full run saw on large meshes under load, never a physics result
+_ALLOCATOR_FAILURES = ("OUT OF MEMORY", "bad allocation", "umfpack numeric failed", "std::bad_alloc")
+
+
+def _child(expr, what, timeout=3600):
+    """Evaluate `expr` (this module imported as Q) in a FRESH interpreter and return its JSON result, so no large
+    mesh shares a worker's DEVSIM memory with the meshes before it (the measurements ran one mesh per process).
+    An allocator failure (_ALLOCATOR_FAILURES in the child's output) is retried ONCE in another fresh interpreter,
+    with the reason printed (captured into the test report); if it recurs the test FAILS naming the allocator
+    failure. Any other failure, and every assertion on the result, is never retried."""
     import json
     import os
     import subprocess
     import sys
     here = os.path.dirname(os.path.abspath(__file__))
     code = ("import json, sys; sys.path.insert(0, {here!r}); import test_devsim_btbt_resolution_2d as Q; "
-            "r, I, W = Q._at_bias({g!r}, {h!r}, {v!r}, 'tq_refc'); print('RESULT ' + json.dumps([r['error'], I]))"
-            ).format(here=here, g=geom, h=h, v=vr)
+            "print('RESULT ' + json.dumps({expr}))").format(here=here, expr=expr)
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=3600)
-    lines = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert out.returncode == 0 and lines, out.stderr[-3000:]
-    return tuple(json.loads(lines[-1][7:]))
+    tails = []
+    for attempt in (1, 2):
+        out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=timeout)
+        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT ")]
+        if out.returncode == 0 and lines:
+            return json.loads(lines[-1][7:])
+        text = out.stdout[-4000:] + out.stderr[-4000:]
+        alloc = [m for m in _ALLOCATOR_FAILURES if m in text]
+        if not alloc:
+            pytest.fail("{}: child failed (rc {}), not an allocator failure:\n{}".format(what, out.returncode,
+                                                                                       out.stderr[-3000:]))
+        tails.append(text[-1500:])
+        print("[{}] DEVSIM allocator failure in child attempt {} ({}); {}".format(
+            what, attempt, ", ".join(alloc), "retrying once in a fresh interpreter" if attempt == 1 else "giving up"),
+            flush=True)
+    pytest.fail("{}: DEVSIM ALLOCATOR FAILURE in two fresh interpreters ({}); this is a memory failure of the "
+                "solver, not a result. Last output:\n{}".format(what, ", ".join(alloc), tails[-1]))
+
+
+def test_child_retries_an_allocator_failure_once_and_never_a_result(capsys):
+    """_child's contract (F4 of the v0.16 full run): an allocator failure in the child is retried ONCE with the
+    reason printed, and if it recurs the test fails NAMING the allocator failure; any other child failure fails
+    at once, without a retry. (The expressions raise in the child; nothing is solved.)"""
+    with pytest.raises(pytest.fail.Exception, match="ALLOCATOR FAILURE in two fresh interpreters"):
+        _child("(_ for _ in ()).throw(RuntimeError('DEVSIM FATAL: umfpack numeric failed'))", "probe-a", timeout=300)
+    out = capsys.readouterr().out
+    assert "attempt 1 (umfpack numeric failed); retrying once" in out and "attempt 2" in out and "giving up" in out
+    with pytest.raises(pytest.fail.Exception, match="not an allocator failure"):
+        _child("(_ for _ in ()).throw(ValueError('a physics refusal'))", "probe-b", timeout=300)
+    assert "retrying" not in capsys.readouterr().out
+
+
+def _at_bias_child(geom, h, vr):
+    """_at_bias in a FRESH interpreter (one per mesh, _child): (estimate, current)."""
+    return tuple(_child("(lambda r: [r[0]['error'], r[1]])(Q._at_bias({!r}, {!r}, {!r}, 'tq_refc'))".format(
+        geom, h, vr), "{} reference h = {:g} nm".format(geom, h * 1e9)))
 
 
 # the corner currents per depth at 0.9 V [A/m] behind CORNER_REF (MEASURED, standalone processes): uniform 2 / 1 / 0.5 nm

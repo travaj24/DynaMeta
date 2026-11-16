@@ -38,13 +38,13 @@ def test_s1_homojunction_scales_match_the_textbook_depletion_approximation():
     # budget: the library constants vs scipy's (CODATA 2018 eps0 vs 2022 differ by 6.8e-10) -> 1e-9 relative
     for got, want in ((sc.V_bi, vbi), (sc.x_n, xn), (sc.x_p, xn), (sc.W0, 2 * xn), (sc.E0, e0),
                       (sc.peak_width, VT / e0)):
-        assert got == pytest.approx(want, rel=1e-9)
+        assert got == pytest.approx(want, rel=1e-9, abs=0)
     assert sc.btbt_width is None and sc.spacing == sc.peak_width
     # one-sided p+ n: the depletion is (almost) all on the n side, W -> sqrt(2 eps V_bi / (q N_D))
     s1 = JM.abrupt_junction_scales(1e26, 1e22, eps_r_p=er, eps_r_n=er, n_i_p=ni, n_i_n=ni, T_K=300.0)
     vb1 = VT * math.log(1e26 * 1e22 / ni ** 2)
-    assert s1.x_n == pytest.approx(math.sqrt(2 * eps * vb1 / (QE * 1e22) * 1e26 / (1e26 + 1e22)), rel=1e-9)
-    assert s1.x_p / s1.x_n == pytest.approx(1e22 / 1e26, rel=1e-12)
+    assert s1.x_n == pytest.approx(math.sqrt(2 * eps * vb1 / (QE * 1e22) * 1e26 / (1e26 + 1e22)), rel=1e-9, abs=0)
+    assert s1.x_p / s1.x_n == pytest.approx(1e22 / 1e26, rel=1e-12, abs=0)
     # a triangle field: E_0 = 2 V_bi / W_0 (the "4 V_bi / V_t lines per band" of the module docstring)
     assert sc.E0 == pytest.approx(2.0 * sc.V_bi / sc.W0, rel=1e-12)
 
@@ -83,12 +83,12 @@ def test_s3_btbt_width_is_the_tunnelling_resolution_rule():
     h = 1e-13
     dEdx = ((sc.E0 - QE * NA / eps * h) - (sc.E0 - QE * NA / eps * 3 * h)) / (2 * h)
     k = B / sc.E0 ** 2 * abs(dEdx)
-    assert sc.btbt_width == pytest.approx(math.sqrt(12.0 * BTBT_QUADRATURE_TOL) / k, rel=1e-6)
+    assert sc.btbt_width == pytest.approx(math.sqrt(12.0 * BTBT_QUADRATURE_TOL) / k, rel=1e-6, abs=0)
     assert sc.btbt_width * k == pytest.approx(0.3464, abs=1e-4)                    # "h <= 0.35 / k"
     # symmetric limit: k = B / V_bi (tunneling's MESH RESOLUTION paragraph)
     ss = JM.abrupt_junction_scales(1e26, 1e26, eps_r_p=er, eps_r_n=er, n_i_p=ni, n_i_n=ni, T_K=300.0,
                                    btbt_B_V_per_m=B)
-    assert ss.btbt_width == pytest.approx(math.sqrt(12 * BTBT_QUADRATURE_TOL) * ss.V_bi / B, rel=1e-12)
+    assert ss.btbt_width == pytest.approx(math.sqrt(12 * BTBT_QUADRATURE_TOL) * ss.V_bi / B, rel=1e-12, abs=0)
     assert ss.spacing == min(ss.btbt_width, ss.peak_width) == ss.btbt_width
 
 
@@ -152,7 +152,7 @@ def test_b2_non_fixed_lines_inside_are_dropped_fixed_ones_clip_the_band():
         lf[f] = (1e-9, 1e-9)
         xs2, d2 = _edges(JM.band_lines(lf, {0.0, f, 100e-9}, [(xj, w, h)]))
         k = int(np.searchsorted(xs2, f))
-        assert d2[k] == pytest.approx(want, rel=1e-6)
+        assert d2[k] == pytest.approx(want, rel=1e-6, abs=0)
         assert np.allclose(d2[k + 1:k + 5], h, rtol=1e-9, atol=0)
 
 
@@ -173,7 +173,7 @@ def test_b3_two_overlapping_junctions_are_one_cluster_with_both_as_nodes():
     xs2, d2 = _edges(new2)
     for j in (40e-9, 150e-9):
         k = int(np.argmin(np.abs(xs2 - j)))
-        assert xs2[k] == j and d2[k - 1] == pytest.approx(h, rel=1e-9) and d2[k] == pytest.approx(h, rel=1e-9)
+        assert xs2[k] == j and d2[k - 1] == pytest.approx(h, rel=1e-9, abs=0) and d2[k] == pytest.approx(h, rel=1e-9, abs=0)
 
 
 def test_b4_duplicates_and_no_junction():

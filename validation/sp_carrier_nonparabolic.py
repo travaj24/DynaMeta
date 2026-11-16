@@ -1,16 +1,20 @@
 """Validate ITO band NONPARABOLICITY through the SchrodingerPoisson CarrierSolver, now FULLY
 SELF-CONSISTENT (was a post-hoc 2D fill on a parabolic potential). SchrodingerPoissonCarrier(
-alpha_np_per_eV>0) calibrates the bulk E_F with the Kane inversion (alpha E_F^2 + E_F = gamma_F) and
-runs solve_self_consistent with the nonparabolic Kane DOS in the Trellakis Newton, so the converged
-potential AND density carry the nonparabolicity.
+alpha_np_per_eV>0) calibrates the bulk E_F on the SP model's own flat-band bulk (parabolic z, in-plane
+Kane DOS, finite T; SchrodingerPoisson1D.bulk_fermi_level) and runs solve_self_consistent with the
+nonparabolic Kane DOS in the Trellakis Newton, so the converged potential AND density carry the
+nonparabolicity.
 
 Gates (the self-consistent physics -- NOT the old post-hoc "DOS-enhanced peak"):
   - the nonparabolic bulk E_F is LOWER than parabolic (a heavier DOS holds n_bg at a smaller E_F);
   - the accumulation solve stays finite/positive and converges;
-  - at a fixed gate surface potential the nonparabolic peak density is close to (and, self-
-    consistently, slightly below) the parabolic -- the heavier DOS + lower E_F redistribute the
-    accumulation rather than naively multiplying it (the post-hoc fill's >1 enhancement was at a
-    FIXED parabolic potential + E_F, which is not the self-consistent answer).
+  - at a fixed gate surface potential the nonparabolic peak density is close to the parabolic one
+    (ratio in 0.7-1.1) -- the heavier DOS + lower E_F redistribute the accumulation rather than
+    naively multiplying it (the post-hoc fill's >1 enhancement was at a FIXED parabolic potential +
+    E_F, which is not the self-consistent answer).
+Measured v0.16 (model E_F): E_F 0.5646 / 0.4991 eV, peak ratio 1.013. v0.15.1 used the T = 0 3D Kane
+inversion (0.5656 / 0.4599 eV), whose flat-band fill was 0.873 n_bg at alpha 0.5 and was
+restored by spurious band bending; its peak ratio was 0.982 ("slightly below").
 Run: python -m validation.sp_carrier_nonparabolic
 """
 import sys, os

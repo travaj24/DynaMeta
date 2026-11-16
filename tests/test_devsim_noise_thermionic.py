@@ -83,7 +83,7 @@ def test_pair_model_is_written_from_the_flux_strings():
             f = eval(flux.replace("L@r0", repr(a)).replace("L@r1", repr(b)), env)     # noqa: S307
             p = eval(pair.replace("L@r0", repr(a)).replace("L@r1", repr(b)), env)     # noqa: S307
             assert p >= abs(f) and p == pytest.approx(abs(pref) * (math.exp(a - 0.5) + math.exp(b - 0.25)),
-                                                       rel=4 * EPS)
+                                                       rel=4 * EPS, abs=0)
         f, p = (eval(s.replace("L@r0", "0.0").replace("L@r1", "-0.25"), {"exp": math.exp})  # noqa: S307
                 for s in (flux, pair))
         assert f == 0.0 and p == 2 * abs(pref) * math.exp(-0.5)
@@ -379,7 +379,7 @@ def test_t0_3d_area_is_devsims_assembled_area(tag, kw):
             assert np.max(np.abs(w - ia)) > 0.04 * m                  # not the geometric split
             assert np.max(np.abs(w - sa)) <= 1e-12 * m
         if tag == "jitter_exact":
-            assert w.sum() == pytest.approx(9e-14, rel=1e-12)          # exact 300 x 300 nm^2
+            assert w.sum() == pytest.approx(9e-14, rel=1e-12, abs=0)          # exact 300 x 300 nm^2
         if tag == "jitter":
             assert w.sum() / 9e-14 - 1 > 5e-3                          # DEVSIM's unsigned over-count
         if tag == "split":
@@ -512,8 +512,8 @@ def test_bookkeeping_by_interface_maps_and_inert_default():
     assert all("te_n" not in d for d in sn.by_region_mechanism.values())
     for m in ("te_n", "te_p"):
         halves = [float(sn.maps[r][m][0].sum()) for r in ("r_n", "r_p")]
-        assert halves[0] == pytest.approx(halves[1], rel=1e-14)
-        assert sum(halves) == pytest.approx(float(sn.by_mechanism[m][0]), rel=1e-14)
+        assert halves[0] == pytest.approx(halves[1], rel=1e-14, abs=0)
+        assert sum(halves) == pytest.approx(float(sn.by_mechanism[m][0]), rel=1e-14, abs=0)
         k_r = int(np.argmax(sn.maps["r_n"][m][0]))
         assert k_r == len(sn.maps["r_n"]["x"]) - 1                  # the interface copy of r_n
     V.hetero_two_region("continuous")

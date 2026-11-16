@@ -389,7 +389,9 @@ def fixed_point(carrier, N=3.0e23, delta=0.1):
     r = mos(carrier, N, sgn * delta, fd=False)
     var, m = ("Electrons", MN) if carrier == "electrons" else ("Holes", MP)
     c_cl = N * np.exp(sgn * (r["Potential"] - r["psi_b"]) / V_T)    # Boltzmann at the DG psi
-    c_bvp = dg_correct_density_1d(r["x"], c_cl, m, gamma=1.0, hard_wall="left", tol=1e-8)
+    # guard=False (v0.16 thin-film guard off): the potential here is the DG solution's own, so the frozen-potential closure is exact
+    # and its thin-film guard (a 22-27 % dead-layer deficit of this accumulation sheet) does not apply
+    c_bvp = dg_correct_density_1d(r["x"], c_cl, m, gamma=1.0, hard_wall="left", tol=1e-8, guard=False)
     return float(np.max(np.abs(r[var] - c_bvp)) / np.max(r[var]))
 
 

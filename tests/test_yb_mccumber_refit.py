@@ -41,7 +41,7 @@ def test_refit_signal_band_obeys_own_mccumber():
         lam = SIGNAL_NM * 1e-9
         want = ion.sigma_e.sigma(lam) * _mcc_ratio(lam, ion.zero_line_m)
         got = ion.sigma_a.sigma(lam)
-        assert np.allclose(got, want, rtol=1e-12), host
+        assert np.allclose(got, want, rtol=1e-12, atol=0), host
 
 
 def test_legacy_violates_mccumber_proving_discrimination():

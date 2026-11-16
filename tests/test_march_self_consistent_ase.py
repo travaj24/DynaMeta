@@ -428,7 +428,7 @@ def test_auto_reproduces_the_self_consistent_march_on_the_codoped_failure_cases(
         assert a.meta["ase_switch_steps"].size == a.meta["n_self_consistent_steps"], tag
         assert np.array_equal(np.where(a.meta["ase_mode_steps"] == 1)[0],
                               a.meta["ase_switch_steps"]), tag
-        assert np.allclose(a.meta["ase_switch_times"], t[a.meta["ase_switch_steps"]]), tag
+        assert np.allclose(a.meta["ase_switch_times"], t[a.meta["ase_switch_steps"]], atol=0), tag
 
 
 def test_auto_costs_the_quasi_static_march_when_nothing_needs_switching():

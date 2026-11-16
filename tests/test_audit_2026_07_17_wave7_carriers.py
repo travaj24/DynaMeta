@@ -402,10 +402,10 @@ def test_s1_13_onset_threshold_closed_forms():
     h = 0.5 * math.pi
     # planar (field-axis theta_b = pi/2): the SPLAY constant, not (K11 + K33)/2
     assert _onset_threshold_V(K11, K33, dE, h, 1.0) == pytest.approx(
-        math.pi * math.sqrt(K11 / (EPS0 * dE)), rel=1e-14)
+        math.pi * math.sqrt(K11 / (EPS0 * dE)), rel=1e-14, abs=0)
     # homeotropic + negative anisotropy (VAN): the BEND constant
     assert _onset_threshold_V(K11, K33, -dE, 0.0, 1.0) == pytest.approx(
-        math.pi * math.sqrt(K33 / (EPS0 * dE)), rel=1e-14)
+        math.pi * math.sqrt(K33 / (EPS0 * dE)), rel=1e-14, abs=0)
     # the field STABILISES planar for dEps < 0 and homeotropic for dEps > 0: no onset
     assert _onset_threshold_V(K11, K33, -dE, h, 1.0) == math.inf
     assert _onset_threshold_V(K11, K33, dE, 0.0, 1.0) == math.inf
@@ -414,10 +414,10 @@ def test_s1_13_onset_threshold_closed_forms():
     tn = math.pi * math.sqrt((K11 + (K33 - 2 * K22) * (phi / math.pi) ** 2
                               + 4 * K22 * (d / p) * (phi / math.pi)) / (EPS0 * dE))
     assert _onset_threshold_V(K11, K33, dE, h, 1.0, K22=K22, twist_total_rad=phi,
-                              q0_d=cholesteric_q0(p) * d) == pytest.approx(tn, rel=1e-13)
+                              q0_d=cholesteric_q0(p) * d) == pytest.approx(tn, rel=1e-13, abs=0)
     # a series-capacitance divider scales the APPLIED onset by 1 / (V_lc / V_app)
     assert _onset_threshold_V(K11, K33, dE, h, 0.8) == pytest.approx(
-        _onset_threshold_V(K11, K33, dE, h, 1.0) / 0.8, rel=1e-14)
+        _onset_threshold_V(K11, K33, dE, h, 1.0) / 0.8, rel=1e-14, abs=0)
 
 
 @pytest.mark.parametrize("case", ["uniform", "poisson", "poisson_layers", "one_constant"])
@@ -583,7 +583,7 @@ def test_s1_9_band_alignment_is_the_work_function_difference():
                             ([("xs", "AZO", 12e-9, 9.0, 1e26, 4.62, m2)], 4.50)):
         s = _spec(extra_semiconductors=extra, chi_semi_eV=chi_semi)
         ba = s.band_alignment()
-        assert ba["semi"] == (pytest.approx(-invert_F12(4e26 / effective_dos_m3(m1)) * V_T, rel=1e-15),
+        assert ba["semi"] == (pytest.approx(-invert_F12(4e26 / effective_dos_m3(m1)) * V_T, rel=1e-15, abs=0),
                               0.0)
         for (nm, *_r) in s.extra_semiconductor_entries():
             phi_c, psi_n = ba[nm]
@@ -639,9 +639,9 @@ def test_s1_9_build_device_installs_the_aligned_bands(monkeypatch, tmp_path):
         solver.build_device()
         ba = s.band_alignment()
         assert ds.get_parameter(device="s19d", region="semi", name="Phi_c0") == pytest.approx(
-            ba["semi"][0], rel=1e-14)
+            ba["semi"][0], rel=1e-14, abs=0)
         assert ds.get_parameter(device="s19d", region="xs", name="Phi_c0") == pytest.approx(
-            ba["xs"][0], rel=1e-14)
+            ba["xs"][0], rel=1e-14, abs=0)
         pot = np.asarray(ds.get_node_model_values(device="s19d", region="xs", name="Potential"))
         assert np.all(pot == ba["xs"][1]) and ba["xs"][1] < -0.3
     finally:

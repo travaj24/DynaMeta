@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.15.1"
+version = "0.16.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "lumenairy>=5.22",                                     # RCWA/PMM/Berreman/BOR backends (optics.lumenairy_bridge) -- core since v0.5. MIRRORS lumenairy_bridge/_common.VERSION_FLOOR, the one source of truth (audit R-32): a test fails if the two differ, so bump both together
+    "lumenairy>=5.22",                                     # RCWA/PMM/Berreman/BOR backends (optics.lumenairy_bridge) -- core since v0.5. MIRRORS lumenairy_bridge/_common.VERSION_FLOOR, the one source of truth (audit R-32): a test fails if the two differ, so bump both together. Verified through 5.51 (_common.VERSION_VERIFIED_MAX); >= 5.50.1 recommended (analytic Li route on RCWA shapes), >= 5.51 for PMM geometric grading (feature-detected)
 ]
 
 [project.optional-dependencies]

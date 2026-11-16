@@ -71,7 +71,7 @@ def test_assemble_eps_2d_extrude_shape_and_bg():
     # the n_bg columns reduce to the Drude eps at n_bg (density-dependent material,
     # so the background flows through eps_grid(n_bg), not scalar_eps); the spike differs
     bg = complex(MaterialEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG])}, 1300e-9)[0])
-    assert np.isclose(ef.values_zyx[0, 0, 0], bg, rtol=1e-9)
+    assert np.isclose(ef.values_zyx[0, 0, 0], bg, rtol=1e-9, atol=0)
     assert ef.values_zyx[-1, 0, nx // 2].real < bg.real  # accumulation lowers Re(eps)
 
 
@@ -141,7 +141,7 @@ def test_assemble_eps_extra_fields_thermo_uniform_scalar():
                        1300e-9, mesh_regions=["semi"], extra_fields={"T": 360.0})
     ef = out["semi"]
     assert ef.is_uniform and not ef.is_tensor                     # uniform field-effect -> scalar EpsField
-    assert np.isclose(ef.scalar, complex(tom.eps({"T": 360.0}, 1300e-9)), rtol=1e-12)
+    assert np.isclose(ef.scalar, complex(tom.eps({"T": 360.0}, 1300e-9)), rtol=1e-12, atol=0)
 
 
 def test_assemble_eps_extra_fields_pockels_tensor():
@@ -159,7 +159,7 @@ def test_assemble_eps_extra_fields_pockels_tensor():
                        1300e-9, mesh_regions=["semi"], extra_fields={"E": [0.0, 0.0, 1.0e7]})
     ef = out["semi"]
     assert ef.is_tensor and ef.tensor.shape == (3, 3)             # uniform field-effect -> tensor EpsField
-    assert np.allclose(ef.tensor, np.asarray(pk.eps({"E": [0.0, 0.0, 1.0e7]}, 1300e-9)))
+    assert np.allclose(ef.tensor, np.asarray(pk.eps({"E": [0.0, 0.0, 1.0e7]}, 1300e-9)), atol=0)
 
 
 def test_effect_eps_map_falls_back_without_registered_effect():
@@ -168,7 +168,7 @@ def test_effect_eps_map_falls_back_without_registered_effect():
     # an extra 'T' in the bundle is harmlessly ignored (back-compat for the carrier-only path).
     a = EffectEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG]), "T": 999.0}, 1300e-9)
     b = MaterialEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG])}, 1300e-9)
-    assert np.allclose(a, b)
+    assert np.allclose(a, b, atol=0)
 
 
 # ---- choose_lift gating ----
@@ -191,7 +191,7 @@ def test_separable_xy_outer_product():
     assert n3d.shape == (nx, nx, nv)
     # center peak is the separable product of the 1D peak deviation; corners ~ n_bg
     assert n3d[nx // 2, nx // 2, 0] > n3d[0, 0, 0]
-    assert np.isclose(n3d[0, 0, 0], N_BG, rtol=1e-6)
+    assert np.isclose(n3d[0, 0, 0], N_BG, rtol=1e-6, atol=0)
 
 
 def test_separable_xy_rejects_nonsquare_and_mixed_sign():
@@ -250,8 +250,8 @@ def test_gate_cv():
                                    n_bg_by_region={"semi": N_BG}, unit_cell_m=(PERIOD, PERIOD)))
     Vg, Q, Vmid, C = gate_cv(fields, "semi", voltage_key="gate")
     assert np.all(np.diff(Q) > 0)                          # Q rises with gate bias (accumulation)
-    assert np.allclose(Q, Q_E * S * Vg, rtol=1e-6)         # Q(Vg) = q*S*Vg
-    assert np.allclose(C, Q_E * S, rtol=1e-6)              # C = dQ/dVg = q*S (constant here)
+    assert np.allclose(Q, Q_E * S * Vg, rtol=1e-6, atol=0)         # Q(Vg) = q*S*Vg
+    assert np.allclose(C, Q_E * S, rtol=1e-6, atol=0)              # C = dQ/dVg = q*S (constant here)
 
 
 def test_gate_cv_rejects_duplicate_bias():
@@ -310,7 +310,7 @@ def test_lumped_rc_bandwidth_formula_with_modulator_C():
     assert f3db_tight > f3db
     # switching energy 0.5 C V^2 over an 8 V swing
     E = switching_energy_per_area(C_area, 8.0)
-    assert np.isclose(E, 0.5 * C_area * 64.0)
+    assert np.isclose(E, 0.5 * C_area * 64.0, atol=0)
 
 
 # ---- eps_grid OUTPUT shape contract (audit-v2): a transposed/wrong-shape grid must raise ----
@@ -370,8 +370,8 @@ def test_extra_fields_2d_grid_lifts_not_transposes():
     vzyx = np.asarray(out["ito"].values_zyx)                  # (Nz, Ny, Nx)
     ramp_x = vzyx[0, 0, :].real
     assert ramp_x[-1] - ramp_x[0] > 0.05, "the T ramp must live on the x axis"
-    assert np.allclose(vzyx[0, :, 0], vzyx[0, 0, 0]), "extras must be y-uniform"
-    assert np.allclose(vzyx[0], vzyx[-1]), "v-uniform T stays z-uniform"
+    assert np.allclose(vzyx[0, :, 0], vzyx[0, 0, 0], atol=0), "extras must be y-uniform"
+    assert np.allclose(vzyx[0], vzyx[-1], atol=0), "v-uniform T stays z-uniform"
 
 
 def test_r30_identity_lift_error_names_the_spec_knob_and_the_dimension():

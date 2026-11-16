@@ -44,7 +44,7 @@ def test_pcm_guards():
 
 def test_lc_relaxation_time_and_exponential_decay():
     lc = LCRelaxation(K_elastic_N=1e-11, gamma_visc_Pa_s=0.1, d_m=5e-6)
-    assert lc.tau_s() == pytest.approx(0.1 * (5e-6) ** 2 / (1e-11 * np.pi ** 2), rel=1e-12)
+    assert lc.tau_s() == pytest.approx(0.1 * (5e-6) ** 2 / (1e-11 * np.pi ** 2), rel=1e-12, abs=0)
     th0 = np.radians(30.0)
     assert lc.relax(np.array([lc.tau_s()]), th0)[0] == pytest.approx(th0 / np.e, rel=1e-9)
     assert lc.relax(np.array([0.0]), th0)[0] == pytest.approx(th0)

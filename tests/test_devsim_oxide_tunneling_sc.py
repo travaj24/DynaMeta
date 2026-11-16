@@ -535,7 +535,7 @@ def test_o14_o15_tensor_meshes_equal_1d(dims, case):
     J = np.asarray(r["J"])
     assert r["n_iface"] == 3 ** (r["dim"] - 1)
     assert np.all(np.abs(J / r["ref"]["J"] - 1.0) <= 1e-6)
-    assert sum(r["area"]) == pytest.approx(A, rel=1e-12)
+    assert sum(r["area"]) == pytest.approx(A, rel=1e-12, abs=0)
     assert r["I_gate"] / A == pytest.approx(r["ref"]["J"], rel=1e-6)
     assert r["I_body"] / A == pytest.approx(r["ref"]["I_body"], rel=1e-6)
     assert all(len(w) == 1 for w in r["weights"]) and all(v == [1.0] for v in r["wvals"])
@@ -765,7 +765,7 @@ def test_o9_transient_with_the_live_term_conserves_charge_and_relaxes_to_dc(tran
     assert abs(lhs - ((Qg[-1] - r["Q0"]) - np.sum(dt * It))) > 1.0       # the sign is load-bearing
     assert r["dispatch_calls"] > len(st)
     assert I[-1] == pytest.approx(r["dc_I_src"], rel=1e-10)
-    assert Qg[-1] == pytest.approx(r["dc_Q_g"], rel=1e-10)
+    assert Qg[-1] == pytest.approx(r["dc_Q_g"], rel=1e-10, abs=0)
     off = transient["off"]
     assert abs(off["steps"][-1]["I_src"]) < 1e-6 * abs(off["dc_I_src"])
 

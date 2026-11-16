@@ -83,6 +83,27 @@ def test_resolving_every_carriers_name_does_not_load_ngsolve():
     assert out.returncode == 0 and "lazy" in out.stdout, out.stderr[-3000:]
 
 
+def test_v016_carrier_option_specs_export_lazily_without_devsim():
+    """The v0.16 option specs are importable from dynameta.carriers, as the audit notes use them (OLD CODE: none was
+    exported, AttributeError). Each resolves to its defining module's class through the package's lazy
+    export, in a fresh interpreter, and neither the package import nor resolving them loads devsim."""
+    code = "\n".join([
+        "import sys, dynameta.carriers as c",
+        "from dynameta.carriers import sp_dual_gate, gate_leakage, density_gradient, physics_traps",
+        "want = {'OxideBarrier': sp_dual_gate, 'DualGateSolution': sp_dual_gate,",
+        "        'DualGateConvergenceError': sp_dual_gate, 'GateLeakage': gate_leakage,",
+        "        'LeakageTable': gate_leakage, 'EquilibriumDensityGradient': density_gradient,",
+        "        'FilmInterfaceTraps': physics_traps}",
+        "for n, m in want.items():",
+        "    assert getattr(c, n) is getattr(m, n), n",
+        "    assert n in c.__all__ and n in dir(c), n",
+        "from dynameta.carriers import OxideBarrier, GateLeakage, EquilibriumDensityGradient, FilmInterfaceTraps",
+        "assert 'devsim' not in sys.modules, 'a v0.16 option spec pulled devsim'",
+        "print('clean')"])
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(_PKG.parent))
+    assert out.returncode == 0 and "clean" in out.stdout, out.stderr[-3000:]
+
+
 def test_lazy_module_proxy_contract():
     """LazyModule forwards attributes, imports once, and a MISSING package raises the same
     ModuleNotFoundError (with .name) the eager `import` did -- at first use."""

@@ -45,7 +45,7 @@ def test_auger_capture_effective_time():
     expected = Nw / cap_den * (1.0 + tau_cap * C_W * Nw)
     assert np.isclose(dES[0, 0], expected, rtol=1e-12)
     tau_cap_eff = tau_cap / (1.0 + tau_cap * C_W * Nw)          # dossier gate form
-    assert np.isclose(tau_cap_eff, tau_cap / (1.0 + tau_cap * C_W * 1e24), rtol=1e-12)
+    assert np.isclose(tau_cap_eff, tau_cap / (1.0 + tau_cap * C_W * 1e24), rtol=1e-12, atol=0)
 
 
 def test_auger_loss_lowers_Nw_growing_with_drive():
@@ -197,7 +197,7 @@ def test_es_optical_split_moves_es_peak_only():
     mb, mo = QDGainModel(base), QDGainModel(opt)
     # ES comb sits at the OPTICAL offset; GS comb untouched
     assert np.isclose((mo.nu_ES_j.mean() - mo.p.nu0_Hz) / e_over_h, 0.10, rtol=1e-6)
-    assert np.isclose((mb.nu_ES_j.mean() - mb.p.nu0_Hz) / e_over_h, 0.060, rtol=1e-6)
+    assert np.isclose((mb.nu_ES_j.mean() - mb.p.nu0_Hz) / e_over_h, 0.060, rtol=1e-6, atol=0)
     assert np.array_equal(mb.nu_j, mo.nu_j)
     # gain at nu0 + 0.10 e/h is much higher for the optically-shifted model
     yo, yb = mo.steady_state(40e-3), mb.steady_state(40e-3)
@@ -290,10 +290,10 @@ def test_ase_emission_source_quarter_at_transparency():
     gsp5 = float(m.emission_gain_per_m(np.array([0.5]), nu0))
     assert abs(g5) < 1e-6                                      # net gain ~ 0 at rho=1/2
     pref = m.p.N_q_m3 * m.p.mu_GS * m.p.sigma_pk_m2            # single group, L=1, w=1 -> gsp = pref*rho^2
-    assert np.isclose(gsp5 / pref, 0.25, rtol=1e-9)           # source proportional to f_e f_h = 1/4
+    assert np.isclose(gsp5 / pref, 0.25, rtol=1e-9, atol=0)           # source proportional to f_e f_h = 1/4
     S = ase_output_psd(np.array([g5]), np.array([0.5]), dz, nu0, Gamma,
                        gsp_slices=np.array([gsp5]), per_pol=True)
-    assert np.isclose(S, Gamma * gsp5 * H_PLANCK * nu0 * dz, rtol=1e-9) and S > 0.0
+    assert np.isclose(S, Gamma * gsp5 * H_PLANCK * nu0 * dz, rtol=1e-9, atol=0) and S > 0.0
     # legacy (no gsp) DROPS the source at transparency (n_sp = inf -> 0*inf guarded to 0)
     with np.errstate(invalid="ignore"):
         S_legacy = ase_output_psd(np.array([g5]), np.array([0.5]), dz, nu0, Gamma, per_pol=True)
@@ -339,11 +339,11 @@ def test_imd3_closed_form_scalings():
     # (P_out/P_sat)^2 scaling (Omega=0 -> H=1 exactly, isolates the pure square)
     r1 = imd3_ratio(5.0, 0.5e-3, _PSAT, 0.0, 200e-12, 0.0)
     r2 = imd3_ratio(5.0, 1.0e-3, _PSAT, 0.0, 200e-12, 0.0)
-    assert np.isclose(r2 / r1, 4.0, rtol=1e-9)                 # doubling P_out -> 4x IM3/C
+    assert np.isclose(r2 / r1, 4.0, rtol=1e-9, atol=0)                 # doubling P_out -> 4x IM3/C
     # (1+alpha^2) enhancement
     r0 = imd3_ratio(5.0, 1e-3, _PSAT, 0.0, 200e-12, 0.0)
     ra = imd3_ratio(5.0, 1e-3, _PSAT, 0.0, 200e-12, 5.0)
-    assert np.isclose(ra / r0, 1.0 + 25.0, rtol=1e-9)
+    assert np.isclose(ra / r0, 1.0 + 25.0, rtol=1e-9, atol=0)
     # 6 dB/octave field rolloff (H^2 -> factor 4 per octave far above the knee)
     tau = 200e-12
     teff = tau / (1.0 + 1e-3 / _PSAT)
@@ -414,7 +414,7 @@ def test_varshni_slope_and_drift():
     from dynameta.optics.soa.temperature import d_eg_dT_ev_per_K, gain_peak_drift_nm_per_K
     a, b, T = 2.76e-4, 93.0, 300.0
     manual = -a * T * (T + 2.0 * b) / (T + b) ** 2
-    assert np.isclose(d_eg_dT_ev_per_K(300.0, "InAs"), manual, rtol=1e-12)
+    assert np.isclose(d_eg_dT_ev_per_K(300.0, "InAs"), manual, rtol=1e-12, atol=0)
     assert 0.33 <= gain_peak_drift_nm_per_K(1300.0, "InAs", 300.0) <= 0.40
 
 
@@ -453,7 +453,7 @@ def test_a15_full_detailed_balance_slaves_the_hole_escape():
     pf = p.with_full_detailed_balance()
     # same WL mass / split as the electrons -> the balanced RATIO escape/capture is the electron's
     assert pf.tau_esc_h_s != 5.0e-12
-    assert np.isclose(pf.tau_esc_h_s / 0.4e-12, pf.tau_esc_s / pf.tau_cap_s, rtol=1e-12)
+    assert np.isclose(pf.tau_esc_h_s / 0.4e-12, pf.tau_esc_s / pf.tau_cap_s, rtol=1e-12, atol=0)
     # every hole parameter None -> the hole escape IS the electron escape to the bit (what the
     # engine already used for tau_esc_h_s = None), and the excitonic path is untouched
     q = QDGainParams(eh_split=True).with_full_detailed_balance()

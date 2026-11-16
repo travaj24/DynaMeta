@@ -25,7 +25,43 @@ from typing import List, Literal, Optional
 
 @dataclass
 class Mesh2DSpec:
-    """Stage-1 DEVSIM (x, z) mesh refinement, all lengths in metres."""
+    """Stage-1 DEVSIM (x, z) mesh refinement, all lengths in metres.
+
+    z (through-stack) mesh lines, LayeredDevsimBuilder:
+
+    semiconductor_refinement="screening" (default, v0.16): every face of a unipolar semiconductor layer
+    (TransportModel.physics "equilibrium" or "drift_diffusion") is refined to that layer's SCREENING
+    LENGTH at its background density,
+    L_s^2 = eps_s eps0 kT / (q^2 N F'(eta_bg)) with the builder's own band density N and
+    reduced Fermi level eta_bg (F' = dF_1/2/deta; the Debye length when non-degenerate,
+    Thomas-Fermi when degenerate; the smallest L_s when a layer holds several semiconductor
+    materials). Per face: an interface line with spacing min(interface_ps_m,
+    screening_interface_factor L_s), a line at zone = min(screening_zone_factor L_s, 0.45 t)
+    with spacing min(max(screening_ps_factor L_s, that interface spacing), coarse_ps_m), every node in
+    between an explicit mesh line on a geometric sequence (DEVSIM's own grading drops the points within
+    ~0.1 nm before a line, which left a ~0.1 nm cell at the upper face of every film), and the
+    spacing grows towards coarse_ps_m at the layer midline beyond the zone. An accumulation or
+    depletion layer decays over a few L_s, independent of the film thickness, so a rule keyed on
+    the thickness (or on interface_ps_m alone) cannot resolve it: what matters is the spacing out
+    to a few screening lengths. A layer whose legacy lines are already at least this fine
+    (interface_ps_m <= screening_interface_factor L_s and coarse_ps_m <= screening_ps_factor L_s,
+    e.g. a lightly doped semiconductor whose L_s is tens of nm) keeps exactly its legacy lines,
+    and dielectric/metal layers always do (their interface lines take the finer spacing of an
+    adjacent semiconductor face). bipolar_dd layers also keep their legacy lines: their n_bg is a
+    doping whose Debye length sets neither the width of an inversion layer nor that of a p-n depletion
+    layer (LayeredDevsimBuilder(junction_band=...) refines junctions).
+
+    "legacy": the v0.15.1 lines exactly -- interface_ps_m at every layer face, coarse_ps_m at
+    min(interface_zone_m, 0.45 t) from each face and at the midline of a layer thicker than
+    4 interface_zone_m. These are tuned for films much thicker than a screening length and
+    under-resolve degenerate accumulation/depletion layers whatever the film thickness. MEASURED on a
+    gated degenerate film (the generic gated-film cell, L_s = 0.78 nm) against an independent 1-D solve of
+    the same model (tests/test_mesh_screening_grading.py), interface density at +5 V / -3 V gate: "legacy"
+    -1.9e-2 / +1.1e-1 at both 6 nm (19 nodes) and 20 nm (47 nodes); "screening" -9.6e-5 / +3.7e-4 (6 nm,
+    204 nodes) and -9.2e-5 / +3.5e-4 (20 nm, 298 nodes), converging at second order as the factors shrink.
+
+    The x lines are unchanged by either setting (lateral screening at an inclusion's sidewall is
+    set by x_spacing_feature_edge_m)."""
     x_spacing_edge_m:          float = 30e-9    # near cell edges (peripheral grounds)
     x_spacing_feature_edge_m:  float = 1e-9     # near inclusion lateral edges
     x_spacing_feature_mid_m:   float = 2.5e-9   # inside an inclusion footprint
@@ -36,6 +72,21 @@ class Mesh2DSpec:
     # iteration -- robust for stiff degenerate gated accumulation that diverges
     # under coupled Newton). Extensible in carriers/dc_solve.py.
     dc_method:                 str   = "newton"
+    # z refinement at semiconductor faces (class docstring): "screening" | "legacy"
+    semiconductor_refinement:  str   = "screening"
+    screening_zone_factor:     float = 4.0      # refined zone = this x L_s from each face
+    screening_ps_factor:       float = 1.0 / 20.0   # spacing at the zone edge = this x L_s
+    screening_interface_factor: float = 1.0 / 40.0  # spacing at the face <= this x L_s
+
+    def __post_init__(self) -> None:
+        if self.semiconductor_refinement not in ("screening", "legacy"):
+            raise ValueError("Mesh2DSpec.semiconductor_refinement must be 'screening' or 'legacy'; "
+                             "got {!r}".format(self.semiconductor_refinement))
+        for name in ("screening_zone_factor", "screening_ps_factor", "screening_interface_factor"):
+            v = float(getattr(self, name))
+            if not (v > 0.0 and v < float("inf")):
+                raise ValueError("Mesh2DSpec.{} must be finite and > 0; got {!r}".format(
+                    name, getattr(self, name)))
 
 
 @dataclass

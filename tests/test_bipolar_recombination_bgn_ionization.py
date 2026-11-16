@@ -294,7 +294,7 @@ def test_auger_low_injection_lifetime(polarity):
     eq_min = NI * NI / (0.5 * N0 + math.sqrt(0.25 * N0 * N0 + NI * NI))
     tau_meas = (minority - eq_min) / G
     tau_A = 1.0 / ((CN_DS if polarity == "n" else CP_DS) * N0 * N0)
-    assert tau_meas == pytest.approx(tau_A, rel=1e-6)
+    assert tau_meas == pytest.approx(tau_A, rel=1e-6, abs=0)
     assert 1e3 / tau_meas > 1e9                                # ON is load-bearing
 
 
@@ -379,14 +379,14 @@ def test_bgn_model_formulas_match_the_papers():
                                                    BGN_SI_SLOTBOOM_1977)
     for Ncm in (1e15, 1e17, 1e18, 1e19, 1e20):
         assert float(BGN_SI_SLOTBOOM_1977.delta_Eg_eV(Ncm * 1e6)) == pytest.approx(
-            _dEg_slotboom(Ncm), rel=1e-12)
+            _dEg_slotboom(Ncm), rel=1e-12, abs=0)
         assert float(BGN_SI_KLAASSEN_1992.delta_Eg_eV(Ncm * 1e6)) == pytest.approx(
-            _dEg_slotboom(Ncm, 6.92e-3, 1.3e17), rel=1e-12)
+            _dEg_slotboom(Ncm, 6.92e-3, 1.3e17), rel=1e-12, abs=0)
         assert float(BGN_SI_DEL_ALAMO_1985.delta_Eg_eV(Ncm * 1e6)) == pytest.approx(
             _dEg_del_alamo(Ncm), rel=1e-12, abs=0.0)
     tiny = 1e17 * math.exp(-30.0) * 1e6                              # x = -30
     exact = 9e-3 * 0.5 / (math.sqrt(900.5) + 30.0)
-    assert float(BGN_SI_SLOTBOOM_1977.delta_Eg_eV(tiny)) == pytest.approx(exact, rel=1e-13)
+    assert float(BGN_SI_SLOTBOOM_1977.delta_Eg_eV(tiny)) == pytest.approx(exact, rel=1e-13, abs=0)
     assert float(BGN_SI_SLOTBOOM_1977.delta_Eg_eV(0.0)) == 0.0
 
 

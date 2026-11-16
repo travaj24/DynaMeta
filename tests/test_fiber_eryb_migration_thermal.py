@@ -188,7 +188,7 @@ def test_closed_form_decay_matches_a_brute_force_march_of_the_models_own_rhs():
     assert truncated == pytest.approx(integral, rel=2e-5)
     # ... and tau_bar is that expression's infinite-horizon limit
     assert m.mean_lifetime_s == pytest.approx(
-        m.amp_fast / m.rate_fast_per_s + m.amp_slow / m.rate_slow_per_s, rel=1e-14)
+        m.amp_fast / m.rate_fast_per_s + m.amp_slow / m.rate_slow_per_s, rel=1e-14, abs=0)
     assert m.mean_lifetime_s > truncated
 
 
@@ -200,10 +200,10 @@ def test_decay_closed_form_hits_its_three_limits():
     m = yb_two_pool_decay(coupled_fraction=0.7, migration_per_s=0.0, **kw)
     assert m.rate_fast_per_s == pytest.approx(a, rel=1e-12)
     assert m.rate_slow_per_s == pytest.approx(d, rel=1e-12)
-    assert m.amp_fast == pytest.approx(0.7, rel=1e-12)
+    assert m.amp_fast == pytest.approx(0.7, rel=1e-12, abs=0)
     # f = 1: ONE pool, the textbook quenched single exponential Laroche invert
     m1 = yb_two_pool_decay(coupled_fraction=1.0, migration_per_s=0.0, **kw)
-    assert m1.mean_lifetime_s == pytest.approx(1.0 / a, rel=1e-12)
+    assert m1.mean_lifetime_s == pytest.approx(1.0 / a, rel=1e-12, abs=0)
     # W -> infinity: fully mixed, the slow rate becomes the POPULATION-WEIGHTED d + f k N_Er
     mm = yb_two_pool_decay(coupled_fraction=0.7, migration_per_s=1.0e12, **kw)
     assert mm.rate_slow_per_s == pytest.approx(d + 0.7 * (a - d), rel=1e-4)
@@ -217,15 +217,15 @@ def test_the_exact_inversion_round_trips_and_reproduces_chengs_two_coefficients(
     m = yb_two_pool_decay(tau_yb_s=a.tau_yb_s, n_er_m3=a.n_er_m3, k_tr_m3_s=inv["k_tr_m3_s"],
                           coupled_fraction=inv["coupled_fraction"],
                           migration_per_s=inv["migration_per_s"])
-    assert m.tau_fast_s == pytest.approx(a.tau_fast_s, rel=1e-10)
-    assert m.tau_slow_s == pytest.approx(a.tau_slow_s, rel=1e-10)
+    assert m.tau_fast_s == pytest.approx(a.tau_fast_s, rel=1e-10, abs=0)
+    assert m.tau_slow_s == pytest.approx(a.tau_slow_s, rel=1e-10, abs=0)
     assert m.amp_fast == pytest.approx(a.amp_fast, rel=1e-10)
     # THE claim: one parameter set carries BOTH coefficients the anchor collection extracts from
     # this single measurement -- the fast-pair 3.07e-21 and the ensemble-yield 1.20e-22.
-    assert inv["k_tr_m3_s"] == pytest.approx(3.065e-21, rel=0.01)
+    assert inv["k_tr_m3_s"] == pytest.approx(3.065e-21, rel=0.01, abs=0)
     assert m.transfer_yield == pytest.approx(a.transfer_yield, rel=1e-3)
     k_ensemble = (m.transfer_yield / (1.0 - m.transfer_yield)) / (a.n_er_m3 * a.tau_yb_s)
-    assert k_ensemble == pytest.approx(1.199e-22, rel=0.02)
+    assert k_ensemble == pytest.approx(1.199e-22, rel=0.02, abs=0)
     assert inv["k_tr_m3_s"] / k_ensemble == pytest.approx(25.6, rel=0.05)
     # ... and that is where the shipped constant comes from
     assert inv["migration_per_s"] == pytest.approx(222.4, rel=0.01)
@@ -287,7 +287,7 @@ def test_migration_moves_the_transfer_yield_in_the_right_direction():
           for w in (0.0, 1.0e2, 1.0e3, 1.0e4, 1.0e6)]
     assert all(b > a for a, b in zip(ys, ys[1:])), ys
     d, a = 1.0 / kw["tau_yb_s"], 1.0 / kw["tau_yb_s"] + kw["k_tr_m3_s"] * kw["n_er_m3"]
-    assert ys[0] == pytest.approx(0.5 * (a - d) / a, rel=1e-12)
+    assert ys[0] == pytest.approx(0.5 * (a - d) / a, rel=1e-12, abs=0)
     assert ys[-1] == pytest.approx(0.5 * (a - d) / (d + 0.5 * (a - d)), rel=1e-3)
 
 
@@ -314,8 +314,6 @@ def test_shipped_temperature_constants_reproduce_their_own_anchors():
     assert float(st.upper_fraction(300.0)) == pytest.approx(0.07, abs=1e-9)
     assert float(st.upper_fraction(400.0)) == pytest.approx(0.13, abs=1e-9)
     assert float(st.factor(300.0, 300.0)) == 1.0
-    assert float(st.factor(400.0, 300.0)) == pytest.approx(0.93 / 0.87 ** -1 * 0.87 / 0.93 * 1.0,
-                                                           rel=1e-9) or True
     assert float(st.factor(400.0, 300.0)) == pytest.approx(0.87 / 0.93, rel=1e-9)
     assert 500.0 < st.delta_E_over_k_K / 1.4388 < 650.0            # a Yb 2F5/2 Stark splitting
     # the band is a ZERO-LINE model: 940 nm and 1018 nm are outside it, as Cheng's measured
@@ -422,7 +420,7 @@ def test_the_device_fit_recovers_a_synthetic_f_and_k_to_5_percent(f_true, k_true
                              migration_per_s=W_MIG_PHOSPHOSILICATE_PER_S,
                              f0=0.80, k_tr0_m3_s=6.0e-22, observe=_observe, max_nfev=25)
     assert fit.coupled_fraction == pytest.approx(f_true, rel=0.05), str(fit)
-    assert fit.k_tr_m3_s == pytest.approx(k_true, rel=0.05), str(fit)
+    assert fit.k_tr_m3_s == pytest.approx(k_true, rel=0.05, abs=0), str(fit)
 
 
 def test_one_observable_leaves_the_split_undetermined_and_the_fit_says_so():
@@ -434,8 +432,8 @@ def test_one_observable_leaves_the_split_undetermined_and_the_fit_says_so():
     routine must say so -- an astronomically large condition number and a REFUSAL to quote an
     error bar (inf), rather than the small-looking sigma a naive `inv(J^T J)` on a singular matrix
     hands back. Adding the 1-um fraction must make the problem well conditioned and both error
-    bars finite, while the product f k_tr -- which the power alone DOES fix -- comes back either
-    way."""
+    bars finite. What the power alone fixes is the power: on this device it does NOT pin the
+    product f k_tr (see the last gate)."""
     truth = _observe(_synthetic_build(0.45, 2.0e-21))
     power_only = eryb_fit_to_device(
         _synthetic_build, DeviceTarget(p_out_W=truth["p_out_W"]),
@@ -454,9 +452,13 @@ def test_one_observable_leaves_the_split_undetermined_and_the_fit_says_so():
     # parameter was simply unreachable, which is a different (and fixable) failure
     d = np.abs(power_only.degeneracy_direction)
     assert d.min() > 0.2, d
-    # and the product comes back from EITHER fit, because it is what the power fixes
-    assert power_only.effective_f_k_m3_s == pytest.approx(0.45 * 2.0e-21, rel=0.25)
-    assert both.effective_f_k_m3_s == pytest.approx(0.45 * 2.0e-21, rel=0.10)
+    # the power-only fit reproduces the power it was given (MEASURED ln error 2.2e-4 when its
+    # 10-evaluation budget runs out; gated at 1e-3), but NOT the product: along f k_tr = 9e-22 the
+    # output power moves 23 % between f = 0.30 and 0.95 (the uncoupled pool's 1-um ASE takes pump),
+    # so from f0 = 0.80 it lands on f k_tr = 5.0e-22 (MEASURED; 3e-7 ln residual at 30 evaluations).
+    # The product needs the second observable:
+    assert power_only.model["p_out_W"] == pytest.approx(truth["p_out_W"], rel=1e-3, abs=0)
+    assert both.effective_f_k_m3_s == pytest.approx(0.45 * 2.0e-21, rel=0.10, abs=0)
 
 
 def test_an_upper_bound_target_is_scored_one_sided():

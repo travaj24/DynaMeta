@@ -60,7 +60,7 @@ def test_valley_table_and_api_guards():
     BEFORE installing anything."""
     assert check_valley_table(SI) == SI
     assert sum(v.dos_share for v in SI) == 1.0
-    assert [v.m_z_kg / V.M_E for v in SI] == pytest.approx([0.916, 0.19], rel=1e-15)
+    assert [v.m_z_kg / V.M_E for v in SI] == pytest.approx([0.916, 0.19], rel=1e-15, abs=0)
     for bad in ((), (ValleySet("a", V.MN, 0.5),), (ValleySet("a", -1.0, 1.0),), (ValleySet("a", V.MN, 0.0),),
                 (ValleySet("a", V.MN, 0.6), ValleySet("b", V.MN, 0.6))):
         with pytest.raises(ValueError):
@@ -366,7 +366,7 @@ def test_diode_transport():
     si = V.diode(gamma_fracs=(1.0, 0.5), biases=bias, valleys=SI, probe=probe)
     for b in bias[1:]:
         key = "I" if b > 0 else "I_rec"
-        assert twin[b][key] == pytest.approx(iso[b][key], rel=1e-12)
+        assert twin[b][key] == pytest.approx(iso[b][key], rel=1e-12, abs=0)
         for q in ("Electrons", "Holes"):
             assert np.max(np.abs(twin[b]["arrays"][q] / iso[b]["arrays"][q] - 1.0)) <= 1e-12
         ch = {fr: si[fr][b][key] / cl[b][key] - 1.0 for fr in (1.0, 0.5)}

@@ -81,7 +81,7 @@ def test_slotboom_total_basis_is_unchanged():
     assert BGN_SI_SLOTBOOM_1977.doping_basis == "total"
     for k, (nd, na) in enumerate(_NODES):
         x = math.log((nd + na) / 1e17)
-        assert f["dEg_eV"][k] == pytest.approx(9e-3 * (x + math.sqrt(x * x + 0.5)), rel=1e-12)
+        assert f["dEg_eV"][k] == pytest.approx(9e-3 * (x + math.sqrt(x * x + 0.5)), rel=1e-12, abs=0)
     assert np.array_equal(BGN_SI_SLOTBOOM_1977.basis_density_m3(ND, NA), ND + NA)
 
 

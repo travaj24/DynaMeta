@@ -54,7 +54,7 @@ def test_harmonic_spectrum_band_powers_exact():
     # a cosine of amplitude a at an exact bin has |rfft|^2 = (a N / 2)^2; only that bin is in-band,
     # so band-power RATIOS equal the amplitude-squared ratios to machine precision.
     assert hs["P_2w"] / hs["P_w"] == pytest.approx((a2 / a1) ** 2, rel=1e-9)
-    assert hs["P_3w"] / hs["P_w"] == pytest.approx((a3 / a1) ** 2, rel=1e-9)
+    assert hs["P_3w"] / hs["P_w"] == pytest.approx((a3 / a1) ** 2, rel=1e-9, abs=0)
     assert hs["power_type"] == "e2_density"
     # band edges follow the documented constant-fractional convention n*f0*(1 +- bw)
     assert hs["bands_hz"][2] == pytest.approx((2 * f0 * 0.85, 2 * f0 * 1.15), rel=1e-12)

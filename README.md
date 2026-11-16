@@ -144,6 +144,48 @@ shift_nm = resonance_shift(lam, spectrum("patch-2V"), spectrum("patch+2V"))
 print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 ```
 
+## What's new in v0.16
+
+v0.16.0 extends the gated thin-film path (carriers, Schrodinger-Poisson, quantum and
+nonlocal optics) and changes a few defaults. Every changed default has a keyword that
+restores the v0.15.1 behaviour; the full list with measured sizes is in
+[docs/audit/2026-11-15-v0.16.0-release.md](docs/audit/2026-11-15-v0.16.0-release.md).
+
+Changed defaults (old behaviour in brackets):
+
+- RCWA bridge: `formulation='auto'` (Li's rule on metallic / high-contrast 1-D cells in TM)
+  and `raster_sampling='area'` [`formulation='laurent'`, `raster_sampling='point'`].
+- `run_pipeline` gives layered optical solvers the carrier solve's native z grid
+  [`carrier_solve_kwargs={"grid_n_z": 32}`].
+- The 2-D DEVSIM mesh grades semiconductor faces to the screening length -- more accurate,
+  slower [`Mesh2DSpec(semiconductor_refinement="legacy")`].
+- An edge electrode on an equilibrium film is the film's Fermi-level reference, not a pinned
+  column [`Electrode(..., pin_potential=True)`].
+- `SchrodingerPoissonCarrier`: `fermi_level="model"`, `gate_map="face_field"`
+  [`"bulk3d_T0"`, `"flat_band_excess"`]; the depletion sign error is fixed.
+- `IntersubbandEffect(z_response="subbands")` [`"drude_plus_subbands"`, deprecated].
+- Adjacent unlabelled `HydroLayer`s raise [`conductor_id=`, or `stack_rt(allow_walls=True)`].
+- Differentiable RCWA (`rcwa_stack_RT` / `rcwa_stack_jones`): `formulation='auto'` where lumenairy's Li rule
+  traces under JAX (5.51) [`formulation='laurent'`].
+
+New, opt-in: `KaneBand` electrostatics; `FilmInterfaceTraps`, fixed / bulk charges and gate
+work functions; `DualGateSchrodingerPoisson` (finite barriers, LDA, traps);
+`EquilibriumDensityGradient`; `GateLeakage`; `optics.quantum_film` and
+`optics.quantum_film_pipeline`; `optics.fem_2d_tm` (2-D periodic TM FEM, with a hydrodynamic
+conductor layer); `BoundaryScattering` / `BandFillingBackground`; `dynameta.measurement`.
+
+New material presets for epsilon-near-zero layers, each parameter a cited literature value:
+doped oxides (`materials.tco_presets`: `azo`, `gzo`, `in_cdo`, `ito`, `fto`), metallic nitrides,
+doped mid-IR InAs / InAsSb and phonon-polariton crystals (`materials.enz_presets`: `tin`, `zrn`,
+`inas`, `inassb`, `sic`, `aln`, `sio2`), with the lattice / oscillator permittivity models and oxide
+scattering laws behind them. Guide, sources and validity: [docs/enz_presets.md](docs/enz_presets.md).
+
+Lumenairy: the floor stays `lumenairy>=5.22`. Recommended: >= 5.50.1 (analytic Li route on
+RCWA shapes) and >= 5.51 for PMM geometric grading
+(`degree=8, pmm_kwargs={'grade': 'geometric', 'elements_per_region': 12}`). The bridge is
+verified through 5.51 (checked against the 5.51.0 source merged on lumenairy's main; re-check on the published
+wheel). On lumenairy 5.50.x the PMM bridge refuses gain layers (that release's PMM gets them wrong).
+
 ## Status
 
 v0.9.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
@@ -258,4 +300,5 @@ Completed phases (linked as records):
 [docs/physics_depth_roadmap.md](docs/physics_depth_roadmap.md),
 [docs/reliability_roadmap.md](docs/reliability_roadmap.md), and
 [docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md); the independent audit:
-[docs/audit/](docs/audit/).
+[docs/audit/](docs/audit/). Material guides: [docs/dielectrics.md](docs/dielectrics.md) (gate
+dielectrics), [docs/enz_presets.md](docs/enz_presets.md) (ENZ material presets).

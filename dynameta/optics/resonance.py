@@ -140,9 +140,9 @@ def lorentzian_eps(omega_rad_s, eps_inf, delta_eps, omega0, gamma):
     ``delta_eps`` is the oscillator strength (static contribution ``eps(0)-eps_inf``), ``omega0``
     the resonance frequency [rad/s], ``gamma`` the linewidth [rad/s].  Under ``exp(-i*omega*t)`` a
     real ``omega > 0`` with ``gamma >= 0`` gives ``Im(eps) >= 0`` (passive).  Accepts complex
-    ``omega``."""
-    w = np.asarray(omega_rad_s, dtype=np.complex128)
-    return eps_inf + delta_eps * omega0 * omega0 / (omega0 * omega0 - w * w - 1j * w * gamma)
+    ``omega``.  The Lorentz term is materials.lattice_optical.lorentz_susceptibility (the one kernel)."""
+    from dynameta.materials.lattice_optical import lorentz_susceptibility
+    return eps_inf + lorentz_susceptibility(omega_rad_s, delta_eps, omega0, gamma)
 
 
 def _eval_eps(spec: EpsSpec, omega: complex) -> complex:

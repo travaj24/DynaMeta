@@ -95,11 +95,23 @@ import numpy as np
 from dynameta.optics.lumenairy_bridge._common import _REQUIRED
 from dynameta.optics.lumenairy_bridge._common import \
     require_halfspace_keywords as _require_halfspace_keywords
+from dynameta.optics.lumenairy_bridge._common import lumenairy_has as _lumenairy_has
+from dynameta.optics.lumenairy_bridge._common import \
+    refuse_gain_half_space as _refuse_gain_half_space
 from dynameta.optics.lumenairy_bridge._common import require_angles_rad as _require_angles_rad
 from dynameta.optics.lumenairy_bridge._common import require_lumenairy as _require_lumenairy
+from dynameta.optics.lumenairy_bridge._common import \
+    require_pmm_gain_support as _require_pmm_gain_support
 
 __all__ = ["rcwa_grating_RT", "rcwa_stack_RT", "rcwa_stack_jones", "pmm_stack_RT",
-           "pmm_stack_jones", "drude_eps_jax"]
+           "pmm_stack_jones", "drude_eps_jax", "default_stack_formulation"]
+
+
+def default_stack_formulation() -> str:
+    """The factorization rcwa_stack_RT / rcwa_stack_jones use when `formulation` is not given:
+    'auto' where the installed lumenairy traces Li's rule (feature row 'rcwa_li_traced'), else
+    'laurent' (see rcwa_stack_RT)."""
+    return "auto" if _lumenairy_has("rcwa_li_traced") else "laurent"
 
 # HALF-SPACE ARGUMENT ORDER (finding V-4): `n_substrate` / `n_superstrate` are KEYWORD-ONLY on
 # every public entry point below. These signatures mirror lumenairy's upstream SUB-FIRST order,
@@ -215,6 +227,7 @@ def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength
     _require_angles_rad("rcwa_grating_RT", polar=(("angle", angle),))   # audit V-25
     _require_jax_x64("rcwa_grating_RT", eps_ridge, eps_groove, n_substrate, n_superstrate,
                      depth, wavelength, angle)                      # audit R-14
+    _refuse_gain_half_space("rcwa_grating_RT", n_superstrate, n_substrate)
     lum = _require_lumenairy()
     orders, R, T = lum.rcwa_efficiency_1d(
         period, eps_ridge ** 0.5, eps_groove ** 0.5, n_substrate, n_superstrate, depth,
@@ -237,7 +250,13 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
 
     Thickness passes through raw (float or traced jax scalar -- lumenairy skips the range
     guard on a trace). Patterned specs must meet lumenairy's sampling bound
-    Sx >= 4*n_orders_x + 1 (and y alike on 2-D stacks) -- enforced loudly upstream."""
+    Sx >= 4*n_orders_x + 1 (and y alike on 2-D stacks) -- enforced loudly upstream.
+
+    EVERY add_layer call names its factorization (v0.16): `formulation` on the patterned eps_cell
+    layers, 'laurent' on the uniform and tensor layers (which have no choice: every rule is the
+    same on a uniform layer, and tensor cells carry their own). lumenairy 5.51 changes add_layer's
+    own default to 'auto', so a call that relied on the default would change meaning with the
+    installed release."""
     smx = 4 * int(stack.n_orders_x) + 1
     smy = (4 * int(stack.n_orders_y) + 1) if is_2d else 1
     for eps, thickness in layers:
@@ -248,9 +267,9 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
             # homogeneous modes (no lifted constant-cell eigensolve); a concrete number takes
             # the complex() uniform path.
             if _is_jaxish(eps):
-                stack.add_layer(thickness, eps=eps)
+                stack.add_layer(thickness, eps=eps, formulation="laurent")
             else:
-                stack.add_layer(thickness, eps=complex(eps))
+                stack.add_layer(thickness, eps=complex(eps), formulation="laurent")
         elif nd in (1, 2) and tuple(np.shape(eps)) != (3, 3):
             stack.add_layer(thickness, eps_cell=eps, formulation=formulation)
         elif tuple(np.shape(eps)) == (3, 3):
@@ -260,9 +279,9 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
                                          (smx, smy, 3, 3))
             else:
                 tcell = np.broadcast_to(np.asarray(eps, dtype=complex), (smx, smy, 3, 3)).copy()
-            stack.add_layer(thickness, eps_tensor_cell=tcell)
+            stack.add_layer(thickness, eps_tensor_cell=tcell, formulation="laurent")
         elif nd == 4:
-            stack.add_layer(thickness, eps_tensor_cell=eps)
+            stack.add_layer(thickness, eps_tensor_cell=eps, formulation="laurent")
         else:
             raise ValueError(
                 "{}: layer eps spec has unsupported shape {} -- expected a scalar, a (Sx,) / "
@@ -278,6 +297,9 @@ def _solve_rcwa_stack(layers, wavelength, *, n_substrate, n_superstrate, period_
     lum = _require_lumenairy()
     _require_static(fn_name, n_substrate=n_substrate, n_superstrate=n_superstrate,
                     period_x=period_x, period_y=period_y)
+    _refuse_gain_half_space(fn_name, n_superstrate, n_substrate)
+    if formulation is None:
+        formulation = default_stack_formulation()
     if period_y is None:
         stack = lum.RCWAStack(period_x, n_superstrate=complex(n_superstrate),
                               n_substrate=complex(n_substrate), n_orders=int(n_orders))
@@ -296,7 +318,7 @@ def _solve_rcwa_stack(layers, wavelength, *, n_substrate, n_superstrate, period_
 
 def rcwa_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
                   n_superstrate=_REQUIRED, period_x, period_y=None,
-                  theta=0.0, phi=0.0, n_orders=11, n_orders_y=None, formulation="laurent",
+                  theta=0.0, phi=0.0, n_orders=11, n_orders_y=None, formulation=None,
                   row=0):
     """Differentiable order-summed (R, T) of a patterned multilayer for ONE incident lab
     polarization (row 0 = E_x, 1 = E_y) -- a scalar FOM ingredient for jax.grad.
@@ -311,7 +333,26 @@ def rcwa_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     half-space indices and the periods (TypeError on a jax value -- rcwa_grating_RT and
     pmm_stack_RT trace the half-space indices). A 1-D stack (period_y=None) is genuinely
     cheaper and better-conditioned than a y-degenerate 2-D one -- keep lamellar problems
-    1-D."""
+    1-D.
+
+    FACTORIZATION (formulation, applied to every patterned eps_cell layer; uniform and tensor layers
+    always take 'laurent', where every rule is the same). The default (None) is lumenairy's 'auto'
+    where Li's rule traces -- feature row 'rcwa_li_traced', decided by a probe (lumenairy 5.51.0,
+    whose 'auto' resolves a traced cell exactly as its NumPy twin: 'li' on a 1-D eps_cell) -- and
+    'laurent' elsewhere (lumenairy 5.22 .. 5.50, where 'auto' does not exist and jax.grad through
+    'li' raises TracerArrayConversionError). Either way one default serves the NumPy call and the
+    traced call, so a traced gradient and its concrete finite-difference check solve the same
+    discretization. MEASURED on a metal strip over a mirror in TM (40 nm strip of eps -60+4i on 160
+    of 401 cell samples of a 400 nm period, over 14 nm of eps 4 on an eps -120+20i mirror, substrate
+    1.45; 1200 nm, n_orders 40, row 0): R = 0.898233 under 'auto' / 'li' (jax.grad with respect to
+    Re eps of the strip 3.2243444e-3 against a NumPy central difference 3.2243441e-3) and 0.916054
+    under 'laurent' -- the value the default gives below 5.51.0 and the one v0.15.x gave on every
+    release (gate: tests/test_lumenairy_feature_detection.py). Laurent converges slowly and from far
+    away for metal with E across the walls (row 0 on a 1-D stack): on a release without the feature
+    pass formulation='li' explicitly for a CONCRETE cell (a traced one raises there). On 5.51 a
+    TRACED cell with several y-samples on a 1-D stack (period_y=None) under 'auto' raises in
+    lumenairy (a tracer cannot say whether it varies along y): pass a (Sx,) / (Sx, 1) cell or an
+    explicit formulation."""
     _require_halfspace_keywords("rcwa_stack_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     _reject_row(row, "rcwa_stack_RT")                                   # audit V-8
@@ -327,12 +368,13 @@ def rcwa_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
 def rcwa_stack_jones(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
                      n_superstrate=_REQUIRED, period_x,
                      period_y=None, theta=0.0, phi=0.0, n_orders=11, n_orders_y=None,
-                     formulation="laurent"):
+                     formulation=None):
     """Differentiable full far field of a patterned multilayer: (orders, R_eff, T_eff,
     jones_r, jones_t) with per-order (2, N) efficiencies and the zeroth-order (2, 2) lab-basis
     Jones matrices -- for phase-bearing FOMs (the modulator observable r = jones_r[row, row])
-    and per-order targets. Same layer convention, tracing surface, static-argument policy and
-    KEYWORD-ONLY half-space indices (audit V-4) as rcwa_stack_RT."""
+    and per-order targets. Same layer convention, tracing surface, static-argument policy,
+    FACTORIZATION default (None: 'auto' where Li's rule traces, else 'laurent'; see
+    rcwa_stack_RT) and KEYWORD-ONLY half-space indices (audit V-4) as rcwa_stack_RT."""
     _require_halfspace_keywords("rcwa_stack_jones", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     res = _solve_rcwa_stack(layers, wavelength,
@@ -350,14 +392,18 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
                      *[t for _s, t in layers])                            # audit R-14
     _require_angles_rad(fn_name, polar=(("angle", angle),))               # audit V-25
     lum = _require_lumenairy()
+    _refuse_gain_half_space(fn_name, n_superstrate, n_substrate)
     if _is_jaxish(period):
         raise TypeError(
             "{}: period must be a concrete number (the PMM union grid / segment walls are "
             "frozen NumPy geometry; only the segment eps VALUES, thicknesses, angle and "
             "half-space indices trace -- the wavelength is static too on lumenairy >= 5.30, "
             "see the docstring).".format(fn_name))
+    # far_field_orders= (present at the 5.22 floor), not its `n_orders` alias: the far-field order
+    # COUNT only, never an accuracy knob (lumenairy 5.51 states it in the PMMStack docstring);
+    # bit-identical to the alias, which every release resolves to the same value
     st = lum.PMMStack(period, n_substrate=n_substrate, n_superstrate=n_superstrate,
-                      degree=int(degree), n_orders=int(n_orders))
+                      degree=int(degree), far_field_orders=int(n_orders))
     for spec, thickness in layers:
         if isinstance(spec, (list, tuple)):
             for w, _e in spec:
@@ -367,8 +413,11 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
                         "segment eps values are differentiable. Reparameterize a moving "
                         "wall as an eps interpolation, or use the FDTD topology-opt "
                         "path.".format(fn_name))
-            st.add_layer(thickness, segments=[(float(w), e) for w, e in spec])
+            segs = [(float(w), e) for w, e in spec]
+            _require_pmm_gain_support(fn_name, [e for _w, e in segs])
+            st.add_layer(thickness, segments=segs)
         else:
+            _require_pmm_gain_support(fn_name, [spec])
             st.add_layer(thickness, eps=spec)
     st.set_source(wavelength, angle=angle)
     return st.solve()
@@ -440,6 +489,15 @@ def drude_eps_jax(model):
     if not isinstance(model, DrudeOptical):
         raise TypeError("drude_eps_jax: expected a DrudeOptical, got {!r}".format(
             type(model).__name__))
+    extra = model.options_beyond_single_pole()
+    if extra:
+        # v0.16: the closure rebuilds the plain single-pole formula, so a model with
+        # boundary scattering (anisotropic) or a density-dependent background (or any later option)
+        # would be optimized as a DIFFERENT material; refuse instead of dropping the option
+        raise NotImplementedError(
+            "drude_eps_jax: the model sets {} -- not representable by the traced single-pole Drude formula "
+            "(eps_inf - omega_p^2 / (omega^2 + i omega gamma)). Write a jax closure for that response, or use "
+            "a model without those options.".format(", ".join(repr(e) for e in extra)))
     if callable(model.m_opt_kg) or callable(model.gamma_rad_s):
         raise NotImplementedError(
             "drude_eps_jax: callable (per-density) m_opt_kg / gamma_rad_s run host-side numpy "

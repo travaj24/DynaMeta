@@ -223,7 +223,7 @@ def test_c10_degenerate_contact_carries_the_fermi_dirac_built_in_offset():
     mesh_d = _bipolar_1d_device("c10_fd_df", True, n0, N_c, n_i)   # the v0.15.0 default ('fermi_dirac')
     try:
         assert "EquilibriumPotential" in devsim.get_node_model_list(device="c10_fd_df", region="bulk")
-        assert _pinned_offset_V("c10_fd_df") == pytest.approx(off_fd, rel=1e-12)
+        assert _pinned_offset_V("c10_fd_df") == pytest.approx(off_fd, rel=1e-12, abs=0)
     finally:
         _cleanup("c10_fd_df", mesh_d)
     assert off_bz == pytest.approx(-V_T_SI * np.log(u * N_c / n_i), rel=1e-9)   # the legacy value

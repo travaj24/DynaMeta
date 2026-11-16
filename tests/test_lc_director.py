@@ -18,7 +18,7 @@ K, DEPS, EP, D = 6.5e-12, 11.0, 7.0, 5e-6     # ~5CB nematic cell
 
 def test_threshold_matches_analytic():
     Vth = freedericksz_threshold_V(K, DEPS)
-    assert Vth == pytest.approx(np.pi * np.sqrt(K / (EPS0 * DEPS)), rel=1e-12)
+    assert Vth == pytest.approx(np.pi * np.sqrt(K / (EPS0 * DEPS)), rel=1e-12, abs=0)
 
 
 def test_threshold_requires_positive_anisotropy():
@@ -153,11 +153,11 @@ def test_span_weights_reduce_to_trapezoid_on_a_node_grid():
     from dynameta.carriers.lc_director import _span_weights
     for x in (np.linspace(0.0, 1.0, 7), np.array([0.0, 0.1, 0.35, 0.8, 1.0])):
         w = _span_weights(x, 0.0, 1.0)
-        assert w.sum() == pytest.approx(1.0, rel=1e-15)
+        assert w.sum() == pytest.approx(1.0, rel=1e-15, abs=0)
         y = 3.0 * x + 0.5                                    # trapezoid is exact for a line
-        assert float(np.sum(w * y)) == pytest.approx(2.0, rel=1e-14)
+        assert float(np.sum(w * y)) == pytest.approx(2.0, rel=1e-14, abs=0)
     xm = np.array([0.125, 0.375, 0.625, 0.875])              # midpoints only
-    assert _span_weights(xm, 0.0, 1.0).sum() == pytest.approx(1.0, rel=1e-15)
+    assert _span_weights(xm, 0.0, 1.0).sum() == pytest.approx(1.0, rel=1e-15, abs=0)
 
 
 def test_chiral_bvp_poisson_normalisation_matches_the_tilt_solver():
@@ -230,7 +230,7 @@ def test_bvp_freedericksz_threshold_and_branch():
 
 def test_flexo_zero_when_coeffs_zero():
     th = np.linspace(0.2, 1.2, 11); dth = np.gradient(th)
-    assert np.allclose(flexo_p_along_field(th, dth, 0.0, 0.0), 0.0)
+    assert np.allclose(flexo_p_along_field(th, dth, 0.0, 0.0), 0.0, atol=0)
 
 
 def test_director_to_extra_fields_bridge():
@@ -318,7 +318,7 @@ def test_haller_temperature_scaling():
     assert haller_order_parameter(T_NI, T_NI) == 0.0                       # S=0 at the transition
     assert haller_order_parameter(400.0, T_NI) == 0.0                      # and above
     # K ~ S^2 -> reduces to K_ref at T_ref, falls with T
-    assert K_of_temperature(17e-12, 300.0, T_ref_K=300.0, T_NI_K=T_NI) == pytest.approx(17e-12)
+    assert K_of_temperature(17e-12, 300.0, T_ref_K=300.0, T_NI_K=T_NI) == pytest.approx(17e-12, rel=1e-6, abs=0)
     assert K_of_temperature(17e-12, 360.0, T_ref_K=300.0, T_NI_K=T_NI) < 17e-12
     # gamma1 Arrhenius -> reduces to gamma_ref at T_ref, falls with T
     assert gamma1_of_temperature(0.085, 300.0, T_ref_K=300.0, E_a_eV=0.4) == pytest.approx(0.085)
@@ -421,7 +421,7 @@ def test_c14_elliptic_B_is_exact_up_to_the_bisection_bracket():
             eta = np.sin(tm) ** 2
             eps_m = ep + dEps * eta
             ref = np.sqrt(eps_m / (dEps * ep)) * elliprf(0.0, np.cos(tm) ** 2, 1.0 + g * eta)
-            assert _B(tm, dEps, ep) == pytest.approx(ref, rel=1e-13), (dEps, ep, np.degrees(tm))
+            assert _B(tm, dEps, ep) == pytest.approx(ref, rel=1e-13, abs=0), (dEps, ep, np.degrees(tm))
             # direct quadrature, split so the endpoint singularity sits on an interval boundary
             f = lambda p: (np.sqrt(eps_m / (dEps * (ep + dEps * eta * np.sin(p) ** 2)))
                            / np.sqrt(np.cos(tm) ** 2 + eta * np.cos(p) ** 2))   # 1 - eta sin^2 p
@@ -430,7 +430,7 @@ def test_c14_elliptic_B_is_exact_up_to_the_bisection_bracket():
                          for a, b in zip(brk, brk[1:]))
             assert _B(tm, dEps, ep) == pytest.approx(direct, rel=1e-10), (dEps, ep, np.degrees(tm))
     # theta_m -> 0 limit: K(0) = pi/2, so V -> V_th exactly
-    assert _B(1e-9, DEPS, EP) == pytest.approx(0.5 * np.pi / np.sqrt(DEPS), rel=1e-15)
+    assert _B(1e-9, DEPS, EP) == pytest.approx(0.5 * np.pi / np.sqrt(DEPS), rel=1e-15, abs=0)
 
 
 def test_c14_over_drive_tilt_obeys_deulings_law():

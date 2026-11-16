@@ -1,6 +1,7 @@
 """
-Resample an unstructured field (DEVSIM nodes) onto a regular grid. Pure numpy
-+ scipy; no solver imports. ndim-general (2D or 3D nodes), generalizing the
+Resample an unstructured field (DEVSIM nodes) onto a regular grid
+(resample_to_grid), or a 2-D tensor-grid node set onto its native y lines with
+a uniform x axis (resample_tensor_grid). Pure numpy + scipy; no solver imports. ndim-general (2D or 3D nodes), generalizing the
 old stage1_carriers/io.py:_resample_region_to_grid (which was 2D-only and
 baked into Stage 1). The bridge owns resampling now, so a bring-your-own
 carrier solver can hand over raw nodes and let the bridge grid them.
@@ -8,9 +9,75 @@ carrier solver can hand over raw nodes and let the bridge grid them.
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+
+# Node coordinates [m] are binned onto this lattice to decide whether a node set is a tensor grid
+# (DEVSIM writes each mesh-line coordinate once, so equal lines agree to the last bit; the bin only
+# absorbs a representation difference far below any mesh spacing).
+TENSOR_GRID_ROUND_M = 1e-15
+
+
+class NotATensorGridError(ValueError):
+    """resample_tensor_grid: the node set is not the full tensor product of its unique x and y
+    coordinates (e.g. a region whose outline is not a rectangle of mesh lines)."""
+
+
+def resample_tensor_grid(x_nodes, y_nodes, fields: Dict[str, np.ndarray],
+                         grid_n_x: int) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """Grid scalar node fields of a 2-D TENSOR-GRID node set on its NATIVE y lines, uniform in x.
+
+    Args:
+      x_nodes, y_nodes : (N,) node coordinates [m]
+      fields           : {name: (N,)} scalar values at the nodes
+      grid_n_x         : number of uniform x points spanning [min x, max x]
+
+    Returns (axes, gridded): axes = {"x": (grid_n_x,) linspace, "y": (Ny,) the unique node y, ascending,
+    as stored at the nodes}; gridded = {name: (grid_n_x, Ny)} -- the layout of resample_to_grid with
+    n_per_axis = (grid_n_x, Ny). Each native y line is interpolated linearly along x (np.interp over that
+    line's nodes), so no value is interpolated across y and a grid point on a node column (always the
+    two x end points) carries the node value itself, bit for bit. That is what a through-stack (z) consumer needs from a graded mesh: the
+    resolution the carrier solver used, with no resampling error (a uniform resample of a 0.0125 nm
+    graded mesh onto 32 points misplaces a 1 nm accumulation layer).
+
+    The node set must be the full tensor product of its unique x and unique y coordinates (after binning
+    to TENSOR_GRID_ROUND_M): len(unique x) * len(unique y) == N with every pair present once. Otherwise
+    NotATensorGridError (a ValueError) is raised; resample_to_grid handles general node sets."""
+    x = np.asarray(x_nodes, dtype=np.float64).ravel()
+    y = np.asarray(y_nodes, dtype=np.float64).ravel()
+    n = x.size
+    if y.size != n or n == 0:
+        raise ValueError("resample_tensor_grid: x_nodes and y_nodes must be non-empty and the same "
+                         "length (got {} and {})".format(x.size, y.size))
+    if int(grid_n_x) < 1:
+        raise ValueError("resample_tensor_grid: grid_n_x must be >= 1, got {!r}".format(grid_n_x))
+    kx = np.round(x / TENSOR_GRID_ROUND_M).astype(np.int64)
+    ky = np.round(y / TENSOR_GRID_ROUND_M).astype(np.int64)
+    ux, ix0, ix = np.unique(kx, return_index=True, return_inverse=True)
+    uy, iy0, iy = np.unique(ky, return_index=True, return_inverse=True)
+    flat = ix * uy.size + iy
+    if ux.size * uy.size != n or np.unique(flat).size != n:
+        raise NotATensorGridError(
+            "resample_tensor_grid: {} nodes are not a tensor grid ({} unique x x {} unique y = {}, "
+            "or a coordinate pair repeats)".format(n, ux.size, uy.size, ux.size * uy.size))
+    xs = x[ix0]                                            # native coordinates, ascending
+    ys = y[iy0]
+    xg = np.linspace(xs[0], xs[-1], int(grid_n_x))
+    out: Dict[str, np.ndarray] = {}
+    for name, vals in fields.items():
+        v = np.asarray(vals, dtype=np.float64).ravel()
+        if v.size != n:
+            raise ValueError("resample_tensor_grid: field {!r} has {} values for {} nodes".format(
+                name, v.size, n))
+        tab = np.empty(ux.size * uy.size, dtype=np.float64)
+        tab[flat] = v
+        tab = tab.reshape(ux.size, uy.size)                  # (Nx_native, Ny)
+        if ux.size == 1:
+            out[name] = np.repeat(tab, int(grid_n_x), axis=0)
+        else:
+            out[name] = np.stack([np.interp(xg, xs, tab[:, j]) for j in range(uy.size)], axis=1)
+    return {"x": xg, "y": ys}, out
 
 
 def resample_to_grid(nodes_m: np.ndarray,

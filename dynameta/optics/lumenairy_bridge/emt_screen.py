@@ -34,6 +34,7 @@ from typing import Optional
 import numpy as np
 
 from dynameta.core.eps_field import EpsField
+from dynameta.core.interfaces import declare_wrapped_solver
 from dynameta.geometry.guards import require_supported_geometry, require_untapered_layer
 from dynameta.optics.lumenairy_bridge.berreman_backend import (_require_berreman,
                                                               make_lumenairy_berreman_solver)
@@ -134,6 +135,12 @@ def make_lumenairy_emt_screen_solver(*, order: int = 0, absorption: bool = False
         return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
 
     _solve.solve_sweep = _solve_sweep
+    # the screen delegates the solve to the Berreman bridge and leaves every
+    # non-lamellar entry (carrier films included) untouched, so it carries the Berreman solver's
+    # capability flags (native_carrier_grid) -- through the __wrapped__ link, so a flag added later
+    # is inherited too -- and a cache fingerprint naming its own settings plus the inner solver's.
+    declare_wrapped_solver(_solve, berreman)
+    _solve.cache_fingerprint = "emt_screen(order={})|{}".format(int(order), berreman.cache_fingerprint)
     return _solve
 
 

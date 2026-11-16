@@ -38,7 +38,7 @@ def test_quantum_well_flat_band_state():
     assert (2e-3 * Q) < s.E_hh1_J < (25e-3 * Q)                # physical 10nm-well hh1
     assert s.E_e1_J > s.E_hh1_J                                # lighter mass -> deeper confinement
     # assembly-consistency (NOT a physics oracle): E_T = E_g + E_e1 + E_hh1 - exciton
-    assert s.E_transition_J == pytest.approx(1.42 * Q + s.E_e1_J + s.E_hh1_J - 0.010 * Q)
+    assert s.E_transition_J == pytest.approx(1.42 * Q + s.E_e1_J + s.E_hh1_J - 0.010 * Q, rel=1e-6, abs=0)
 
 
 def test_quantum_well_deep_limit_matches_analytic():
@@ -47,7 +47,7 @@ def test_quantum_well_deep_limit_matches_analytic():
                      m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q, nz=1501, n_pad=1.5)
     E1 = qw.solve(0.0).E_e1_J
     E1_ana = HBAR ** 2 * np.pi ** 2 / (2.0 * ME * L ** 2)
-    assert E1 == pytest.approx(E1_ana, rel=0.05)               # infinite-well ground energy
+    assert E1 == pytest.approx(E1_ana, rel=0.05, abs=0)               # infinite-well ground energy
     # quadratic Stark coefficient vs analytic beta q^2 m F^2 L^4 / hbar^2
     Fs = np.array([0.0, 1e6, 2e6, 3e6])
     dE = np.array([qw.solve(F).E_e1_J for F in Fs]); dE -= dE[0]
@@ -253,12 +253,12 @@ def test_density_corrections_off_and_closed_forms():
     assert off._density_corrections({"n": 1e26}) == (0.0, 1.0)        # all fields zero -> off
     bgr = ElectroAbsorptionModel(bgr_coeff_J_m=3.84e-29, **kw)
     dE, amp = bgr._density_corrections({"n": 1e24})
-    assert dE == pytest.approx(-3.84e-29 * 1e8, rel=1e-12) and amp == 1.0
+    assert dE == pytest.approx(-3.84e-29 * 1e8, rel=1e-12, abs=0) and amp == 1.0
     scr = ElectroAbsorptionModel(screening_density_m3=6e27, exciton_binding_J=0.010 * Q,
                                  mott_density_m3=8e27, **kw)
     dE2, amp2 = scr._density_corrections({"n": 6e27})
-    assert amp2 == pytest.approx(0.5, rel=1e-14)                      # E_b halves at n = n_s
-    assert dE2 == pytest.approx(0.005 * Q, rel=1e-12)                 # blueshift E_b0/2
+    assert amp2 == pytest.approx(0.5, rel=1e-14, abs=0)                      # E_b halves at n = n_s
+    assert dE2 == pytest.approx(0.005 * Q, rel=1e-12, abs=0)                 # blueshift E_b0/2
     assert scr._density_corrections({"n": 9e27})[1] == 0.0            # Mott: exactly bleached
 
 

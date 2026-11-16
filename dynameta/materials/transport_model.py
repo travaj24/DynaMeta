@@ -18,14 +18,21 @@ when physics == "drift_diffusion".
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 import numpy as np
 
+from dynameta.warning_types import AdvisoryWarning
+
 if TYPE_CHECKING:                                    # pragma: no cover - typing only
     from dynameta.carriers.bipolar_options import BipolarOptions
 
+
+# v0.16: the density probe of TransportModel.dos_mass_at_bg and its relative-spread threshold
+_DOS_PROBE_FACTORS = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0)
+_DOS_MASS_RTOL = 1e-2
 
 MassFn = Callable[[np.ndarray], np.ndarray]
 MobilityFn = Callable[[np.ndarray], np.ndarray]
@@ -66,6 +73,100 @@ class TrapSpec:
         object.__setattr__(self, name, value)
 
 
+@dataclass(frozen=True)
+class KaneBand:
+    """A Kane (nonparabolic) conduction band E (1 + alpha E) = hbar^2 k^2 / (2 m0) -- v0.16.
+
+    ONE object describes the band; everything that needs it derives from it:
+      * the equilibrium electrostatics (TransportModel(band=KaneBand(...)) in the 2-D and 3-D builders, or
+        physics_equilibrium.setup_semiconductor_region(band=...)): n = N_c(m0) G(eta, alpha kT) with G the
+        finite-temperature Kane density closure of carriers.kane_band (it reduces to the parabolic F_1/2
+        closure at alpha = 0), and Phi_c0 calibrated on it (density_m3 / eta_of_density below);
+      * the screening length of the default mesh grading (screening_mesh.screening_length_m);
+      * the density-of-states mass reported to every consumer (dos_mass_kg; TransportModel sets its
+        dos_mass_kg_of_n_m3 to it);
+      * the optical (Drude) mass: optical_mass() is materials.KaneOpticalMass(m0, alpha), the Fermi-surface
+        mass m0 (1 + 2 alpha E_F) of this band.
+
+    m0_kg: band-edge (k = 0) effective mass [kg], finite and > 0. alpha_per_eV: nonparabolicity [1/eV],
+    finite and >= 0 (0 = parabolic: every closure, model string and value is then the parabolic one with
+    DOS mass m0). Temperatures default to T_REF, the temperature the equilibrium regions run at."""
+    m0_kg: float
+    alpha_per_eV: float
+
+    def __post_init__(self) -> None:
+        m, a = float(self.m0_kg), float(self.alpha_per_eV)
+        if not (np.isfinite(m) and m > 0.0):
+            raise ValueError("KaneBand.m0_kg must be finite and > 0 (kg), got {!r}".format(self.m0_kg))
+        if not (np.isfinite(a) and a >= 0.0):
+            raise ValueError("KaneBand.alpha_per_eV must be finite and >= 0 (1/eV), got {!r}".format(
+                self.alpha_per_eV))
+
+    def b(self, T_K: Optional[float] = None) -> float:
+        """alpha kT (dimensionless) at T_K (default T_REF)."""
+        from dynameta.carriers import kane_band as _KB
+        return _KB.kane_b(self.alpha_per_eV, _T(T_K))
+
+    def effective_dos_m3(self, T_K: Optional[float] = None) -> float:
+        """N_c of the band-edge mass [m^-3] at T_K (default T_REF)."""
+        from dynameta.carriers.physics_equilibrium import effective_dos_m3
+        return float(effective_dos_m3(float(self.m0_kg), _T(T_K)))
+
+    def density_m3(self, eta, T_K: Optional[float] = None):
+        """n(eta) [m^-3] of the closure the electrostatics solves: N_c(m0) kane_band.kane_closure(eta, b)."""
+        from dynameta.carriers import kane_band as _KB
+        out = self.effective_dos_m3(T_K) * np.asarray(_KB.kane_closure(eta, self.b(T_K)))
+        return float(out) if np.ndim(out) == 0 else out
+
+    def eta_of_density(self, n_m3: float, T_K: Optional[float] = None) -> float:
+        """The reduced Fermi level (E_F - E_c)/kT at density n_m3 (inverse of density_m3; rtol 1e-10). The
+        bracket's upper end is max(80, gamma_F/kT + 20), gamma_F = hbar^2 (3 pi^2 n)^(2/3)/(2 m0) >= E_F (the
+        T = 0 Kane E_F solves E_F (1 + alpha E_F) = gamma_F, and temperature lowers it), so a cold band works."""
+        from dynameta.carriers import kane_band as _KB
+        from dynameta.constants import HBAR, KB
+        n = float(n_m3)
+        gamma_F = HBAR ** 2 * (3.0 * np.pi ** 2 * n) ** (2.0 / 3.0) / (2.0 * float(self.m0_kg))
+        top = max(80.0, gamma_F / (KB * _T(T_K)) + 20.0)
+        return _KB.invert_kane_closure(n / self.effective_dos_m3(T_K), self.b(T_K), eta_max=top)
+
+    def dos_mass_kg(self, n_m3, T_K: Optional[float] = None):
+        """The density-of-states mass [kg] of this band at density n_m3: the mass m_d for which the
+        parabolic closure at the same Fermi level holds the same density, N_c(m_d) F_1/2(eta) = n, i.e.
+        m_d = m0 (G(eta, b)/F_1/2(eta))^(2/3) with eta = eta_of_density(n). T -> 0: m0 (1 + alpha E_F) (the
+        counting mass n = (2 m_d E_F/hbar^2)^(3/2)/(3 pi^2)); alpha = 0: m0 exactly. Scalar or array in n."""
+        from dynameta.carriers import kane_band as _KB
+        from dynameta.carriers.physics_equilibrium import F12_aymerich_humet
+        if float(self.alpha_per_eV) == 0.0:
+            out = np.full(np.shape(n_m3), float(self.m0_kg))
+            return float(out) if np.ndim(out) == 0 else out
+        b = self.b(T_K)
+
+        def one(n):
+            eta = self.eta_of_density(n, T_K)
+            return float(self.m0_kg) * (_KB.kane_closure(eta, b) / F12_aymerich_humet(eta)) ** (2.0 / 3.0)
+        out = np.vectorize(one, otypes=[np.float64])(np.asarray(n_m3, dtype=np.float64))
+        return float(out) if np.ndim(out) == 0 else out
+
+    def optical_mass(self):
+        """The Drude (Fermi-surface) mass of this band as a callable of n: materials.KaneOpticalMass(m0, alpha)
+        (KaneOpticalMass.from_band), for DrudeOptical(m_opt_kg=band.optical_mass())."""
+        from dynameta.materials.scattering import KaneOpticalMass
+        return KaneOpticalMass.from_band(self)
+
+
+def _T(T_K: Optional[float]) -> float:
+    from dynameta.constants import T_REF
+    t = T_REF if T_K is None else float(T_K)
+    if not (np.isfinite(t) and t > 0.0):
+        raise ValueError("temperature must be finite and > 0 (K), got {!r}".format(T_K))
+    return t
+
+
+def _is_band_dos(fn) -> bool:
+    """True for a bound KaneBand.dos_mass_kg (the DOS-mass callable TransportModel derives from a band)."""
+    return isinstance(getattr(fn, "__self__", None), KaneBand) and getattr(fn, "__func__", None) is KaneBand.dos_mass_kg
+
+
 @dataclass
 class TransportModel:
     """DC carrier-transport parameters for one semiconductor material.
@@ -74,7 +175,15 @@ class TransportModel:
       n_bg_m3              : background (donor) carrier density [m^-3]
       eps_static           : static relative permittivity for DEVSIM Poisson
       dos_mass_kg_of_n_m3  : DENSITY-OF-STATES effective mass [kg], callable of
-                              n; used for the conduction-band Nc / Fermi level
+                              n; used for the conduction-band Nc / Fermi level. The parabolic
+                              electrostatics evaluates it once, at n_bg (dos_mass_at_bg warns when it
+                              varies). Omit it with band=KaneBand(...): it is then band.dos_mass_kg.
+      band                 : v0.16 "parabolic" (default, v0.15.1 bit for bit) or
+                              KaneBand(m0_kg, alpha_per_eV): the equilibrium electrostatics solves the
+                              finite-temperature Kane density closure self-consistently (carriers.kane_band);
+                              the screening length, Phi_c0, the reported DOS mass and band.optical_mass()
+                              (for DrudeOptical) all derive from the one band. physics='equilibrium' only
+                              (drift-diffusion / bipolar raise NotImplementedError).
       band_gap_eV, chi_eV  : band gap and electron affinity [eV], default None (v0.14, user
                               decision 2026-11-04; they were 3.6 / 4.5). LOAD-BEARING wherever two
                               semiconductor regions of DIFFERENT materials share a device (v0.13.0 3-D
@@ -133,7 +242,7 @@ class TransportModel:
     """
     n_bg_m3:                     float
     eps_static:                  float
-    dos_mass_kg_of_n_m3:         MassFn
+    dos_mass_kg_of_n_m3:         Optional[MassFn] = None     # required unless band is a KaneBand (Args)
     band_gap_eV:                 Optional[float] = None
     chi_eV:                      Optional[float] = None
     physics:                     CarrierPhysics = "equilibrium"
@@ -197,10 +306,32 @@ class TransportModel:
     # 2-D builder's noise_spectrum(hooge="material"); None keeps every result bit-identical.
     hooge_alpha_n:               Optional[float] = None
     hooge_alpha_p:               Optional[float] = None
+    # v0.16: the conduction band of the electrostatics, "parabolic" (default; N_c from
+    # dos_mass_kg_of_n_m3 at n_bg, bit-identical to v0.15.1) or a KaneBand (see Args).
+    band:                        object = "parabolic"
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("physics must be 'equilibrium', 'drift_diffusion' or 'bipolar_dd'")
+        if isinstance(self.band, KaneBand):
+            if self.physics != "equilibrium":
+                raise NotImplementedError(
+                    "TransportModel(band=KaneBand(...)) with physics={!r}: the Kane band is implemented for the "
+                    "EQUILIBRIUM closure only. The drift-diffusion and bipolar transport (Scharfetter-Gummel "
+                    "flux with the Fermi-Dirac enhancement, contact and heterointerface conditions, the "
+                    "generalized Einstein relation) are written for a parabolic band; a Kane density there "
+                    "would be inconsistent with its own current. Use physics='equilibrium', or a parabolic "
+                    "band (dos_mass_kg_of_n_m3) for transport.".format(self.physics))
+            if self.dos_mass_kg_of_n_m3 is not None and not _is_band_dos(self.dos_mass_kg_of_n_m3):
+                raise ValueError("TransportModel: band=KaneBand(...) defines the density-of-states mass; omit "
+                                 "dos_mass_kg_of_n_m3 (it becomes band.dos_mass_kg, the band's DOS mass)")
+            self.dos_mass_kg_of_n_m3 = self.band.dos_mass_kg
+        elif isinstance(self.band, str) and self.band == "parabolic":
+            if self.dos_mass_kg_of_n_m3 is None:
+                raise ValueError("TransportModel: dos_mass_kg_of_n_m3 is required for band='parabolic' (or give "
+                                 "band=KaneBand(m0_kg, alpha_per_eV), which defines it)")
+        else:
+            raise TypeError("TransportModel.band must be 'parabolic' or a KaneBand, got {!r}".format(self.band))
         if self.physics in ("drift_diffusion", "bipolar_dd") and self.mobility_m2Vs_of_n_m3 is None:
             raise ValueError(
                 "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
@@ -264,3 +395,45 @@ class TransportModel:
             # be silently dropped by the builders
             raise ValueError("srh_traps / srh_trap_energy_eV need physics='bipolar_dd' (got {!r})"
                              .format(self.physics))
+
+    def dos_mass_at_bg(self, where: str) -> float:
+        """The DOS effective mass [kg] the carrier physics uses: dos_mass_kg_of_n_m3 evaluated at n_bg_m3,
+        exactly float(dos_mass_kg_of_n_m3(n_bg_m3)) (the value every builder took before v0.16).
+
+        v0.16 guard: the electrostatics has ONE N_c per region (a parabolic band with a constant DOS
+        mass), so a density-dependent callable is reduced to its value at n_bg. The callable is probed at
+        n = n_bg x {0.1, 0.2, 0.5, 1, 2, 5, 10} (one scalar call each, so scalar-only callables work); if it
+        varies by more than 1 % of the n_bg value over that range, ONE AdvisoryWarning per TransportModel
+        instance says so (`where` names the caller in it). A probe that raises or returns a non-finite value
+        counts as a variation (the warning names it). Constants never warn.
+
+        With band=KaneBand(...) (v0.16) the electrostatics solves that band's closure (density-dependent DOS
+        by construction, consistent with the optical KaneOpticalMass of the same band), so nothing is
+        reduced and nothing warns; the value returned is the band's DOS mass at n_bg (KaneBand.dos_mass_kg).
+        The builders pass the band itself, not this number, to the closure."""
+        if isinstance(self.band, KaneBand):
+            return float(self.band.dos_mass_kg(self.n_bg_m3))
+        m_bg = float(self.dos_mass_kg_of_n_m3(self.n_bg_m3))
+        if not getattr(self, "_dos_mass_guard_done", False):
+            object.__setattr__(self, "_dos_mass_guard_done", True)
+            bad, vals = None, []
+            for f in _DOS_PROBE_FACTORS:
+                try:
+                    v = float(self.dos_mass_kg_of_n_m3(f * self.n_bg_m3))
+                except Exception as exc:                     # noqa: BLE001 - reported, not swallowed
+                    bad = "raised {}: {}".format(type(exc).__name__, exc)
+                    break
+                if not np.isfinite(v):
+                    bad = "returned {!r} at n = {:g} n_bg".format(v, f)
+                    break
+                vals.append(v)
+            spread = (max(vals) - min(vals)) / abs(m_bg) if (bad is None and m_bg != 0.0) else float("inf")
+            if bad is not None or spread > _DOS_MASS_RTOL:
+                detail = bad if bad is not None else "varies by {:.3g} % of its n_bg value".format(100.0 * spread)
+                warnings.warn(
+                    "{}: TransportModel.dos_mass_kg_of_n_m3 is density-dependent over [0.1, 10] n_bg ({}), but "
+                    "the electrostatics uses ONE DOS mass per region (a parabolic band with N_c from the mass "
+                    "at n_bg = {:.4g} m^-3: {:.6g} kg). The charge distribution therefore does not follow the "
+                    "density dependence (a nonparabolic band enters the optics only).".format(
+                        where, detail, float(self.n_bg_m3), m_bg), AdvisoryWarning, stacklevel=2)
+        return m_bg

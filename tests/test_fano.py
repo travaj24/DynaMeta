@@ -122,8 +122,8 @@ def test_small_amplitude_spectra_recover_q_not_the_seed():
         ff = fano_fit(x, y, x_kind="freq")
         assert lf.Q == pytest.approx(Q_true, rel=0.03), "lorentzian Q at scale {}".format(scale)
         assert ff.Q == pytest.approx(Q_true, rel=0.03), "fano Q at scale {}".format(scale)
-        assert lf.amplitude == pytest.approx(scale, rel=0.03)
-        assert lf.baseline == pytest.approx(0.2 * scale, rel=0.03)
+        assert lf.amplitude == pytest.approx(scale, rel=0.03, abs=0)
+        assert lf.baseline == pytest.approx(0.2 * scale, rel=0.03, abs=0)
         assert lf.residual_rms < 1e-6 * (y.max() - y.min())
 
     # (c) the fit is EXACT (not merely within a few %) once the feature is resolvable
@@ -432,4 +432,4 @@ def test_resonance_dip_shift_byte_stable():
     # edge-fallback branch (discrete minimum at an array edge -> no parabola)
     edge_nm, edge_val = resonance_dip(lam[:9], np.linspace(0.1, 0.9, 9))
     assert edge_nm == pytest.approx(1200.0, rel=5e-12)
-    assert edge_val == pytest.approx(0.1, rel=5e-12)
+    assert edge_val == pytest.approx(0.1, rel=5e-12, abs=0)

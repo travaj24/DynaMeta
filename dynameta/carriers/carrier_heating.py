@@ -376,6 +376,13 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
             "scattering model); build the transient from its evaluated value at n_m3 "
             "(float(drude0.gamma_rad_s(n_m3))) and pass a scalar-gamma DrudeOptical -- "
             "silently substituting 1e14 rad/s computed a different material (audit C5-10).")
+    if getattr(drude0, "boundary", None) is not None or getattr(drude0, "background", None) is not None:
+        # v0.16: the per-instant DrudeOptical below is rebuilt from (eps_inf, m, gamma) only, so a
+        # boundary-scattering or density-dependent background option would be silently dropped.
+        raise NotImplementedError(
+            "carrier_heating_transient: drude0 carries boundary scattering or a density-dependent "
+            "background (DrudeOptical v0.16 options); the transient rebuilds a plain Drude per instant "
+            "and would drop them -- not supported.")
     m0 = float(m0_kg) if m0_kg is not None else float(drude0.m_opt_kg)
     gamma0 = float(drude0.gamma_rad_s)
     # audit C-7: the phonon-damping reference temperature travels WITH gamma0's calibration, so it is

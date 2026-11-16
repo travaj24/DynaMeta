@@ -29,10 +29,10 @@ def test_carrier_field_zarr_roundtrip(tmp_path):
     assert out.bias_label == "vg1" and out.ndim == 3
     assert out.voltages["gate"] == pytest.approx(1.0)
     assert out.n_bg_by_region["semi"] == pytest.approx(4e26)
-    assert out.unit_cell_m == pytest.approx((3e-7, 3e-7))
+    assert out.unit_cell_m == pytest.approx((3e-7, 3e-7), rel=1e-6, abs=0)
     r = out.regions["semi"]
     assert r.role == "semiconductor" and r.material == "ito"
-    assert np.allclose(r.grid_axes_m["z"], z)
+    assert np.allclose(r.grid_axes_m["z"], z, atol=0)
     assert np.allclose(r.grid_fields[ELECTRON_DENSITY], 4e26)
     assert np.allclose(r.node_fields["potential_V"], [0.0, 0.1, 0.2])
 

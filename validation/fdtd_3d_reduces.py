@@ -93,6 +93,16 @@ def airy(f, n, d):
 
 def main():
     print("[f3] === 3D full-vector FDTD: reduce-to-TMM, reduce-to-2D, 3D diffraction ===", flush=True)
+    # GATE A's convergence-order probe runs on the numba backend (the numpy run of the 2x-resolution probe is
+    # what made it unaffordable), so without numba this script cannot gate A: exit 42, the runner's
+    # capability-absent code, before any work -- not rc=1 after 20 s of solves (the nightly-validation job
+    # installs no numba; the `numba` CI job runs this script for real).
+    from dynameta.optics.fdtd_nd import available_backends
+    if "numba" not in available_backends():
+        from validation._harness import SKIP_RC
+        print("[f3] SKIP: FDTD backend 'numba' is not installed (GATE A's order probe needs it; exit {}, "
+              "run_all counts it separately)".format(SKIP_RC), flush=True)
+        raise SystemExit(SKIP_RC)
 
     # GATE A: uniform non-dispersive slab -> Airy/TMM (0-order AND flux), R+T=1. 4x4 lateral = fast.
     # 2026-11-03: the single-resolution pin (d0, df < 5e-3) is a CONVERGENCE gate against the

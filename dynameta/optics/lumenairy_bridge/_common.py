@@ -5,7 +5,7 @@ Berreman backends imported its underscore helpers, and bor_backend copy-pasted t
 gate (drifting to its own floor). The shared surface now lives HERE under public names;
 rcwa_backend keeps underscore aliases for back-compat.
 
-ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.50.x span
+ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.51.x span
 (the upper end is VERSION_VERIFIED_MAX, whose comment records each re-verification) --
 every audited path (the C5-1 asymmetric-profile gates, C4-2 conical guards, per-layer
 absorption, BOR, Berreman OOP, the D1 JAX-twin traced-source/uniform-eps surface, the A2
@@ -181,11 +181,47 @@ VERSION_FLOOR = (5, 22, 0)
 #     back to back: 5.50 rule ON 448 / 426 s, rule OFF (LUMENAIRY_JAX_CLUSTER_RULE=0) 171 s,
 #     5.42.1 177 s -- ~2.5x, all from the rule, gate numbers identical in every arm. That
 #     script is in run_all.SMOKE_EXCLUDED either way (its documented 145 s predates 5.50).
+#
+# RE-VERIFIED AT 5.51.0 (2026-11-15) on the lumenairy tree at fe408f0a (`__version__ = "5.51.0"`;
+# not yet on PyPI when measured -- re-run the bridge tests on the published wheel if it differs
+# from that tree). The same bridge test files and validation/lumenairy_*.py scripts were run on
+# 5.22.0 (git archive of the tag), 5.50.2 (32328f0e) and the 5.51.0 tree; the per-tree counts and
+# the strip / grating comparison against the 2-D TM FEM are in
+# docs/audit/2026-11-15-v0.16.0-release.md. What 5.51 changes for a DynaMeta caller, named so the
+# next reader can tell a KNOWN shift from a new one:
+#   * RCWA: RCWAStack.add_layer's default became formulation='auto'. NOT REACHED: every bridge
+#     add_layer call names its formulation (rcwa_backend / rcwa_design), so no bridge result
+#     depends on lumenairy's default. 5.51 adds no warning on an explicit 'laurent'.
+#   * RCWA: 'li' traces under jax.grad, and 'auto' resolves a traced cell as its NumPy twin. USED:
+#     rcwa_design.rcwa_stack_RT / rcwa_stack_jones default to 'auto' where this holds (feature row
+#     'rcwa_li_traced', a probe) and keep 'laurent' elsewhere.
+#   * RCWA layer_absorption of an 'li' layer became a face-flux difference. NOT REACHED: the
+#     bridge computes its own all-layer face-flux split for an 'li' solve (rcwa_backend).
+#   * PMM: gain media (Im eps < 0) in a layer are split into forward / backward modes correctly
+#     again (5.50.x returned R + T of 1e1 .. 1e4; 5.22.0 was right) and a gain substrate is
+#     refused. USED: the PMM bridge refuses a gain layer where the probe 'pmm_gain_media' fails,
+#     and every bridge engine refuses a gain half-space (refuse_gain_half_space).
+#   * PMM: uniform-layer fast path (round-off moves, <= ~1e-12 on the bridge fixtures; the PMM
+#     bridge validation's uniform-stack-vs-TMM gate reads a smaller residual on 5.51), the
+#     forward-mode selector fix (only very small elements at oblique incidence), the structured
+#     conical modal solves (<= 1.1e-9 on Chebyshev layouts).
+#   * PMM: new refusals and notices that reach a bridge caller only through pmm_kwargs or the
+#     wavelength. The small-element guard, in fractions of the wavelength: a LAYOUT element below
+#     1e-5 (geometric grading) or 1e-6 (Chebyshev / uniform) raises ValueError, and a Chebyshev /
+#     uniform element between 1e-6 and 2e-6 solves with a plain UserWarning (lumenairy measured
+#     2.4e-6 .. 1.5e-5 of round-off there); pmm_kwargs={'allow_small_elements': True} is the way
+#     back from the refusal. The bridge passes the warning through as a warning (it is accurate
+#     advice, like the WoodNudgeWarning below; under a filterwarnings=error test configuration it
+#     is an error, by that configuration's choice); no bridge fixture reaches the band. And the
+#     exact-Rayleigh-anomaly nudge (lumenairy WoodNudgeWarning, a UserWarning; 5.50 solved the
+#     ill-posed point as is).
+#   * PMM: geometric element grading (pmm_kwargs={'grade': 'geometric', ...}); feature row
+#     'pmm_geometric_grade' below, detected from the installed API.
 # Above the ceiling the bridge still runs -- lumenairy is backward compatible in practice and
 # refusing would be worse -- but says so ONCE per process (a RuntimeWarning naming both
 # versions). Bumping this is the CHEAP half of the same correctness work: re-run
 # validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 50)
+VERSION_VERIFIED_MAX = (5, 51)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
@@ -322,7 +358,224 @@ FEATURE_FLOORS = {
                        "(add_layer(shapes=, formulation='li'))"),
     "rcwa_shapes_absorption": ((5, 50, 1), "per-layer absorption on RCWA analytic shapes layers "
                                "(RCWAResult.layer_absorption with shapes=)"),
+    # v0.16 (from lumenairy's CHANGELOG 5.31.0): the inverse-rule companion pair of an
+    # 'li' eps_cell; below it the area raster carries the arithmetic cell only (width still exact)
+    "rcwa_eps_cell_normal": ((5, 31, 0), "the inverse-rule companion of an 'li' RCWA raster "
+                             "(add_layer(eps_cell_normal=(exx, eyy)))"),
+    # v0.16 (lumenairy 5.51.0). These rows are DETECTED from the installed API (FEATURE_PROBES
+    # below); the version is the release that introduced them, kept for messages and the table.
+    "pmm_geometric_grade": ((5, 51, 0), "geometric element grading on PMMStack "
+                            "(pmm_kwargs={'grade': 'geometric' | ('geometric', ratio[, "
+                            "min_element_m])})"),
+    "pmm_small_element_guard": ((5, 51, 0), "PMMStack's small-element guard and its way back "
+                                "(PMMStack(allow_small_elements=True))"),
+    # Decided by a SOLVE (FEATURE_PROBES): a gain layer is solved correctly by the 5.22 selector and
+    # by 5.51.0's, and returned R + T of 1e1 .. 1e4 in between (measured on 5.50.2); the version is
+    # the release that fixed it, kept for messages.
+    "pmm_gain_media": ((5, 51, 0), "gain media (Im eps < 0) in a PMMStack layer (the forward / "
+                       "backward mode split of a non-passive layer)"),
+    # Decided by a TRACE (FEATURE_PROBES): the default factorization of rcwa_design.rcwa_stack_RT /
+    # rcwa_stack_jones is 'auto' where this holds and 'laurent' elsewhere.
+    "rcwa_li_traced": ((5, 51, 0), "Li's rule on a traced (JAX) RCWAStack cell, with "
+                       "formulation='auto' resolving a traced cell as its NumPy twin"),
 }
+
+
+def _probe_pmm_geometric_grade(lum) -> bool:
+    # the public default-ratio constant ships with the geometric layout (lumenairy 5.51 CHANGELOG,
+    # "Geometric element grading"); older releases coerce grade= with bool() and have neither
+    import importlib
+    try:
+        pm = importlib.import_module(lum.__name__ + ".elements.pmm")
+    except ImportError:
+        return False
+    return hasattr(pm, "GEOMETRIC_DEFAULT_RATIO")
+
+
+def _probe_pmm_small_element_guard(lum) -> bool:
+    import inspect
+    try:
+        return "allow_small_elements" in inspect.signature(lum.PMMStack.__init__).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+# Results of the two probes that SOLVE (the API probes above are free), memoized per imported
+# lumenairy (module file + version string), so each runs at most once per process.
+_SOLVE_PROBE_CACHE = {}
+
+
+def _memo(name, lum, fn):
+    key = (name, getattr(lum, "__file__", None), getattr(lum, "__version__", None))
+    if key not in _SOLVE_PROBE_CACHE:
+        _SOLVE_PROBE_CACHE[key] = bool(fn())
+    return _SOLVE_PROBE_CACHE[key]
+
+
+# Gain-layer probe cell: a 40 % ridge of eps 12 - 0.05i, 80 nm tall, over 100 nm of eps 2.1 on a
+# 1.45 substrate; period 500 nm, 1000 nm, normal incidence. PMMStack (degree 14) against
+# RCWAStack ('li', 40 orders, ridge walls on raster lines) on the zeroth-order Jones.
+# MEASURED max |J_PMM - J_RCWA|: 1.8e-4 where the gain split is right (lumenairy 5.22.0 and
+# 5.51.0 at fe408f0a: the PMM and RCWA truncation errors), 1.83 on 5.50.2. A wrong split puts
+# the growing root of every evanescent gain mode into the layer propagator, so its answer is
+# round-off amplified and not reproducible -- lumenairy's own measurement over 200 perturbed draws
+# on five numpy / BLAS builds: never below 0.40. _GAIN_PROBE_TOL = 1e-2 sits 50x above the first
+# and 40x below the second.
+_GAIN_PROBE_TOL = 1e-2
+
+
+def _probe_pmm_gain_media(lum) -> bool:
+    def run():
+        p, wl, n_sub, s = 500e-9, 1000e-9, 1.45, 1000
+        ridge = 12.0 - 0.05j
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")      # a wrong split also trips energy warnings
+                st = lum.PMMStack(p, n_substrate=n_sub, n_superstrate=1.0, degree=14)
+                st.add_layer(80e-9, segments=[(0.4, ridge), (0.6, 1.0 + 0j)])
+                st.add_layer(100e-9, eps=2.1 + 0j)
+                st.set_source(wl, theta=0.0)
+                j_pmm = np.asarray(st.solve()[3])
+                rc = lum.RCWAStack(p, n_superstrate=1.0, n_substrate=n_sub, n_orders=40)
+                x = (np.arange(s) + 0.5) / s
+                rc.add_layer(80e-9, eps_cell=np.where(x < 0.4, ridge, 1.0 + 0j)[:, None],
+                             formulation="li")
+                rc.add_layer(100e-9, eps=2.1 + 0j, formulation="laurent")
+                rc.set_source(wl, theta=0.0)
+                j_rcwa = np.asarray(rc.solve().jones_reflection())
+        except Exception:                            # noqa: BLE001 (any failure = not supported)
+            return False
+        err = float(np.max(np.abs(j_pmm - j_rcwa)))
+        return np.isfinite(err) and err < _GAIN_PROBE_TOL
+    return _memo("pmm_gain_media", lum, run)
+
+
+def _probe_rcwa_li_traced(lum) -> bool:
+    """RCWAStack's own default formulation is 'auto' (the 5.51 rule set; a jax-free API check)
+    and, when jax is installed, jax.grad of a solve under formulation='li' TRACES (an abstract
+    trace: jax.eval_shape, nothing is compiled or run). Measured: 5.22.0 / 5.50.2 have no 'auto'
+    and raise TracerArrayConversionError under 'li' (the inverse rule's contrast test reads the
+    cell on the host); 5.51.0 traces 'li', and its 'auto' resolves a traced cell as its NumPy twin
+    ('li' on a 1-D eps_cell). A build that has 'auto' but still raises under 'li' fails the probe
+    and keeps 'laurent'. Without jax there
+    is no traced path, and the API check alone decides. The trace runs inside
+    jax.enable_x64(True), which leaves the caller's global x64 setting untouched; ~2 s once per
+    process."""
+    import inspect
+    try:
+        default = inspect.signature(lum.RCWAStack.add_layer).parameters["formulation"].default
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    if default != "auto":
+        return False
+
+    def run():
+        import importlib.util
+        if importlib.util.find_spec("jax") is None:
+            return True
+        try:
+            import jax
+            import jax.numpy as jnp
+        except Exception:                            # noqa: BLE001 (broken jax install)
+            return True
+        mask = (np.arange(41) + 0.5) / 41 < 0.4
+
+        def r_sum(e, form, xp):
+            cell = xp.where(xp.asarray(mask), e + 4.0j, 1.0 + 0j)[:, None]
+            st = lum.RCWAStack(400e-9, n_superstrate=1.0, n_substrate=1.5, n_orders=5)
+            st.add_layer(50e-9, eps_cell=cell, formulation=form)
+            st.add_layer(80e-9, eps=-120.0 + 20.0j, formulation="laurent")
+            st.set_source(1200e-9, theta=0.0)
+            _o, R, _T = st.solve().efficiencies()
+            return xp.real(xp.sum(R[0]))
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with jax.enable_x64(True):
+                    jax.eval_shape(jax.grad(lambda e: r_sum(e, "li", jnp)),
+                                   jax.ShapeDtypeStruct((), jnp.float64))
+        except Exception:                            # noqa: BLE001 (does not trace = not supported)
+            return False
+        return True
+    return _memo("rcwa_li_traced", lum, run)
+
+
+# FEATURE DETECTION (v0.16). A row with a probe is decided by asking the installed lumenairy
+# for the API itself, not by its version string: a release candidate or a source checkout can
+# carry the API under an older __version__ (a checkout between releases reports the previous one),
+# and a probe cannot be fooled by that. Rows without a probe keep the measured version floor.
+# 'pmm_gain_media' and 'rcwa_li_traced' are behaviours, not names: no public API marks them, so
+# their probes run one tiny solve (memoized), and only when a path needs the answer.
+FEATURE_PROBES = {
+    "pmm_geometric_grade": _probe_pmm_geometric_grade,
+    "pmm_small_element_guard": _probe_pmm_small_element_guard,
+    "pmm_gain_media": _probe_pmm_gain_media,
+    "rcwa_li_traced": _probe_rcwa_li_traced,
+}
+
+
+# GAIN MEDIA (public exp(-i omega t) convention: Im eps < 0). The negligible band is the one
+# tmm_reference._passive_sqrt uses for the end media (|Im eps| <= 1e-12 (|Re eps| + 1)), so a
+# spurious -0.0j / -1e-17j from a fit or a ConstantOptical is not called gain.
+def is_gain_eps(eps) -> bool:
+    """True when `eps` (a scalar, or a (3, 3) tensor) is a gain medium: Im eps below the negligible
+    band for a scalar, an anti-Hermitian part (eps - eps^H) / 2i with a negative eigenvalue below it
+    for a tensor (a passive tensor has that part positive semi-definite). A value that cannot be
+    read on the host (a jax tracer) returns False: it cannot be checked."""
+    try:
+        a = np.asarray(eps, dtype=np.complex128)
+    except Exception:                                # noqa: BLE001 (tracer / not a number)
+        return False
+    if a.ndim == 0:
+        e = complex(a)
+        return e.imag < -1e-12 * (abs(e.real) + 1.0)
+    if a.shape == (3, 3):
+        h = (a - a.conj().T) / 2j
+        lam = float(np.min(np.linalg.eigvalsh(0.5 * (h + h.conj().T))))
+        return lam < -1e-12 * (float(np.max(np.abs(a))) + 1.0)
+    return any(is_gain_eps(v) for v in a.reshape(-1))
+
+
+def require_pmm_gain_support(where: str, values, layer_name=None) -> None:
+    """Raise LumenairyFeatureUnavailable when one of the permittivities `values` of a PMMStack layer
+    is a gain medium (is_gain_eps) and the installed lumenairy splits a non-passive layer's modes
+    wrongly (feature row 'pmm_gain_media', decided by a probe solve that runs only here, on the first
+    gain layer). Traced values cannot be read and are not checked."""
+    if not any(is_gain_eps(v) for v in values):
+        return
+    if lumenairy_has("pmm_gain_media"):
+        return
+    import lumenairy
+    raise LumenairyFeatureUnavailable(
+        "{}: {} holds a gain medium (Im eps < 0), and the installed lumenairy {} splits the modes of "
+        "a gain layer wrongly (the bridge's probe: a gain ridge misses RCWAStack by more than {:g} "
+        "in the zeroth-order Jones; R + T of 1e1 .. 1e4 measured on 5.50.2). Fixed in lumenairy "
+        "{}. Upgrade, or use the RCWA bridge or the PMM2D bridge, which solve gain layers "
+        "correctly on every supported release.".format(
+            where, "a layer" if layer_name is None else "layer {!r}".format(layer_name),
+            lumenairy.__version__, _GAIN_PROBE_TOL,
+            ".".join(str(p) for p in FEATURE_FLOORS["pmm_gain_media"][0])))
+
+
+def refuse_gain_half_space(where: str, n_super, n_sub) -> None:
+    """Raise ValueError for a GAIN superstrate or substrate (Im n < 0). MEASURED (air / 100 nm of
+    eps 2.1 / substrate n = 1.45 - k i, k = 1e-2 .. 1e-4, against the analytic T = 0.965): a gain
+    substrate makes PMMStack drop the transmitted power (T = 0, on 5.22.0 and 5.50.2; 5.51.0 refuses
+    it), PMM2DStackHybrid return R = 30 (all three releases) and RCWAStack raise an energy error; a
+    gain superstrate is refused by RCWAStack and by PMMStack >= 5.50 and gave T = -0.97 on PMMStack
+    5.22.0. The outgoing root of a gain half-space is not the Im(kz) >= 0 root the solvers take, so
+    no bridge engine models it: refuse it on every engine, before lumenairy is called."""
+    for side, n in (("superstrate", n_super), ("substrate", n_sub)):
+        try:
+            v = complex(n)
+        except (TypeError, ValueError):              # traced index: cannot be read
+            continue
+        if v.imag < 0.0:
+            raise ValueError(
+                "{}: gain {} (n = {!r}, Im n < 0) is not supported -- a gain half-space's "
+                "transmitted / incident orders have no outgoing root the lumenairy engines accept "
+                "(measured: transmitted power dropped or R + T >> 1). Put the gain medium in a "
+                "finite layer above a passive half-space.".format(where, side, v))
 
 
 class LumenairyFeatureUnavailable(NotImplementedError):
@@ -340,17 +593,26 @@ def lumenairy_version():
 
 
 def lumenairy_has(feature: str) -> bool:
-    """True when the importable lumenairy meets FEATURE_FLOORS[feature] (False if absent)."""
+    """True when the importable lumenairy provides `feature` (False if lumenairy is absent): asked
+    of the installed API when FEATURE_PROBES has a probe for it, else FEATURE_FLOORS[feature]'s
+    version floor."""
+    floor = FEATURE_FLOORS[feature][0]
+    probe = FEATURE_PROBES.get(feature)
+    if probe is not None:
+        try:
+            import lumenairy
+        except ImportError:
+            return False
+        return bool(probe(lumenairy))
     v = lumenairy_version()
-    return v is not None and v >= FEATURE_FLOORS[feature][0]
+    return v is not None and v >= floor
 
 
 def require_lumenairy_feature(feature: str, where: str) -> None:
     """Raise LumenairyFeatureUnavailable naming the feature, its floor and the installed version
-    when lumenairy is older than FEATURE_FLOORS[feature] (no-op otherwise)."""
+    when the installed lumenairy lacks FEATURE_FLOORS[feature] (no-op otherwise)."""
     floor, what = FEATURE_FLOORS[feature]
-    v = lumenairy_version()
-    if v is not None and v >= floor:
+    if lumenairy_has(feature):
         return
     import lumenairy
     raise LumenairyFeatureUnavailable(

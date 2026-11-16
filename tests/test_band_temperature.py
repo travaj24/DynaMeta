@@ -73,8 +73,8 @@ def test_varshni_values_match_the_retyped_vurgaftman_tables():
     the bowing is temperature-independent (the alloy minus its linear interpolation is the same at every T).
     Old code: no AlAs row (ValueError) and no algaas_gap_law (ImportError)."""
     from dynameta.materials.band_temperature import VARSHNI_PARAMS, algaas_gap_law, varshni_eg_ev
-    assert VARSHNI_PARAMS["GaAs"] == pytest.approx(GAAS_T1, rel=1e-15)
-    assert VARSHNI_PARAMS["AlAs"] == pytest.approx(ALAS_T2, rel=1e-15)
+    assert VARSHNI_PARAMS["GaAs"] == pytest.approx(GAAS_T1, rel=1e-15, abs=0)
+    assert VARSHNI_PARAMS["AlAs"] == pytest.approx(ALAS_T2, rel=1e-15, abs=0)
     for T in TEMPS:
         assert abs(varshni_eg_ev(T, "GaAs") - varshni(T, *GAAS_T1)) < TOL_EG
         assert abs(varshni_eg_ev(T, "AlAs") - varshni(T, *ALAS_T2)) < TOL_EG
@@ -200,7 +200,7 @@ def test_band_data_at_T_against_independent_formulas(anchor):
         x = eg / (2 * kt(T))
         ni = math.sqrt(_nc_oracle(me, T) * _nc_oracle(mh, T)) * math.exp(-x)
         bd = band_data_at_T(tr, T)
-        assert bd.n_i_m3 == pytest.approx(ni, rel=64 * EPS * max(x, 1.424 / (2 * kt(300.0)))), T
+        assert bd.n_i_m3 == pytest.approx(ni, rel=64 * EPS * max(x, 1.424 / (2 * kt(300.0))), abs=0), T
         eg_stat = kt(T) * math.log(_nc_oracle(me, T) * _nc_oracle(mh, T) / bd.n_i_m3 ** 2)
         assert abs(eg_stat - eg) < 1e-12, T
 
@@ -269,7 +269,8 @@ def test_defaults_off():
     # appended after carrier_statistics: positional order kept (v0.15 4.2.4 appends hooge_alpha_n/_p after it)
     names = [f.name for f in dataclasses.fields(TransportModel)]
     assert names[names.index("carrier_statistics") + 1] == "band_temperature"
-    assert names[names.index("band_temperature") + 1:] == ["hooge_alpha_n", "hooge_alpha_p"]
+    # v0.16 (the Kane band in the electrostatics) appends `band` (the KaneBand selector) after them, again keeping positional order
+    assert names[names.index("band_temperature") + 1:] == ["hooge_alpha_n", "hooge_alpha_p", "band"]
     assert _tm().band_temperature is None
 
 
@@ -283,7 +284,7 @@ def test_gap_ratio_accessor_for_the_btbt_scaling():
     for T in (200.0, 300.0, 400.0):
         ref = (1.43 + varshni(T, *GAAS_T1) - varshni(77.0, *GAAS_T1)) / \
               (1.43 + varshni(300.0, *GAAS_T1) - varshni(77.0, *GAAS_T1))
-        assert band_gap_ratio(tr, T) == pytest.approx(ref, rel=1e-14)
+        assert band_gap_ratio(tr, T) == pytest.approx(ref, rel=1e-14, abs=0)
     assert band_gap_ratio(tr, 300.0) == 1.0
 
 

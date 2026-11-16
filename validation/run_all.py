@@ -71,14 +71,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
 SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag",
-        "reference_modulator_spectrum"}
+        "reference_modulator_spectrum",
+        # v0.16 (2026-11-14): the full-band film-model dip table, a REPORT that asserts nothing --
+        # ~1100 s lightly loaded / 1300-1600 s loaded on the 2-thread dev box (one process must hold
+        # all 61 wavelengths for the dip and FWHM), about half of PER_SCRIPT_TIMEOUT_S. Its one
+        # gate-like quantity, energy closure in
+        # every cell solve, IS gated in the tier by the three wavelength-band parts quantum_film_strip /
+        # quantum_film_strip_sweep_mid / quantum_film_strip_sweep_long (same solves, same 1e-10).
+        "quantum_film_strip_dip_table"}
 # The `_` prefix excludes a file from EVERY tier (see _gated), and it carries TWO opposite
 # meanings: a legitimately SHARED FIXTURE (imported by other validations, never run on its own)
 # and a PARKED WIP (a real gate suite that nothing executes). Declare the fixtures here so the
 # second kind is NAMED on every run instead of vanishing silently -- audit X-6, where a parked
 # `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
 # executable gate anywhere and nobody could see it.
-FIXTURES = {"_reference_device", "_ram_guard", "_harness"}
+FIXTURES = {"_reference_device", "_ram_guard", "_harness",
+            "_eqdg_fixture"}       # v0.16: shared by equilibrium_density_gradient.py and its test file
 # PER-SCRIPT WALL-CLOCK CAP. Its job is catching a HUNG script, so it must sit well clear of the
 # slowest LEGITIMATE one -- and 1800 s did not. MEASURED: fdtd_3d_reduces (the 3-D full-vector
 # keystone: reduces to 1-D/TMM, reduces to the 2-D engine, diffraction, Drude, cross-pol, Kerr,
@@ -108,6 +116,14 @@ FIXTURES = {"_reference_device", "_ram_guard", "_harness"}
 # would put a ~1574 s script back into the tier and consume most of the headroom this split just
 # won, which is a reason to measure that dispatch before lowering anything. Revisit once one full
 # nightly reports per-script times with the split in place.
+#
+# 2026-11-14: the same remedy, again without touching the cap. measurement_strip_broadening measured
+# 2487 s and TIMED OUT at 2700 s in a shard run; quantum_film_strip measured 1540-1823 s. Both were
+# split by gate group (and the first de-duplicated: identical FEM solves shared by several cases are
+# memoized in-process, bitwise neutral), every gate with its tolerance unchanged, each part targeted
+# at <= ~1/3 of this cap: measurement_strip_broadening / _scatter / _scatter_wide / _scatter_conv and
+# quantum_film_strip / _sweep_mid / _sweep_long (+ the opt-in report quantum_film_strip_dip_table in
+# SKIP). Measured times are in each script's docstring.
 PER_SCRIPT_TIMEOUT_S = 2700
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
@@ -237,6 +253,9 @@ SMOKE = {
     # Wall-clock MEASURED 2026-11-02 (this box, cold start, per script):
     #   harmonics_spectral_diagnostics 1.0 s | spdc_design_jsa 2.1 s
     "harmonics_spectral_diagnostics", "spdc_design_jsa",
+    # v0.16 (review fixes): the two pure-numpy dual-gate Schrodinger-Poisson gates. Wall-clock MEASURED
+    # 2026-11-14 (loaded shared box, cold subprocess): sp_dual_gate 19-20 s | sp_barrier_xc_traps 38-41 s
+    "sp_dual_gate", "sp_barrier_xc_traps",
 }
 
 # Solver-free validations DELIBERATELY outside SMOKE, with the reason (audit X-26: "add them to
@@ -257,6 +276,10 @@ SMOKE_EXCLUDED = {
                                  "run_all, measured 2026-08-04 -- over the ~60 s smoke bar "
                                  "whenever the box is busy",
     "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
+    # v0.16 (review fixes): pure-numpy quantum-film / thin-film validations measured at or over the bar
+    "quantum_film_rpa":          "48-53 s measured 2026-11-14 on a loaded box -- at the ~60 s smoke bar, "
+                                 "no headroom for a shared runner",
+    "thin_film_damping":         "62-81 s measured 2026-11-14 -- over the ~60 s per-script smoke bar",
     "lumenairy_berreman_jax":    "~430 s measured 2026-11-02 on lumenairy 5.50 (jax_cluster_rule; "
                                  "145 s on 2026-07-26 before it) -- jax jit warm-up + sweep",
     "lumenairy_pmm2d_bridge":    "~323 s measured 2026-11-02 for GATES A-J on a loaded box (268 s "
@@ -300,7 +323,9 @@ def _gated(directory, skip=()):
             # audit X-6: a `_`-prefixed file runs in NO tier. That is correct for a shared fixture
             # and wrong for a parked gate suite, and the prefix cannot tell them apart -- so name
             # every non-fixture one loudly rather than dropping it in silence.
-            if fn[:-3] not in FIXTURES:
+            # __init__.py is a package marker, never a gate suite (examples/ has one; it was named on every
+            # full-tier run)
+            if fn[:-3] not in FIXTURES and fn != "__init__.py":
                 print("[run_all] NOTE: {}/{} is `_`-prefixed, so it is EXCLUDED FROM EVERY TIER. "
                       "If it is a gate suite, rename it (drop the underscore) or gate it from "
                       "tests/; if it is a shared fixture, add it to FIXTURES.".format(
@@ -322,6 +347,56 @@ def _gated(directory, skip=()):
                   "(non-zero exit = FAIL); verify it actually gates".format(name), flush=True)
         out.append(name)
     return out
+
+
+# Substrings that make a validation script "heavy" for the smoke tier's reverse-drift scan (main(), tier
+# smoke): its SOURCE references a heavy solver DIRECTLY (import ngsolve/devsim/gmsh) OR TRANSITIVELY through a
+# DynaMeta wrapper that pulls one: optics.solver / ngsolve_layered -> ngsolve; optics.fdtd* -> multi-minute
+# time loops; carriers.devsim* / thermal_fem / electrostatics_fem -> devsim/ngsolve; optics.inverse_design /
+# topology_opt -> jax-FDTD; dynameta.pipeline -> devsim+ngsolve. The earlier literal import-only scan
+# misclassified ~80 FEM/FDTD/DEVSIM scripts as solver-free (they import their solver through these wrappers,
+# not via a top-level `import ngsolve`) -- pass-2 re-audit P2. Substrings (not import-form) so a
+# deferred/in-function import (e.g. behind a find_spec skip-guard) still counts as heavy.
+_HEAVY = (
+    "ngsolve", "devsim", "import gmsh", "from gmsh",           # direct heavy deps
+    "optics.solver", "optics.fdtd", "optics.inverse_design",  # FEM / FDTD / jax-FDTD wrappers
+    "optics.topology_opt", "carriers.thermal_fem", "carriers.electrostatics_fem",
+    "carriers.devsim", "carriers.physics_equilibrium",   # physics_equilibrium imports devsim
+    "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
+)
+# `import validation.<name>` / `from validation.<name> import` / `from validation import <name>`: a script
+# that reuses a sibling validation module inherits that module's heavy path (v0.16 full run: two scripts
+# reach DEVSIM only through validation.bipolar_density_gradient, and the scan used to call them solver-free).
+_SIBLING_RE = re.compile(r"^\s*(?:import\s+validation\.(\w+)|from\s+validation\.(\w+)\s+import|"
+                         r"from\s+validation\s+import\s+([\w ,]+))", re.M)
+
+
+def _is_heavy(name: str, _seen=None) -> bool:
+    """True when validation/<name>.py reaches a heavy solver, directly or through the sibling validation
+    modules it imports (followed recursively; a '_'-prefixed fixture counts like any other module)."""
+    seen = set() if _seen is None else _seen
+    if name in seen:
+        return False
+    seen.add(name)
+    path = os.path.join(HERE, name + ".py")
+    if not os.path.isfile(path):
+        return False
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    if any(h in src for h in _HEAVY):
+        return True
+    for m in _SIBLING_RE.finditer(src):
+        one = m.group(1) or m.group(2)
+        names = [one] if one else [t.strip().split(" as ")[0].strip() for t in m.group(3).split(",")]
+        if any(n and _is_heavy(n, seen) for n in names):
+            return True
+    return False
+
+
+def _uncurated_solver_free(all_gated) -> list:
+    """Gated scripts with NO heavy path (_is_heavy) that are in neither SMOKE nor SMOKE_EXCLUDED: the smoke
+    tier's reverse drift (solver-free validations it would silently exclude)."""
+    return [n for n in sorted(set(all_gated) - SMOKE - set(SMOKE_EXCLUDED)) if not _is_heavy(n)]
 
 
 def main(argv):
@@ -397,19 +472,7 @@ def main(argv):
         # FEM/FDTD/DEVSIM scripts as solver-free (they import their solver through these wrappers, not
         # via a top-level `import ngsolve`) -- pass-2 re-audit P2. Substrings (not import-form) so a
         # deferred/in-function import (e.g. behind a find_spec skip-guard) still counts as heavy.
-        _HEAVY = (
-            "ngsolve", "devsim", "import gmsh", "from gmsh",           # direct heavy deps
-            "optics.solver", "optics.fdtd", "optics.inverse_design",  # FEM / FDTD / jax-FDTD wrappers
-            "optics.topology_opt", "carriers.thermal_fem", "carriers.electrostatics_fem",
-            "carriers.devsim", "carriers.physics_equilibrium",   # physics_equilibrium imports devsim
-            "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
-        )
-        extra = []
-        for n in sorted(all_gated - SMOKE - set(SMOKE_EXCLUDED)):
-            with open(os.path.join(HERE, n + ".py"), encoding="utf-8") as fh:
-                src = fh.read()                                  # context-managed: see _gated
-            if not any(h in src for h in _HEAVY):
-                extra.append(n)
+        extra = _uncurated_solver_free(all_gated)
         if extra:
             # "no heavy path" = no NGSolve/DEVSIM/FDTD/jax-FDTD import; a few entries still pull
             # lumenairy/jax (the bridge validations) -- fast but not pure-numpy, so verify the runtime

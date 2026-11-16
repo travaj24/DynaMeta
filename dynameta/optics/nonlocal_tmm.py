@@ -80,7 +80,7 @@ shift of their centre -- the GNOR signature.
 
 ABC (additional boundary condition).  The extra longitudinal wave needs one extra boundary
 condition beyond (E_tangential, H_tangential) continuity.  Here it is the HARD-WALL condition
-that the normal free-electron current vanishes at each metal face, ``J_z = 0`` (Melnyk &
+that the normal free-electron current vanishes at each conductor face, ``J_z = 0`` (Melnyk &
 Harris 1970; Sipe; Raza et al. 2015 review).  Imposing ``J_z = 0`` at BOTH faces of a metal
 layer eliminates its two longitudinal amplitudes in terms of its two transverse amplitudes,
 collapsing the hydrodynamic layer to an EFFECTIVE 2x2 characteristic matrix in
@@ -88,6 +88,79 @@ collapsing the hydrodynamic layer to an EFFECTIVE 2x2 characteristic matrix in
 metal layers merely carry a modified matrix.  The longitudinal contribution is proportional
 to ``k_par`` and so VANISHES at normal incidence (no E_z to drive the compressional wave); it
 resonates when ``sin(k_z_L d) = 0``, i.e. ``k_z_L d = m*pi`` -- the bulk-plasmon standing wave.
+
+-------------------------------------------------------------------------------------------------
+RUNS: SUB-LAYERS OF ONE CONDUCTOR, AND GRADED DENSITY (v0.16)
+-------------------------------------------------------------------------------------------------
+The hard wall belongs at a CONDUCTOR BOUNDARY (conductor/dielectric, or the contact of two
+conductors the user declares distinct), never between sub-layers of one electron gas. Adjacent
+``HydroLayer`` objects sharing a non-None ``conductor_id`` form a RUN: one connected electron gas,
+each sub-layer with its own equilibrium density (its own ``wp``, ``beta``, ``gamma``, ``eps_inf``),
+J_z = 0 imposed only on the run's two outer faces. A z-graded free-carrier profile (an accumulation
+or depletion layer) is modelled as a run of thin uniform sub-layers; ``hydro_layers_from_profile``
+builds that run from n(z) on a grid, and the staircase converges to the continuous profile at
+second order (gated against an independent boundary-value solve).
+
+PRESSURE MODEL. Barotropic electron gas, pressure p(n), chemical potential mu(n) with
+dp = n dmu. The per-particle Euler equation m(dv/dt + gamma v) = -e E - grad mu(n), linearized
+about an equilibrium n0(z) that is in force balance under the SAME pressure (-e E0 = grad mu(n0),
+the zeroth order cancels exactly), with J = -e n0 v and rho1 = -e n1:
+
+    (d/dt + gamma) J = eps0 wp(z)**2 (E + grad psi),   psi = delta mu / e = mu'(n0) n1 / e,
+
+    psi = -beta(z)**2 rho1 / (eps0 wp(z)**2),   beta**2 = n0 mu'(n0) / m   (LOCAL in n0),
+
+with wp**2 = n0 e**2/(eps0 m). For a uniform layer this is exactly the (HDM) equation above. For a
+degenerate parabolic band mu'(n0) n0 = (2/3) E_F, so beta**2 = v_F(n0)**2 / 3 (Thomas-Fermi); the
+optical 'high_freq' choice (3/5) v_F**2 rescales the pressure by 9/5, uniformly, so the same form
+holds. beta therefore varies with the local density (v_F ~ n0**(1/3)); ``hydro_layers_from_profile``
+sets it per sub-layer. GNOR: beta**2 -> beta_eff**2 = beta**2 + D(gamma - i omega) inside psi
+(diffusion driven by the same electrochemical gradient, Einstein relation).
+
+INTERFACE CONDITIONS inside one conductor. Divide the momentum equation by wp**2 and integrate the
+normal component across an interface (or across a thin smooth transition): J_z and E_z stay bounded
+and wp**2 stays away from zero, so the integral of d(psi)/dz vanishes -- psi is CONTINUOUS. Charge
+conservation with a bounded rho1 (no sheet charge inside the gas) makes J_z CONTINUOUS. With
+Maxwell's E_x and H_y continuity the run carries the four-vector
+
+    (E_x, H_y, J_z, psi)   continuous at every internal interface;  J_z = 0 at the run's faces.
+
+psi continuity is continuity of the linearized electrochemical potential -- the static limit of
+the condition is "equal Fermi levels across the junction". It is NOT continuity of the pressure
+term beta**2 n1 (= n0 psi up to constants): that condition (a) belongs to a different continuum
+equation, one that drops the -e n1 E0 term and so does not keep a graded equilibrium stationary,
+(b) breaks energy conservation -- the conserved flux is S_z - (1/2) Re(psi* J_z) (Poynting plus
+the pressure work), continuous only if psi and J_z both are; a lossless graded run under
+pressure continuity shows spurious gain, A = -2e-6 to -3.5e-6 measured -- and (c) converges, as the
+staircase is refined, to an answer 3e-4 away in r from the boundary-value oracle of the graded
+film. For one effective mass across the run, psi continuity is the same statement as continuity
+of beta**2 div(J)/wp**2. The kernel (``hydro_conductivity``, ``hydro_psi_per_charge``,
+``hydro_state_generator``, ``hydro_modes``, ``HYDRO_INTERFACE_FIELDS``) is importable on its own so
+that other discretizations use the same equations: in a finite-element setting psi is the
+natural H1 (continuous) unknown and J the H(div) one, and these conditions hold without being
+imposed.
+
+SOLVER. Each sub-layer is solved exactly (two transverse + two longitudinal waves, closed form).
+The run is a banded global linear system in the wave amplitudes, each amplitude referenced at
+the face its wave decays away from (every exponential evaluated has modulus <= 1), with row and
+column equilibration; it is reduced to the 2x2 (E_x, H_y) matrix the rest of the cascade uses. No
+4x4 transfer matrix (with its exp(+|k_z,L| d) growth) is ever formed: a uniform film split into 1000
+sub-layers reproduces the single-layer result to 4e-14 in r. A run of ONE layer uses the closed-form
+ABC matrix unchanged (bit-identical to v0.15.1). s-polarization has no longitudinal coupling and
+is the local cascade, run or not; a run whose members are all in the exact local limit (beta = D =
+0) is the local graded-layer cascade.
+
+VALIDITY. Hydrodynamics is the long-wavelength expansion of the electron gas response. With the
+'high_freq' beta it is valid while u = |k_L| v_F / |omega| << 1 for the longitudinal wave of every
+sub-layer; as u approaches 1 the wave enters the particle-hole continuum (Landau damping, absent
+from the model) and the next term of the expansion is no longer small. With the 'thomas_fermi'
+beta it is the static-screening limit, valid for u >> 1 (the neglected Landau damping is ~
+pi/(2u) relative). The model also needs a degenerate gas (E_F >> k_B T): in a depletion layer
+where E_F falls to a few k_B T the degenerate pressure is wrong. ``hydro_validity`` reports u
+per layer (and E_F / k_B T when the mass and temperature are given) and flags a solve outside
+these limits; ``stack_rt(check_validity=True)`` turns a flag into an UnreliableResultWarning.
+Note that a degenerate oxide film in the near infrared typically sits near u ~ 1: the solver then
+returns the hydrodynamic answer, which is itself outside its validity.
 
 References
 ----------
@@ -130,12 +203,13 @@ call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDE
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
-from typing import Callable, NamedTuple, Sequence, Union
+from typing import Callable, Hashable, NamedTuple, Optional, Sequence, Union
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import C_LIGHT, EPS0, HBAR, KB, Q_E
 from dynameta.optics.tmm_reference import _check_energy_budget   # ONE energy-budget rule (Q-23)
 
 __all__ = [
@@ -150,6 +224,17 @@ __all__ = [
     "rta",
     "k_par_from_angle",
     "pole_function",
+    # v0.16: runs of sub-layers of one conductor, graded density
+    "HYDRO_INTERFACE_FIELDS",
+    "fermi_velocity",
+    "beta_from_density",
+    "hydro_conductivity",
+    "hydro_psi_per_charge",
+    "hydro_state_generator",
+    "hydro_modes",
+    "hydro_layers_from_profile",
+    "HydroValidity",
+    "hydro_validity",
 ]
 
 
@@ -197,6 +282,15 @@ class HydroLayer:
     D : float
         GNOR induced-charge diffusion constant [m**2/s] (default 0 -> pure hydrodynamic).  Enters
         as ``beta_eff**2 = beta**2 + D*(gamma - i*omega)``.
+    conductor_id : hashable, optional
+        Which conductor this layer belongs to (v0.16).  ADJACENT HydroLayers with the
+        same non-None id form a RUN -- one connected electron gas, (E_x, H_y, J_z, psi) continuous
+        between its sub-layers, J_z = 0 only on its two outer faces (see the module header).
+        Adjacent HydroLayers with different non-None ids are two conductors in contact: a wall
+        between them.  ``None`` (default) keeps the v0.15.1 meaning (the layer is walled on both
+        faces), but a ``None`` layer directly adjacent to another HydroLayer is refused by
+        ``stack_rt`` / ``pole_function`` unless ``allow_walls=True`` (the explicit opt-in to the old
+        physics), because a wall inside one conductor is almost never what was meant.
     """
 
     eps_inf: float
@@ -205,6 +299,7 @@ class HydroLayer:
     beta: float
     thickness_m: float
     D: float = 0.0
+    conductor_id: Optional[Hashable] = None
 
 
 @dataclass(frozen=True)
@@ -444,16 +539,390 @@ def _layer_matrix(omega: complex, layer: NonlocalLayer, k0: complex, k_par: comp
     raise TypeError("layer must be a HydroLayer or DielectricLayer; got {!r}".format(type(layer)))
 
 
+# ------------------------------------------------------------------------------------------------
+# THE KERNEL: pressure model + interface conditions for graded hydrodynamic conductors (v0.16)
+# ------------------------------------------------------------------------------------------------
+#: The state that is CONTINUOUS at every internal interface of one conductor (p-pol, planar):
+#: tangential E, tangential H, normal free current, and psi = delta(mu)/e (the linearized
+#: chemical-potential perturbation in volts).  J_z = 0 only at a conductor boundary.
+HYDRO_INTERFACE_FIELDS = ("E_x", "H_y", "J_z", "psi")
+
+_BETA2_OVER_VF2 = {"high_freq": 3.0 / 5.0, "thomas_fermi": 1.0 / 3.0}
+
+
+def fermi_velocity(n_m3, m_eff_kg: float):
+    """Parabolic-band Fermi velocity ``v_F = hbar (3 pi**2 n)**(1/3) / m`` [m/s] of a degenerate
+    electron gas of density ``n_m3`` [m**-3] (scalar or array) and effective mass ``m_eff_kg``."""
+    n = np.asarray(n_m3, dtype=float)
+    v = HBAR * np.cbrt(3.0 * math.pi ** 2 * n) / float(m_eff_kg)
+    return float(v) if v.ndim == 0 else v
+
+
+def beta_from_density(n_m3, m_eff_kg: float, convention: str = "high_freq"):
+    """LOCAL hydrodynamic velocity ``beta(n0)`` [m/s]: :func:`beta_from_vf` of the local Fermi
+    velocity :func:`fermi_velocity` (``beta**2 = n0 mu'(n0)/m``: v_F**2/3 for 'thomas_fermi', the
+    9/5-rescaled (3/5) v_F**2 for 'high_freq').  Scalar or array."""
+    v = np.asarray(fermi_velocity(n_m3, m_eff_kg), dtype=float)
+    b = np.array([beta_from_vf(x, convention) for x in v.ravel()]).reshape(v.shape)
+    return float(b) if b.ndim == 0 else b
+
+
+def hydro_conductivity(omega, layer: HydroLayer) -> complex:
+    """Drude conductivity ``sigma = eps0 wp**2 / (gamma - i omega)`` [S/m] of a hydrodynamic layer:
+    the constitutive law of the kernel is ``J = sigma (E + grad psi)``.  ``sigma = -i omega eps0
+    (eps_T - eps_inf)``."""
+    w = complex(omega)
+    return EPS0 * layer.wp * layer.wp / (layer.gamma - 1j * w)
+
+
+def hydro_psi_per_charge(omega, layer: HydroLayer) -> complex:
+    """``c`` in ``psi = c * rho1``: ``c = -beta_eff**2 / (eps0 wp**2)`` [V m**3 / C].
+
+    ``psi = delta(mu)/e`` is the linearized chemical-potential perturbation in volts, the quantity
+    that is continuous between sub-layers of one conductor.  With ``rho1 = div(J)/(i omega)`` this
+    is ``psi = -beta_eff**2 div(J) / (i omega eps0 wp**2)``; for one effective mass across a run,
+    continuity of psi is continuity of ``beta**2 div(J) / wp**2``."""
+    if layer.wp == 0:
+        raise ValueError("hydro_psi_per_charge: wp = 0 -- no free carriers, psi is undefined")
+    return -beta_eff_squared(omega, layer) / (EPS0 * layer.wp * layer.wp)
+
+
+def _delta_eps(w: complex, layer: HydroLayer) -> complex:
+    """``eps_T - eps_inf = -wp**2/(omega**2 + i omega gamma)``, evaluated with the same operations as
+    :func:`eps_transverse` so that ``eps_inf + _delta_eps`` IS ``eps_transverse`` bit for bit."""
+    return -(layer.wp * layer.wp / (w * w + 1j * w * layer.gamma))
+
+
+def _kz_decaying(x: complex) -> complex:
+    """The square root of ``x`` with ``Im >= 0`` (the wave exp(+i kz z) decays, or propagates, toward
+    +z).  Both signs are present in every layer, so the choice only fixes which face a wave is
+    referenced to."""
+    k = complex(np.sqrt(complex(x) + 0j))
+    return -k if k.imag < 0.0 else k
+
+
+def hydro_state_generator(omega, layer: HydroLayer, k_par) -> np.ndarray:
+    """The 4x4 generator ``K`` of the p-pol hydrodynamic field equations in a uniform layer,
+    ``d u / dz = K u``, for the CONTINUOUS state ``u = (E_x, H_y/(omega eps0), J_z/(omega eps0), psi)``
+    (the reduced H and J share the factor omega*eps0, so continuity is unaffected).  Fields vary as
+    exp(i k_par x - i omega t); z points from the superstrate into the stack.
+
+    Derived from curl E = i omega mu0 H, curl H = -i omega eps0 eps_inf E + J, div J = i omega rho1,
+    J = sigma (E + grad psi), psi = -beta_eff**2 rho1/(eps0 wp**2); with Delta = eps_T - eps_inf
+    (so sigma = -i omega eps0 Delta) and k0 = omega/c::
+
+        dE_x/dz = i (k0**2 - k_par**2/eps_inf) H~ + (k_par/eps_inf) J~
+        dH~/dz  = i eps_T E_x - k_par Delta psi
+        dJ~/dz  = -k_par Delta E_x - i (k_par**2 Delta + wp**2/beta_eff**2) psi
+        dpsi/dz = (k_par/eps_inf) H~ + i (1/Delta + 1/eps_inf) J~
+
+    Its eigenvalues are +-i k_z,T and +-i k_z,L (:func:`hydro_modes`).  For a graded conductor the
+    same equations hold POINTWISE with wp(z), beta(z): this generator, evaluated at each z, is the
+    ODE of the continuous problem, and (E_x, H_y, J_z, psi) is continuous across any interface
+    inside the conductor."""
+    if _is_local_limit(layer):
+        raise ValueError("hydro_state_generator: beta = D = 0 is the local limit (no longitudinal "
+                         "wave, psi is identically 0); use the local Abeles matrix")
+    w = complex(omega)
+    kp = complex(k_par)
+    k0 = w / C_LIGHT
+    dl = _delta_eps(w, layer)
+    eps_t = layer.eps_inf + dl
+    ei = layer.eps_inf
+    g = layer.wp * layer.wp / beta_eff_squared(w, layer)
+    return np.array([[0.0, 1j * (k0 * k0 - kp * kp / ei), kp / ei, 0.0],
+                     [1j * eps_t, 0.0, 0.0, -kp * dl],
+                     [-kp * dl, 0.0, 0.0, -1j * (kp * kp * dl + g)],
+                     [0.0, kp / ei, 1j * (1.0 / dl + 1.0 / ei), 0.0]], dtype=np.complex128)
+
+
+def _hydro_modes(w: complex, layer: HydroLayer, k0: complex, kp: complex):
+    """Closed-form eigenvectors (columns) and z-wavevectors of :func:`hydro_state_generator`, order
+    (T+, T-, L+, L-); Im(k_z) >= 0 for the '+' waves.  Transverse: H~ = 1, E_x = +-k_z,T/eps_T,
+    J~ = i k_par Delta/eps_T, psi = 0.  Longitudinal (amplitude a = 1, E = (k_par, +-k_z,L) a,
+    H = 0): J~ = +-i eps_inf k_z,L, psi = i eps_T/Delta."""
+    dl = _delta_eps(w, layer)
+    eps_t = eps_transverse(w, layer)
+    kzt = _kz_decaying(eps_t * k0 * k0 - kp * kp)
+    kzl = _kz_decaying(kL_squared(w, layer) - kp * kp)
+    yinv = kzt / eps_t
+    alpha = 1j * kp * dl / eps_t
+    jl = 1j * layer.eps_inf * kzl
+    psil = 1j * eps_t / dl
+    phi = np.array([[yinv, -yinv, kp, kp],
+                    [1.0, 1.0, 0.0, 0.0],
+                    [alpha, alpha, jl, -jl],
+                    [0.0, 0.0, psil, psil]], dtype=np.complex128)
+    return phi, np.array([kzt, -kzt, kzl, -kzl], dtype=np.complex128)
+
+
+def hydro_modes(omega, layer: HydroLayer, k_par):
+    """``(Phi, kz)``: the four plane-wave solutions of a uniform hydrodynamic layer, columns of
+    ``Phi`` in the state of :func:`hydro_state_generator`, ordered (T+, T-, L+, L-), with
+    ``K @ Phi == Phi @ diag(1j * kz)``.  ``Im(kz) >= 0`` for the '+' waves."""
+    if _is_local_limit(layer):
+        raise ValueError("hydro_modes: beta = D = 0 is the local limit (no longitudinal wave)")
+    w = complex(omega)
+    return _hydro_modes(w, layer, w / C_LIGHT, complex(k_par))
+
+
+# ------------------------------------------------------------------------------------------------
+# Runs: grouping, validation, and the stable banded run solve
+# ------------------------------------------------------------------------------------------------
+def _hydro_blocks(layers: Sequence[NonlocalLayer], allow_walls: bool):
+    """Group ``layers`` into blocks: a RUN (list of >= 2 adjacent HydroLayers with one non-None
+    conductor_id) or a single layer (list of 1).  Refuses an ambiguous wall (an unlabelled
+    HydroLayer directly against another HydroLayer) unless ``allow_walls``, a run mixing local-limit
+    and nonlocal members, and a nonlocal run member without carriers."""
+    blocks = []
+    for i, layer in enumerate(layers):
+        if isinstance(layer, HydroLayer) and blocks and isinstance(blocks[-1][-1], HydroLayer):
+            a, b = blocks[-1][-1].conductor_id, layer.conductor_id
+            if a is not None and a == b:
+                blocks[-1].append(layer)
+                continue
+            if (a is None or b is None) and not allow_walls:
+                raise ValueError(
+                    "layers {} and {} are adjacent HydroLayers and at least one has conductor_id="
+                    "None: a hard wall J_z = 0 would sit between them. Sub-layers of ONE conductor "
+                    "(a uniform film cut in pieces, a graded density profile) must share a "
+                    "conductor_id so that they form a connected run; two different conductors in "
+                    "contact take different non-None ids. Pass allow_walls=True to keep the v0.15.1 "
+                    "physics (a wall at every HydroLayer face).".format(i - 1, i))
+        blocks.append([layer])
+    for blk in blocks:
+        if len(blk) > 1:
+            local = [_is_local_limit(x) for x in blk]
+            if any(local) and not all(local):
+                raise ValueError(
+                    "run conductor_id={!r} mixes local-limit members (beta = D = 0) with nonlocal "
+                    "ones: psi would be forced to 0 on one side and free on the other (ill-posed). "
+                    "Give every member a nonzero beta (or D), or make all of them local."
+                    .format(blk[0].conductor_id))
+            if not any(local) and any(not (x.wp > 0) for x in blk):
+                raise ValueError("run conductor_id={!r}: every member of a nonlocal run needs "
+                                 "wp > 0 (free carriers)".format(blk[0].conductor_id))
+    return blocks
+
+
+def _is_nonlocal_run(block) -> bool:
+    return len(block) > 1 and not _is_local_limit(block[0])
+
+
+def _hydro_run_matrix_p(omega: complex, run: Sequence[HydroLayer], k0: complex, k_par: complex,
+                        interface: str = "electrochemical") -> np.ndarray:
+    """p-pol 2x2 characteristic matrix (reduced (E_x, H_y/(omega eps0)) basis, top face -> bottom
+    face) of a RUN of hydrodynamic sub-layers of one conductor.
+
+    Unknowns: the four wave amplitudes of every sub-layer, each referenced at the face its wave
+    decays away from ('+' waves at the top face, '-' waves at the bottom face), so every exponential
+    in the system is exp(i kz d) with Im(kz) >= 0 -- nothing grows, however thin the sub-layers or
+    however evanescent the longitudinal waves.  Equations (4N for N sub-layers): J_z = 0 on the
+    top face, E_x and H~ prescribed on the top face (the two right-hand sides), (E_x, H~, J~, psi)
+    continuous at each internal interface, J_z = 0 on the bottom face.  Banded (6 below, 4 above
+    the diagonal), row- and column-equilibrated, solved with partial pivoting; the bottom-face
+    (E_x, H~) of the two solutions are the matrix columns.
+
+    ``interface='pressure'`` is a PRIVATE test hook that replaces psi continuity by continuity of
+    the pressure term beta**2 n1 (proportional to wp**2 psi for one effective mass): the rejected
+    alternative, kept only so that the gates can show they discriminate."""
+    from scipy.linalg import solve_banded
+
+    w = complex(omega)
+    n_sub = len(run)
+    n = 4 * n_sub
+    tops, bots, wts = [], [], []
+    for lay in run:
+        phi, kz = _hydro_modes(w, lay, k0, complex(k_par))
+        d = float(lay.thickness_m)
+        et = np.exp(1j * kz[0] * d)
+        el = np.exp(1j * kz[2] * d)
+        tops.append(phi * np.array([1.0, et, 1.0, el])[None, :])
+        bots.append(phi * np.array([et, 1.0, el, 1.0])[None, :])
+        if interface == "electrochemical":
+            wts.append(1.0)
+        elif interface == "pressure":
+            wts.append(lay.wp * lay.wp)
+        else:
+            raise ValueError("interface must be 'electrochemical' (or the test hook 'pressure')")
+
+    # rows as (row index, first column, values)
+    rows = [(0, 0, tops[0][2]), (1, 0, tops[0][0]), (2, 0, tops[0][1])]
+    for k in range(n_sub - 1):
+        for i in range(4):
+            a, b = bots[k][i], tops[k + 1][i]
+            if i == 3:
+                a, b = a * wts[k], b * wts[k + 1]
+            rows.append((3 + 4 * k + i, 4 * k, np.concatenate([a, -b])))
+    rows.append((n - 1, n - 4, bots[-1][2]))
+    rhs = np.zeros((n, 2), dtype=np.complex128)
+    rhs[1, 0] = 1.0
+    rhs[2, 1] = 1.0
+
+    lo, up = 6, 4
+    ab = np.zeros((lo + up + 1, n), dtype=np.complex128)
+    for r, c0, vals in rows:
+        s = np.max(np.abs(vals))
+        s = 1.0 / s if s > 0.0 else 1.0
+        rhs[r] *= s
+        cols = np.arange(c0, c0 + vals.size)
+        ab[up + r - cols, cols] = vals * s
+    cs = np.max(np.abs(ab), axis=0)
+    cs = np.where(cs > 0.0, 1.0 / np.where(cs > 0.0, cs, 1.0), 1.0)
+    ab *= cs[None, :]
+    x = solve_banded((lo, up), ab, rhs, check_finite=False) * cs[:, None]
+    return bots[-1][0:2] @ x[n - 4:n]
+
+
 def _stack_matrix(omega: complex, layers: Sequence[NonlocalLayer], k0: complex, k_par: complex,
-                  pol: str) -> np.ndarray:
+                  pol: str, allow_walls: bool = False) -> np.ndarray:
     """Total characteristic matrix of the stack, mapping (E_tan, H_tan) from the SUPERSTRATE
     face to the SUBSTRATE face.  ``layers`` are ordered superstrate-side first, so
     ``M_total = M_{N} @ ... @ M_1`` (each layer post-multiplies onto the running product from
-    the left)."""
+    the left).  A p-pol nonlocal RUN (>= 2 sub-layers of one conductor) enters as one block,
+    :func:`_hydro_run_matrix_p`; every other layer enters exactly as in v0.15.1."""
     M = np.eye(2, dtype=np.complex128)
-    for layer in layers:
-        M = _layer_matrix(omega, layer, k0, k_par, pol) @ M
+    for block in _hydro_blocks(layers, allow_walls):
+        if pol == "p" and _is_nonlocal_run(block):
+            M = _hydro_run_matrix_p(omega, block, k0, k_par) @ M
+            continue
+        for layer in block:
+            M = _layer_matrix(omega, layer, k0, k_par, pol) @ M
     return M
+
+
+# ------------------------------------------------------------------------------------------------
+# Graded profile -> run, and the validity diagnostic
+# ------------------------------------------------------------------------------------------------
+def hydro_layers_from_profile(z_m, n_m3, *, m_eff_kg: float, eps_inf: float, gamma: float,
+                              n_layers: Optional[int] = None, convention: str = "high_freq",
+                              D: float = 0.0, conductor_id: Hashable = "graded") -> list:
+    """A RUN of uniform hydrodynamic sub-layers representing the density profile ``n_m3`` sampled
+    at ``z_m`` (``z_m[0]`` is the face nearest the superstrate, ``z_m`` strictly increasing).
+
+    Each sub-layer carries the EXACT cell mean of the piecewise-linear interpolant of n(z) (so the
+    sheet density of every cell, hence the integral of wp**2, is conserved), and from it
+    ``wp = sqrt(n e**2/(eps0 m))`` and the LOCAL ``beta = beta_from_density(n, m, convention)``.
+    ``n_layers=None`` makes one sub-layer per grid cell ``[z_i, z_i+1]``; an integer resamples the
+    profile onto that many equal cells over ``[z_m[0], z_m[-1]]`` (the refinement knob: the
+    staircase converges to the continuous profile at second order in the cell size).
+    Parabolic band, one effective mass, scalar ``eps_inf`` / ``gamma`` / ``D``; build HydroLayers by
+    hand (with one shared ``conductor_id``) for anything else.  Every sub-layer gets
+    ``conductor_id``.  Densities must be positive; see :func:`hydro_validity` for where the
+    model applies (a depletion layer that is no longer degenerate is outside it)."""
+    z = np.asarray(z_m, dtype=float)
+    nn = np.asarray(n_m3, dtype=float)
+    if z.ndim != 1 or nn.shape != z.shape or z.size < 2:
+        raise ValueError("z_m and n_m3 must be 1-D arrays of the same length >= 2")
+    if not (np.all(np.isfinite(z)) and np.all(np.isfinite(nn))):
+        raise ValueError("z_m and n_m3 must be finite")
+    if np.any(np.diff(z) <= 0.0):
+        raise ValueError("z_m must be strictly increasing")
+    if np.any(nn <= 0.0):
+        raise ValueError("n_m3 must be > 0 everywhere (a run member needs free carriers)")
+    if conductor_id is None:
+        raise ValueError("conductor_id must not be None: the sub-layers must form one run")
+    if n_layers is None:
+        edges = z
+        nav = 0.5 * (nn[:-1] + nn[1:])
+    else:
+        if int(n_layers) != n_layers or int(n_layers) < 1:
+            raise ValueError("n_layers must be a positive integer")
+        edges = np.linspace(z[0], z[-1], int(n_layers) + 1)
+        cum = np.concatenate([[0.0], np.cumsum(0.5 * (nn[:-1] + nn[1:]) * np.diff(z))])
+        seg = np.clip(np.searchsorted(z, edges, side="right") - 1, 0, z.size - 2)
+        F = cum[seg] + 0.5 * (edges - z[seg]) * (nn[seg] + np.interp(edges, z, nn))
+        nav = np.diff(F) / np.diff(edges)
+    m = float(m_eff_kg)
+    out = []
+    for nk, dk in zip(nav, np.diff(edges)):
+        wp = math.sqrt(nk * Q_E * Q_E / (EPS0 * m))
+        out.append(HydroLayer(float(eps_inf), wp, float(gamma),
+                              beta_from_density(float(nk), m, convention), float(dk),
+                              D=float(D), conductor_id=conductor_id))
+    return out
+
+
+class HydroValidity(NamedTuple):
+    """Result of :func:`hydro_validity`.
+
+    Attributes
+    ----------
+    u : tuple of float
+        Per input layer, ``|k_L| v_F / |omega|`` of its longitudinal wave (``nan`` for dielectric and
+        local-limit layers), with ``v_F = beta / sqrt(c)`` for the stated beta convention.
+    degeneracy : tuple of float
+        Per input layer, ``E_F / (k_B T)`` (``nan`` unless ``m_eff_kg`` and ``T_K`` were given).
+    ok : bool
+        True when every hydrodynamic layer is inside the limits.
+    message : str
+        Empty when ``ok``; otherwise names the worst layer and the limit it breaks.
+    """
+
+    u: tuple
+    degeneracy: tuple
+    ok: bool
+    message: str
+
+
+def hydro_validity(omega, layers: Sequence[NonlocalLayer], *, convention: str = "high_freq",
+                   u_limit: Optional[float] = None, m_eff_kg: Optional[float] = None,
+                   T_K: Optional[float] = None, degeneracy_min: float = 10.0) -> HydroValidity:
+    """Report whether a hydrodynamic solve at ``omega`` is inside the model's validity.
+
+    For every nonlocal HydroLayer, ``u = |k_L| v_F / |omega|`` (``k_L`` the full longitudinal
+    wavevector, :func:`kL_squared`; ``v_F = beta/sqrt(3/5)`` or ``beta/sqrt(1/3)`` for ``convention``
+    'high_freq' / 'thomas_fermi', i.e. the convention the betas were built with).
+
+    * 'high_freq' (the dynamic, omega >> k v_F expansion): needs ``u <= u_limit`` (default 0.5).
+      At u = 0.5 the first term the model misses, (3/7 - 9/25) u**4 of the Lindhard expansion, is
+      0.4 %; at u -> 1 the wave reaches the particle-hole continuum (Landau damping, absent from
+      the model) and the expansion fails.
+    * 'thomas_fermi' (the static-screening limit): needs ``u >= u_limit`` (default 10), where the
+      neglected Landau damping, ~ pi/(2u) relative, is below ~16 %.
+
+    With ``m_eff_kg`` and ``T_K`` also given, ``E_F / k_B T`` is reported per layer (``n`` from
+    ``wp`` and the mass) and must be >= ``degeneracy_min`` (default 10: the Sommerfeld correction to
+    the degenerate pressure, (5 pi**2/12)(k_B T/E_F)**2, is then 4 %).  Pure diagnostic: nothing
+    is changed; ``stack_rt(check_validity=True)`` warns on a failed report."""
+    if convention not in _BETA2_OVER_VF2:
+        raise ValueError("convention must be 'high_freq' or 'thomas_fermi'; got {!r}"
+                         .format(convention))
+    hf = convention == "high_freq"
+    lim = float(u_limit) if u_limit is not None else (0.5 if hf else 10.0)
+    w = complex(omega)
+    us, degs, bad = [], [], []
+    for i, layer in enumerate(layers):
+        if not isinstance(layer, HydroLayer) or _is_local_limit(layer):
+            us.append(float("nan"))
+            degs.append(float("nan"))
+            continue
+        vf = layer.beta / math.sqrt(_BETA2_OVER_VF2[convention])
+        u = math.sqrt(abs(kL_squared(w, layer))) * vf / abs(w)
+        us.append(u)
+        if (hf and u > lim) or (not hf and u < lim):
+            bad.append((abs(math.log(u / lim)) if u > 0 else float("inf"),
+                        "layer {}: u = |k_L| v_F/omega = {:.3g} {} {:.3g} ({} beta)".format(
+                            i, u, ">" if hf else "<", lim, convention)))
+        if m_eff_kg is not None and T_K is not None:
+            nk = EPS0 * float(m_eff_kg) * layer.wp * layer.wp / (Q_E * Q_E)
+            ef = HBAR * HBAR * (3.0 * math.pi ** 2 * nk) ** (2.0 / 3.0) / (2.0 * float(m_eff_kg))
+            dg = ef / (KB * float(T_K))
+            degs.append(dg)
+            if dg < degeneracy_min:
+                bad.append((math.log(degeneracy_min / dg) if dg > 0 else float("inf"),
+                            "layer {}: E_F/k_B T = {:.3g} < {:.3g} (not degenerate)".format(
+                                i, dg, degeneracy_min)))
+        else:
+            degs.append(float("nan"))
+    if not bad:
+        return HydroValidity(tuple(us), tuple(degs), True, "")
+    bad.sort(key=lambda t: -t[0])
+    msg = ("hydrodynamic solve outside the model's validity in {} check(s); worst: {}. The "
+           "hydrodynamic (long-wavelength) electron-gas response does not hold there (Landau "
+           "damping / non-degenerate gas); treat the result as qualitative.".format(
+               len(bad), bad[0][1]))
+    return HydroValidity(tuple(us), tuple(degs), False, msg)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -465,7 +934,10 @@ class RTA(NamedTuple):
     Attributes
     ----------
     r, t : complex
-        Amplitude reflection / transmission coefficients (tangential-E ratios).
+        Amplitude reflection / transmission coefficients (tangential-E ratios; for p-polarization
+        r is the NEGATIVE of the library's p-hat r_p = r_H, see :func:`stack_rt`). The same
+        tuple returned by ``optics.quantum_film.film_stack_rt`` carries the p-hat r = r_H instead
+        (its docstring).
     R, T, A : float
         Power reflectance ``|r|**2``, transmittance ``|t|**2 Re(Y_sub)/Re(Y_super)`` (angle /
         index corrected), and absorptance ``A = 1 - R - T``.
@@ -510,15 +982,27 @@ def _rt_from_matrix(M: np.ndarray, Y_super: complex, Y_sub: complex):
 
 
 def stack_rt(omega, layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
-             theta_rad: float = 0.0, k_par_m=None, check_energy: bool = True) -> RTA:
+             theta_rad: float = 0.0, k_par_m=None, check_energy: bool = True,
+             allow_walls: bool = False, check_validity: bool = False) -> RTA:
     """Reflectance / transmittance / absorptance of ``super | layers | sub`` at ``omega``.
+
+    SIGN CONVENTION OF r FOR p-POLARIZATION (unchanged since v0.15.1): ``r`` and ``t`` are
+    TANGENTIAL-E ratios, r = E_x(refl) / E_x(inc). For p-polarization this is the NEGATIVE of the
+    library's p-hat convention r_p = r_H = H_y(refl) / H_y(inc) used by ``optics.fem_2d_tm``
+    (polarization 'p'), the lumenairy bridges, ``optics.tmm_reference``, ``optics.quantum_film_cell``
+    and ``optics.quantum_film.film_stack_rt`` / ``QuantumFilmResponse.stack_rt``: the same planar
+    p-pol stack gives ``nonlocal_tmm.stack_rt(...).r == -fem_2d_tm(...).r`` (to the routes'
+    discretization; exactly ``-film_stack_rt(...).r`` for the same layers). Negate ``r`` before
+    comparing with those routes. s-polarization (E_y ratio) is the same in every route. R, T, A and
+    ``D_pole`` do not depend on the sign.
 
     Parameters
     ----------
     omega : float or complex
         Angular frequency [rad/s].
     layers : sequence of HydroLayer / DielectricLayer
-        Ordered from the superstrate side to the substrate side.
+        Ordered from the superstrate side to the substrate side.  Adjacent HydroLayers with one
+        non-None ``conductor_id`` form a RUN (one connected electron gas; see the module header).
     pol : {'p', 's'}
         Polarization.  Only p-pol carries the longitudinal (nonlocal) physics; s-pol is the
         local result.
@@ -536,6 +1020,13 @@ def stack_rt(omega, layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=
         "absorptance" (an interior gain layer, ``gamma < 0`` or ``Im(eps) < 0``, used to pass
         silently here while the TMM oracle raised).  Complex ``omega``, evanescent incidence and
         a lossy superstrate are not checked.  ``False`` for a deliberate gain medium.
+    allow_walls : bool
+        Opt-in to the v0.15.1 physics for unlabelled adjacent HydroLayers (a hard wall J_z = 0
+        between them).  Without it such a pair raises ValueError (v0.16: walls only at conductor
+        boundaries).
+    check_validity : bool
+        Run :func:`hydro_validity` (default limits, 'high_freq' convention) for p-pol and emit an
+        UnreliableResultWarning when the solve is outside the hydrodynamic model's validity.
 
     Returns
     -------
@@ -552,7 +1043,12 @@ def stack_rt(omega, layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=
     else:
         k_par = complex(k_par_m)
 
-    M = _stack_matrix(w, layers, k0, k_par, pol)
+    M = _stack_matrix(w, layers, k0, k_par, pol, allow_walls=allow_walls)
+    if check_validity and pol == "p":
+        report = hydro_validity(w, layers)
+        if not report.ok:
+            from dynameta.warning_types import UnreliableResultWarning
+            warnings.warn(report.message, UnreliableResultWarning, stacklevel=2)
     Y_super = _admittance(eps_super, _kz(eps_super, k0, k_par), pol)
     Y_sub = _admittance(eps_sub, _kz(eps_sub, k0, k_par), pol)
 
@@ -576,7 +1072,7 @@ def rta(omega, layers: Sequence[NonlocalLayer], **kwargs):
 # Pole function (compatible with optics.resonance.find_poles)
 # ------------------------------------------------------------------------------------------------
 def pole_function(layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
-                  k_par_m=0.0) -> Callable[[complex], complex]:
+                  k_par_m=0.0, allow_walls: bool = False) -> Callable[[complex], complex]:
     """Return the analytic scattering-pole function (a closure holding ``k_par`` FIXED), whose
     ZEROS are the scattering poles of the hydrodynamic stack.  Feed it to
     ``dynameta.optics.resonance.find_poles`` / ``newton_refine``.
@@ -608,9 +1104,22 @@ def pole_function(layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.
     for GENUINE nonlocal stacks (finite ``beta``); in the ``beta -> 0`` local limit there is no
     bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there).  The EXACT
     local limit ``beta = D = 0`` is handled (audit Q-18): such a layer is the local Drude layer
-    and contributes no clearing factor."""
+    and contributes no clearing factor.
+
+    RUNS (v0.16): the adjacency rules of :func:`stack_rt` apply (``allow_walls``).  A p-pol
+    NONLOCAL run of >= 2 sub-layers is REFUSED (NotImplementedError): its matrix has its own
+    standing-wave poles, which have no analytic clearing factor analogous to sin(k_z,L d) here
+    (the natural candidate, the determinant of the run's global system, depends on which face each
+    wave is referenced to and is not analytic in omega).  Locate such modes on the real axis with
+    :func:`stack_rt`.  Single-layer runs, local-limit runs and s-pol are unaffected."""
     if pol not in ("p", "s"):
         pol = _accept_pol(pol, "pole_function")          # audit V-3/V-8: one vocabulary, one message
+    blocks = _hydro_blocks(layers, allow_walls)
+    if pol == "p" and any(_is_nonlocal_run(b) for b in blocks):
+        raise NotImplementedError(
+            "pole_function does not support a p-pol run of >= 2 nonlocal sub-layers of one "
+            "conductor (no analytic clearing of the run's standing-wave poles); scan stack_rt on "
+            "the real axis instead")
     kpar = complex(k_par_m)
     eps_super = complex(n_super) ** 2
     eps_sub = complex(n_sub) ** 2
@@ -622,7 +1131,7 @@ def pole_function(layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.
     def D(omega):
         w = complex(omega)
         k0 = w / C_LIGHT
-        M = _stack_matrix(w, layers, k0, kpar, pol)
+        M = _stack_matrix(w, layers, k0, kpar, pol, allow_walls=allow_walls)
         Y_super = _admittance(eps_super, _kz(eps_super, k0, kpar), pol)
         Y_sub = _admittance(eps_sub, _kz(eps_sub, k0, kpar), pol)
         M00, M01 = M[0, 0], M[0, 1]

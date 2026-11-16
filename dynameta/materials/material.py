@@ -85,6 +85,21 @@ class Material:
         """Optical eps at a wavelength (and, for free-carrier models, density)."""
         return self.optical.eps(lambda_m, n_m3=n_m3)
 
+    # v0.16: the field-bundle surface of the optical model (DrudeOptical with boundary scattering), so
+    # core.effects.OpticalModelEffect(material) -- what MaterialEpsMap builds -- reaches it. False / absent
+    # for every other optical model, whose scalar eps() path is then unchanged.
+    @property
+    def field_response(self) -> bool:
+        return bool(getattr(self.optical, "field_response", False))
+
+    @property
+    def needs_position(self) -> bool:
+        return bool(getattr(self.optical, "needs_position", False))
+
+    def eps_fields(self, fields: dict, lambda_m: float):
+        """The optical model's field-bundle response (only for a model with field_response)."""
+        return self.optical.eps_fields(fields, lambda_m)
+
 
 class MaterialRegistry:
     """Name -> Material. A Design carries its own registry so different

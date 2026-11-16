@@ -231,7 +231,7 @@ def test_bgn_lifetime_conduction_reference(bgn_lifetimes, gamma):
     nie = bgn_lifetimes["nie"]
     n1 = NC * math.exp(-EC_A / KT)
     tau = _tau_closed(n1, nie * nie / n1, nie)
-    assert _measured_tau(bgn_lifetimes[("cond", gamma)], tau) == pytest.approx(tau, rel=1e-4)
+    assert _measured_tau(bgn_lifetimes[("cond", gamma)], tau) == pytest.approx(tau, rel=1e-4, abs=0)
 
 
 def test_bgn_lifetime_intrinsic_reading_differs(bgn_lifetimes):
@@ -248,7 +248,7 @@ def test_bgn_lifetime_intrinsic_reading_differs(bgn_lifetimes):
     for g in (0.2, 0.8):
         ti = _measured_tau(bgn_lifetimes[("intr", g)], tau_i)
         tc = _measured_tau(bgn_lifetimes[("cond", g)], tau_c)
-        assert ti == pytest.approx(tau_i, rel=1e-4)
+        assert ti == pytest.approx(tau_i, rel=1e-4, abs=0)
         assert ti / tc == pytest.approx(tau_i / tau_c, rel=2e-4)
         assert ti / tc > 2.0                                     # measurably different
     for kind in ("cond", "intr"):                                # gamma-independent (finding)

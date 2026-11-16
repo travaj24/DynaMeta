@@ -244,7 +244,7 @@ def test_cache_material_retune_and_solver_identity_miss(tmp_path):
 
 
 @pytest.mark.parametrize("fmt", _FORMATS)
-def test_cache_packed_layout_stale_truncate_and_bit_identity(fmt, tmp_path):
+def test_cache_packed_layout_stale_truncate_and_bit_identity(fmt, tmp_path, caplog):
     # audit 6.2: entries persist as ONE (N,12) value matrix + one (N,41) key matrix (schema 5;
     # ~100-250x faster flush/reopen than a dataset per entry, bit-identical). Fixer-hazard leg:
     # after a load-side schema discard the old entries are still PHYSICALLY in the file -- the
@@ -264,8 +264,13 @@ def test_cache_packed_layout_stale_truncate_and_bit_identity(fmt, tmp_path):
     # a store under the PREVIOUS schema (whose layout was one dataset per entry) with a bogus entry
     save_arrays(p, {stale_key: np.zeros(len(C._VEC))},
                 {"schema": C._SCHEMA - 1, "tag": "", "layout": list(C._VEC)}, fmt=fmt)
-    c1 = OpticalSolverCache(inner, p, fmt=fmt, autosave_every=1)
+    with caplog.at_level("INFO", logger="dynameta.cache"):
+        c1 = OpticalSolverCache(inner, p, fmt=fmt, autosave_every=1)
     assert c1._mem == {}                                       # load-side schema discard
+    # ... and it says so, once, at INFO (never a warning: a stale store is normal after an upgrade)
+    msgs = [r.getMessage() for r in caplog.records if r.name == "dynameta.cache"]
+    assert len(msgs) == 1 and "schema {}".format(C._SCHEMA - 1) in msgs[0] and "discarded" in msgs[0], msgs
+    assert all(r.levelname == "INFO" for r in caplog.records if r.name == "dynameta.cache")
     grid = [(4.0, 1.4e-6), (9.0, 1.5e-6)]
     for b, lam in grid:
         c1(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=complex(b))}, lam, 1.0, 1.0)

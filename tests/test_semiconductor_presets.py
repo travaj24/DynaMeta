@@ -73,9 +73,9 @@ def test_p2_power_log_formula_hand_values_and_clamp():
     clamp below N_ref (our choice, stated in the module doc) gives 0 there; N <= 0 gives 0."""
     for N in (1e18, 1e19, 1e20):
         assert float(BO.BGN_SI_YAN_CUEVAS_2013_FD.delta_Eg_eV(N * CM3)) == pytest.approx(
-            _power_log(N, A_FD, NREF_FD, B_FD), rel=1e-13)
+            _power_log(N, A_FD, NREF_FD, B_FD), rel=1e-13, abs=0)
         assert float(BO.BGN_SI_YAN_CUEVAS_2013_BOLTZMANN.delta_Eg_eV(N * CM3)) == pytest.approx(
-            _power_log(N, A_BZ, NREF_BZ, B_BZ), rel=1e-13)
+            _power_log(N, A_BZ, NREF_BZ, B_BZ), rel=1e-13, abs=0)
     assert _power_log(1e19, A_FD, NREF_FD, B_FD) == pytest.approx(64.092e-3, abs=1e-6)
     assert _power_log(1e20, A_BZ, NREF_BZ, B_BZ) == pytest.approx(89.525e-3, abs=1e-6)
     for N in (0.0, -1e20, 1e13, 1e14):

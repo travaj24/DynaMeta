@@ -97,7 +97,7 @@ def test_stressmig_relax_and_thresholds():
 def test_hci_limits_and_q_dimension():
     assert np.isinf(hci_time_to_failure_s(0.0, 300.0, C_s=1.0, width_m=1e-6))
     rate = trap_generation_rate_per_m2_s(5e-6, 1e-6, 2e-6, A_it=1e-3)
-    assert rate * 1.602176634e-19 * 1e-6 * 2e-6 == pytest.approx(1e-3 * 5e-6, rel=1e-12)
+    assert rate * 1.602176634e-19 * 1e-6 * 2e-6 == pytest.approx(1e-3 * 5e-6, rel=1e-12, abs=0)
     # negative Ea (the physical HCI quirk) accepted; worse cold
     assert (hci_time_to_failure_s(1e-6, 250.0, C_s=1.0, width_m=1e-6, Ea_eV=-0.1)
             < hci_time_to_failure_s(1e-6, 350.0, C_s=1.0, width_m=1e-6, Ea_eV=-0.1))
@@ -106,7 +106,7 @@ def test_hci_limits_and_q_dimension():
 # ---- REL9 corrosion ----
 
 def test_corrosion_limits_and_peck():
-    assert float(deal_grove_thickness_m(0.0, A_m=50e-9, B_m2_s=1e-19, x0_m=2e-9)) == pytest.approx(2e-9)
+    assert float(deal_grove_thickness_m(0.0, A_m=50e-9, B_m2_s=1e-19, x0_m=2e-9)) == pytest.approx(2e-9, rel=1e-6, abs=0)
     x = deal_grove_thickness_m(np.array([0.0, 1e3, 1e6]), A_m=50e-9, B_m2_s=1e-19)
     assert np.all(np.diff(x) > 0.0)                                     # oxide only grows
     assert peck_af(RH_use=40.0, RH_stress=85.0, T_use_K=298.15, T_stress_K=358.15) > 10.0

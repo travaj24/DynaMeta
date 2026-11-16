@@ -98,7 +98,7 @@ def test_effect_model_reaches_solver_via_pipeline():
     ef = _run(n_to_eps=EffectEpsMap(_design().materials, effects={"mat": tom}),
               extra_fields={"T": 360.0})
     assert ef.is_uniform and not ef.is_tensor                       # uniform field-effect -> scalar
-    assert np.isclose(ef.scalar, complex(tom.eps({"T": 360.0}, LAM_NM * 1e-9)), rtol=1e-12)
+    assert np.isclose(ef.scalar, complex(tom.eps({"T": 360.0}, LAM_NM * 1e-9)), rtol=1e-12, atol=0)
     assert ef.scalar != EPS0                                        # genuinely modulated
 
 
@@ -113,7 +113,7 @@ def test_extra_fields_callable_is_resolved_per_bias():
         return {"T": 410.0}
     ef = _run(n_to_eps=EffectEpsMap(_design().materials, effects={"mat": tom}), extra_fields=_ef)
     assert seen["label"] == "b0"                                    # callable saw the bias point
-    assert np.isclose(ef.scalar, complex(tom.eps({"T": 410.0}, LAM_NM * 1e-9)), rtol=1e-12)
+    assert np.isclose(ef.scalar, complex(tom.eps({"T": 410.0}, LAM_NM * 1e-9)), rtol=1e-12, atol=0)
 
 
 # ---- dispersive end-media: the sweep-aware fast path must NOT freeze n_super/n_sub at band-centre ----
