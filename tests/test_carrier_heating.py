@@ -178,12 +178,22 @@ def test_c1_fsum_mass_T0_identity_is_fermi_surface_mass():
                 m_c = float(kane_mass_of_Te(m0, alpha, n, 0.0))
                 E_F = float(fermi_energy_J(n, m0, alpha))
                 closed = m0 * (1.0 + 2.0 * (alpha / Q_E) * E_F)
-                assert m_c == pytest.approx(closed, rel=1e-10), (alpha, n, m0)
+                assert m_c == pytest.approx(closed, rel=1e-10, abs=0), (alpha, n, m0)
                 assert m_c == pytest.approx(float(KaneOpticalMass(m0_kg=m0, alpha_eV=alpha)(n)),
-                                            rel=1e-10), (alpha, n, m0)
-    # continuity into the T=0 limit: 1 K is indistinguishable from 0 K at these E_F
-    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 1.0)) == pytest.approx(
-        float(kane_mass_of_Te(M0, ALPHA_EV, N, 0.0)), rel=1e-8)
+                                            rel=1e-10, abs=0), (alpha, n, m0)
+    # continuity into the T=0 limit: at fixed n the 1 K mass sits above the T=0 one by the Sommerfeld
+    # term -(pi^2/6)(kT)^2 [s' - s g'/g]/S0 (g = gam^1/2 D the DOS, s = gam^1/2 (1 - 4/3 a gam/D^2) the
+    # f-sum weight, S0 = 2/3 gam_F^1.5/D_F, gam = E + a E^2, D = 1 + 2 a E, all at E_F): 1.7428e-8 here.
+    # MEASURED shift 1.74268e-8, i.e. 4.2e-5 of it (7e-13 of m_c: the quadrature + mu-solve accuracy,
+    # ~1e-12 per the C-1 gate below); gated at 5e-4 = 10x that absolute error over the 1.74e-8 shift.
+    a, E = ALPHA_EV / Q_E, float(fermi_energy_J(N, M0, ALPHA_EV))
+    gam, D = E + a * E * E, 1.0 + 2.0 * a * E
+    s = np.sqrt(gam) * (1.0 - (4.0 / 3.0) * a * gam / D ** 2)
+    ds = D / (2.0 * np.sqrt(gam)) - 2.0 * a * np.sqrt(gam) / D + (16.0 / 3.0) * a * a * gam ** 1.5 / D ** 3
+    shift = -(np.pi ** 2 / 6.0) * (KB * 1.0) ** 2 * (ds - s * (D / (2.0 * gam) + 2.0 * a / D)) \
+        / ((2.0 / 3.0) * gam ** 1.5 / D)
+    assert (float(kane_mass_of_Te(M0, ALPHA_EV, N, 1.0)) / float(kane_mass_of_Te(M0, ALPHA_EV, N, 0.0))
+            - 1.0) == pytest.approx(shift, rel=5e-4, abs=0)
 
 
 def test_c1_fsum_mass_vs_independent_energy_space_quadrature():
@@ -219,7 +229,7 @@ def test_c1_fsum_mass_vs_independent_energy_space_quadrature():
         for Te in (300.0, 1000.0, 3000.0, 6000.0):
             got = float(kane_mass_of_Te(M0, ALPHA_EV, n, Te))
             ref = m_cond_energy_space(M0, ALPHA_EV, n, Te)
-            assert got == pytest.approx(ref, rel=1e-8), (n, Te, got / ref - 1.0)
+            assert got == pytest.approx(ref, rel=1e-8, abs=0), (n, Te, got / ref - 1.0)
 
 
 def test_c1_n5_rise_sign_in_both_aEF_regimes():
@@ -320,7 +330,7 @@ def test_c7_pump_off_reproduces_gamma0_at_every_base_temperature():
         assert np.max(np.abs(Te - T0)) == 0.0 and np.max(np.abs(Tl - T0)) == 0.0   # TTM is exact
         # the pre-fix damping ratio (the bug, reproduced from the pinned-300 K reading)
         legacy = float(gamma_of_Te(GAMMA0, T0, p=1.0)) / GAMMA0
-        assert legacy == pytest.approx((T0 / 300.0) ** 1.0, rel=1e-12)
+        assert legacy == pytest.approx((T0 / 300.0) ** 1.0, rel=1e-12, abs=0)
         # the shipped path now references gamma0 to T0_K, so the off-switch is exact off 300 K too
         assert float(gamma_of_Te(GAMMA0, T0, p=1.0, T_ref_K=T0)) == GAMMA0
     assert float(gamma_of_Te(GAMMA0, 77.0, p=1.0)) / GAMMA0 == pytest.approx(0.256667, rel=1e-5)

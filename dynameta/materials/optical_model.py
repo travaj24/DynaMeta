@@ -21,19 +21,22 @@ shape of n_m3.
 from __future__ import annotations
 
 import importlib.util as _importlib_util
+import math
 import warnings
-from dataclasses import dataclass
-from typing import Callable, Union
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 
 
 # Physical constants (SI): single source in core/constants.
-from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E  # noqa: F401
+from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E, HBAR  # noqa: F401
 from dynameta.warning_types import UnreliableResultWarning
 
 MassOrFn  = Union[float, Callable[[np.ndarray], np.ndarray]]
 GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
+
+_V_F_FLOOR_M3 = 1.0e10     # density floor of the Fermi velocity (an empty node has v_F -> 0, kappa -> inf)
 
 # Optional `refractiveindex` package (the refractiveindex.info database) -- detected lazily (free)
 # and imported only on first use, mirroring the sibling Lumenairy library's glass.py pattern.
@@ -162,6 +165,16 @@ class RefractiveIndexInfoOptical(OpticalModel):
         return TabulatedOptical(lambda_m=lam, eps_complex=eps)
 
 
+#: Field-bundle key under which the permittivity assembler (core.bridge.assemble_eps) hands a material
+#: that asks for it (DrudeOptical.needs_position) the stack-axis coordinates [m] of the LAST axis of the
+#: density grid -- the carrier region's z axis, face to face. Reserved: an extra_fields entry may not use it.
+STACK_AXIS_FIELD = "z_axis_m"
+#: Field-bundle key under which the permittivity assembler supplies the thickness [m] of the WHOLE film a
+#: carrier region belongs to, when the film is split into several contiguous carrier regions of the same
+#: material (absent otherwise: the region's own stack-axis extent is the film).
+FILM_THICKNESS_FIELD = "film_thickness_m"
+
+
 @dataclass
 class DrudeOptical(OpticalModel):
     """Free-carrier Drude dispersion:
@@ -172,19 +185,161 @@ class DrudeOptical(OpticalModel):
     m_opt_kg is the OPTICAL (conductivity) effective mass -- NOT the DOS mass
     used by TransportModel. Both m_opt_kg and gamma_rad_s may be scalars or
     callables of n (per-bias spatial variation).
+
+    v0.16 opt-in options (both default None = the formula above, bit for bit):
+      boundary   : a materials.scattering.BoundaryScattering -- size-effect damping of a thin film
+                   (Fuchs-Sondheimer in plane, a Kreibig-type rate out of plane). The response becomes
+                   UNIAXIAL, so eps() refuses and eps_tensor() / the assembler (eps_fields) return
+                   (..., 3, 3) diagonal tensors (z = the stack axis); routes that take a tensor use it,
+                   the others refuse it with their existing message.
+      background : the high-frequency background replaces the constant eps_inf by eps_b(n, lambda):
+                   a BandFillingBackground (band filling + gap renormalization of the interband edge,
+                   anchored so eps_b(n_ref) = eps_inf), a TabulatedBackground (measured eps_inf(n)), or a
+                   callable fn(n_m3, lambda_m) -> eps_b. Scalar, so eps() keeps working.
+    Neither is representable by the single-pole FDTD Drude ADE: wp_gamma refuses them.
     """
     eps_inf:     float
     m_opt_kg:    MassOrFn
     gamma_rad_s: GammaOrFn
+    boundary:    Optional[object] = field(default=None, repr=False)
+    background:  Optional[object] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.boundary is not None:
+            from dynameta.materials.scattering import BoundaryScattering
+            if not isinstance(self.boundary, BoundaryScattering):
+                raise TypeError("DrudeOptical: boundary must be a materials.scattering.BoundaryScattering, "
+                                "got {!r}".format(type(self.boundary).__name__))
+        if self.background is not None and not (hasattr(self.background, "eps_background")
+                                                or callable(self.background)):
+            raise TypeError("DrudeOptical: background must be a BandFillingBackground / TabulatedBackground "
+                            "(an object with eps_background(n_m3, lambda_m, eps_inf)) or a callable "
+                            "fn(n_m3, lambda_m) -> eps_b; got {!r}".format(type(self.background).__name__))
+
+    def __repr__(self) -> str:
+        # The v0.15 repr, extended only by the options that are SET: the optical-solver cache keys a
+        # Drude material by its repr (cache._materials_fingerprint), so a default model keeps its key.
+        s = "DrudeOptical(eps_inf={!r}, m_opt_kg={!r}, gamma_rad_s={!r}".format(
+            self.eps_inf, self.m_opt_kg, self.gamma_rad_s)
+        if self.boundary is not None:
+            s += ", boundary={!r}".format(self.boundary)
+        if self.background is not None:
+            s += ", background={!r}".format(self.background)
+        return s + ")"
+
+    @property
+    def field_response(self) -> bool:
+        """True when the assembler must call eps_fields (a tensor response: boundary scattering set)."""
+        return self.boundary is not None
+
+    def options_beyond_single_pole(self) -> Tuple[str, ...]:
+        """Names of the fields set to something other than their default beyond (eps_inf, m_opt_kg,
+        gamma_rad_s): the options a consumer that rebuilds the plain single-pole formula
+        eps_inf - omega_p^2 / (omega^2 + i omega gamma) cannot represent (boundary, background, and any
+        option added later). Such consumers refuse the model when this is non-empty (drude_eps_jax used to
+        drop them silently)."""
+        import dataclasses
+        out = []
+        for f in dataclasses.fields(self):
+            if f.name in ("eps_inf", "m_opt_kg", "gamma_rad_s"):
+                continue
+            default = f.default if f.default is not dataclasses.MISSING else (
+                f.default_factory() if f.default_factory is not dataclasses.MISSING else dataclasses.MISSING)
+            if getattr(self, f.name) is not default and getattr(self, f.name) != default:
+                out.append(f.name)
+        return tuple(out)
+
+    @property
+    def needs_position(self) -> bool:
+        """True when eps_fields needs the stack-axis coordinates (STACK_AXIS_FIELD) of the density grid."""
+        return self.boundary is not None and bool(self.boundary.needs_position)
+
+    def _eps_b(self, n, lambda_m):
+        """The background permittivity: eps_inf (default, the float itself) or the background model."""
+        bg = self.background
+        if bg is None:
+            return self.eps_inf
+        if hasattr(bg, "eps_background"):
+            v = bg.eps_background(n, lambda_m, self.eps_inf)
+        else:
+            v = bg(n, lambda_m)
+        v = np.asarray(v)
+        if not np.all(np.isfinite(v)) or (np.iscomplexobj(v) and np.any(v.imag < 0.0)):
+            raise ValueError("DrudeOptical: the background model returned a non-finite value or Im < 0 "
+                             "(gain under exp(-i omega t)).")
+        return v if v.ndim else v[()]
 
     def eps(self, lambda_m: float, *, n_m3=None):
         if n_m3 is None:
             raise ValueError("DrudeOptical.eps requires n_m3 (carrier density).")
+        if self.boundary is not None:
+            raise ValueError(
+                "DrudeOptical.eps: boundary scattering makes the response UNIAXIAL (in-plane and normal "
+                "components differ); the scalar eps() cannot represent it. Use eps_tensor(lambda_m, "
+                "n_m3=..., z_axis_m=...) or the permittivity assembler (which calls eps_fields), and a "
+                "route that accepts a tensor eps.")
         n = np.asarray(n_m3, dtype=np.float64)
         m, g = self._mass_gamma(n)
         omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
         omega_p2 = n * Q_E * Q_E / (EPS0 * m)
-        return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
+        return self._eps_b(n, lambda_m) - omega_p2 / (omega * omega + 1j * omega * g)
+
+    def eps_tensor(self, lambda_m: float, *, n_m3, z_axis_m=None, film_thickness_m=None):
+        """(..., 3, 3) diagonal permittivity diag(eps_par, eps_par, eps_perp) at density n_m3 (z = the film
+        normal). Without boundary scattering every component is eps(). With it (see the class docstring
+        and materials.scattering.BoundaryScattering): eps_par carries the Fuchs-Sondheimer factor, eps_perp
+        the Kreibig-type rate. z_axis_m: coordinates [m] of the LAST axis of n_m3 (needed when the
+        boundary model has no thickness_m or uses the local confinement length); film_thickness_m: the
+        whole film's thickness when the region is part of a split film (the assembler supplies it)."""
+        n = np.asarray(n_m3, dtype=np.float64)
+        out = np.zeros(n.shape + (3, 3), dtype=np.complex128)
+        if self.boundary is None:
+            e = self.eps(lambda_m, n_m3=n)
+            out[..., 0, 0] = e
+            out[..., 1, 1] = e
+            out[..., 2, 2] = e
+            return out
+        from dynameta.optics.nonlocal_tmm import fermi_velocity
+        b = self.boundary
+        d = b.film_thickness(z_axis_m, film_thickness_m)
+        m, g = self._mass_gamma(n)
+        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        omega_p2 = n * Q_E * Q_E / (EPS0 * m)
+        eps_b = self._eps_b(n, lambda_m)
+        den = omega * omega + 1j * omega * g
+        # LOCAL Fermi velocity v_F = hbar k_F / m_opt(n): fermi_velocity takes a scalar mass, so it is
+        # evaluated per kg and divided by m_opt(n) (a KaneOpticalMass is exactly hbar k_F / v_F).
+        n_f = np.maximum(n, _V_F_FLOOR_M3)
+        vF = fermi_velocity(n_f, 1.0) / m
+        if b.in_plane and b.specularity < 1.0:
+            # F depends on n only (through v_F, m_opt and gamma): evaluate it once per distinct density
+            nu, inv = np.unique(n_f, return_inverse=True)
+            mu_, gu = self._mass_gamma(nu)
+            vu = fermi_velocity(nu, 1.0) / mu_
+            F = b.in_plane_factor(omega, np.broadcast_to(gu, nu.shape), vu, d)[inv].reshape(n.shape)
+            eps_par = eps_b - omega_p2 * F / den
+        else:
+            eps_par = eps_b - omega_p2 / den
+        if b.perp_coefficient > 0.0:
+            gz = g + b.perp_rate(n, vF, d, z_axis_m)
+            eps_perp = eps_b - omega_p2 / (omega * omega + 1j * omega * gz)
+        else:
+            eps_perp = eps_b - omega_p2 / den
+        out[..., 0, 0] = eps_par
+        out[..., 1, 1] = eps_par
+        out[..., 2, 2] = eps_perp
+        return out
+
+    def eps_fields(self, fields: dict, lambda_m: float):
+        """The assembler's entry (core.effects.OpticalModelEffect): fields['n'] and, when needs_position,
+        fields[STACK_AXIS_FIELD]. Scalar eps() without boundary scattering, else eps_tensor()."""
+        n = fields.get("n")
+        if self.boundary is None:
+            return self.eps(lambda_m, n_m3=n)
+        if n is None:
+            raise ValueError("DrudeOptical.eps_fields requires fields['n'] (carrier density).")
+        return self.eps_tensor(lambda_m, n_m3=n, z_axis_m=fields.get(STACK_AXIS_FIELD),
+                               film_thickness_m=fields.get(FILM_THICKNESS_FIELD))
 
     def wp_gamma(self, n_m3: float):
         """(omega_p, gamma) [rad/s] at the scalar carrier density `n_m3` -- the pair the FDTD Drude
@@ -199,6 +354,13 @@ class DrudeOptical(OpticalModel):
         sub-round-trip drive. This method is the ONE conversion between them; solve_fdtd_1d now
         accepts either return type (with `drude_n_m3=` for the DrudeOptical form) and routes the
         object form through here."""
+        if self.boundary is not None or self.background is not None:
+            raise NotImplementedError(
+                "DrudeOptical.wp_gamma: this model carries {} -- not representable by the FDTD Drude ADE "
+                "(a constant eps_inf plus one isotropic Drude pole). Use a frequency-domain route.".format(
+                    " and ".join(s for s, v in (("boundary scattering (anisotropic)", self.boundary),
+                                                ("a density-dependent background", self.background))
+                                 if v is not None)))
         n = float(n_m3)
         if not (np.isfinite(n) and n > 0.0):
             raise ValueError("DrudeOptical.wp_gamma: n_m3 must be finite and > 0; got {!r}".format(n_m3))
@@ -221,6 +383,185 @@ class DrudeOptical(OpticalModel):
                              "gives Im(eps) < 0 = gain under exp(-i omega t)); a callable gamma_rad_s(n) "
                              "returned a negative/non-finite value.")
         return m, g
+
+
+# ===========================================================================
+# v0.16 -- density-dependent background permittivity eps_b(n, lambda)
+#
+# In a degenerate conducting oxide the interband transitions from the valence band into the FILLED part
+# of the conduction band are Pauli-blocked (Burstein-Moss band filling), and the many-body interaction
+# renormalizes (narrows) the gap. Both move interband oscillator strength, so the background eps_inf that
+# the free-carrier term sits on is a function of the density. BandFillingBackground is the closed-form
+# model of that change; TabulatedBackground / a callable carry measured eps_inf(n).
+# ===========================================================================
+
+def _tauc_half_chi(x, t_cut):
+    """(4/pi) int_{t_cut}^inf t^2 / ((1 + t^2) ((1 + t^2)^2 - x^2)) dt for 0 < x < 1 (closed form).
+
+    This is the Kramers-Kronig real part, per unit amplitude, of the direct-allowed edge
+    eps2(E) = sqrt((E - Eg)/Eg) (Eg/E)^2 above E = Eg (1 + t_cut^2), at x = E / Eg (t^2 = E'/Eg - 1).
+    Partial fractions in s = t^2 with b^2 = 1 - x, c^2 = 1 + x:
+        int_0^T = [2 g(1) - g(b) - g(c)] / (2 x^2),  g(a) = a arctan(T / a),
+        int_0^inf = pi / (2 (1 + b) (b + c) (1 + c)).
+    Relative round-off ~ 1e-16 / x^2 (x = E / Eg; 1e-12 at x = 0.01)."""
+    x = np.asarray(x, dtype=np.float64)
+    T = np.asarray(t_cut, dtype=np.float64)
+    b = np.sqrt(1.0 - x)
+    c = np.sqrt(1.0 + x)
+    full = math.pi / (2.0 * (1.0 + b) * (b + c) * (1.0 + c))
+    part = (2.0 * np.arctan(T) - b * np.arctan(T / b) - c * np.arctan(T / c)) / (2.0 * x * x)
+    return (4.0 / math.pi) * (full - part)
+
+
+@dataclass(frozen=True)
+class BandFillingBackground:
+    """Density-dependent background eps_b(n, lambda) of a degenerate n-type oxide from band filling and
+    band-gap renormalization of a direct-allowed interband edge (v0.16; DrudeOptical(background=...)).
+
+    Model (photon energy E below the gap; T = 0 occupation of the conduction band):
+      interband edge           eps2(E) = A sqrt((E - Eg)/Eg0) (Eg0/E)^2   for E > Eg = Eg(n)
+                               (parabolic joint density of states x a constant momentum matrix element:
+                               eps2 ~ (E - Eg)^(1/2) / E^2 with a density-INDEPENDENT prefactor, P. Y. Yu and
+                               M. Cardona, Fundamentals of Semiconductors, sec. 6.2; A is its value in units of
+                               the undoped gap Eg0)
+      renormalized gap         Eg(n) = Eg0 - C_bgr n^(1/3)                (the edge moves; amplitude kept)
+      band filling             transitions with k < k_F are blocked: E < Eg(n) + dE_BM(n),
+                               dE_BM = E_F(n) + hbar^2 k_F^2 / (2 m_v),  k_F = (3 pi^2 n)^(1/3),
+                               E_F from the SAME conduction band as the carrier statistics (a
+                               KaneOpticalMass / KaneBand: E_F (1 + alpha E_F) = hbar^2 k_F^2 / (2 m0); a
+                               float mass: parabolic); m_v = None means no valence recoil
+      real part below the gap  chi(E; n) = (2/pi) int E' eps2(E'; n) / (E'^2 - E^2) dE'   (KK, closed form)
+      background               eps_b(n, E) = eps_inf + chi(E; n) - chi(E; n_ref)
+    so eps_b(n_ref) = DrudeOptical.eps_inf exactly (anchored: eps_inf stays the value measured at n_ref)
+    and only the density-INDUCED change of the edge enters. eps2 changes only above the gap; below it the
+    model is real and is the exact Kramers-Kronig transform of the stated eps2 (both the blocked window and
+    the gap shift), so it is causal by construction. Evaluation at or above the renormalized gap (of n or
+    n_ref) raises: the blocked edge has a logarithmic singularity there and the near-IR free-carrier model
+    is not meant for it.
+
+    Literature: band filling (E. Burstein, Phys. Rev. 93, 632 (1954); T. S. Moss, Proc. Phys. Soc. B 67,
+    775 (1954)); the band filling + renormalization picture of Sn-doped In2O3 (I. Hamberg, C. G. Granqvist,
+    K.-F. Berggren, B. E. Sernelius, L. Engstrom, Phys. Rev. B 30, 3240 (1984); I. Hamberg and C. G.
+    Granqvist, J. Appl. Phys. 60, R123 (1986)); C_bgr n^(1/3) is the common empirical form of the
+    renormalization. Parameters for degenerate wide-gap oxides (illustrative): Eg0 ~ 3.6-3.75 eV, A ~ 1-4, m_v ~ 0.6
+    m_e, C_bgr such that the narrowing is 0.1-0.4 eV at 1e27 m^-3.
+
+    Validity: E below Eg(n) (and Eg(n_ref)); degenerate gas (E_F >> kT; the blocked edge is sharp); a
+    direct edge with a parabolic joint density of states (the Kane band sets the EDGE POSITION only, not
+    the shape); the oscillator strength of the rest of the interband spectrum is density-independent apart
+    from the rigid renormalization shift of this edge. Not modelled: the intraband (free-carrier)
+    contribution, excitonic effects, Urbach tails, impurity-band absorption.
+    """
+    gap_eV: float                         # Eg0: the undoped interband edge [eV]
+    edge_amplitude: float                 # A of eps2_0 (dimensionless, >= 0)
+    n_ref_m3: float                       # density at which DrudeOptical.eps_inf holds
+    conduction: object                    # float m_c [kg] (parabolic) | KaneOpticalMass | KaneBand
+    valence_mass_kg: Optional[float] = None
+    bgr_coeff_eV_m: float = 0.0           # C_bgr [eV m]: dEg = -C n^(1/3); 0 = off
+
+    def __post_init__(self):
+        if not (np.isfinite(self.gap_eV) and self.gap_eV > 0.0):
+            raise ValueError("BandFillingBackground: gap_eV must be finite and > 0")
+        if not (np.isfinite(self.edge_amplitude) and self.edge_amplitude >= 0.0):
+            raise ValueError("BandFillingBackground: edge_amplitude must be finite and >= 0 (absorption)")
+        if not (np.isfinite(self.n_ref_m3) and self.n_ref_m3 >= 0.0):
+            raise ValueError("BandFillingBackground: n_ref_m3 must be finite and >= 0")
+        if self.valence_mass_kg is not None and not (self.valence_mass_kg > 0.0):
+            raise ValueError("BandFillingBackground: valence_mass_kg must be > 0 (or None: no recoil)")
+        if not (np.isfinite(self.bgr_coeff_eV_m) and self.bgr_coeff_eV_m >= 0.0):
+            raise ValueError("BandFillingBackground: bgr_coeff_eV_m must be finite and >= 0 (a narrowing)")
+        self._band()                                           # validate the conduction band spec
+
+    def _band(self):
+        from dynameta.materials.scattering import KaneOpticalMass
+        c = self.conduction
+        if isinstance(c, KaneOpticalMass):
+            return c
+        if hasattr(c, "m0_kg") and hasattr(c, "alpha_per_eV"):            # materials.KaneBand
+            return KaneOpticalMass.from_band(c)
+        if isinstance(c, (int, float)) and float(c) > 0.0:
+            return KaneOpticalMass(m0_kg=float(c), alpha_eV=0.0)
+        raise TypeError("BandFillingBackground: conduction must be a mass [kg] > 0, a KaneOpticalMass or a "
+                        "KaneBand; got {!r}".format(c))
+
+    def band_filling_shift_J(self, n_m3):
+        """dE_BM(n) = E_F(n) + hbar^2 k_F^2 / (2 m_v) [J] (T = 0)."""
+        n = np.maximum(np.asarray(n_m3, dtype=np.float64), 0.0)
+        e = self._band().fermi_energy_J(n)
+        if self.valence_mass_kg is not None:
+            kF2 = np.power(3.0 * np.pi ** 2 * n, 2.0 / 3.0)
+            e = e + HBAR ** 2 * kF2 / (2.0 * float(self.valence_mass_kg))
+        return np.where(n > 0.0, e, 0.0)
+
+    def renormalized_gap_J(self, n_m3):
+        """Eg(n) = Eg0 - C_bgr n^(1/3) [J]."""
+        n = np.maximum(np.asarray(n_m3, dtype=np.float64), 0.0)
+        return (float(self.gap_eV) - float(self.bgr_coeff_eV_m) * np.cbrt(n)) * Q_E
+
+    def optical_gap_J(self, n_m3):
+        """The absorption onset Eg(n) + dE_BM(n) [J] (the measured 'optical gap' of the model)."""
+        return self.renormalized_gap_J(n_m3) + self.band_filling_shift_J(n_m3)
+
+    def interband_chi(self, n_m3, lambda_m):
+        """chi(E; n): the KK real part of the (blocked, renormalized) edge below the gap."""
+        n = np.asarray(n_m3, dtype=np.float64)
+        E = 2.0 * np.pi * HBAR * C_LIGHT / float(lambda_m)
+        Eg = self.renormalized_gap_J(n)
+        if np.any(E >= Eg):
+            raise ValueError("BandFillingBackground: photon energy {:.4g} eV is at or above the renormalized "
+                             "gap ({:.4g} eV); the model is evaluated below the gap only.".format(
+                                 E / Q_E, float(np.min(Eg)) / Q_E))
+        t_cut = np.sqrt(self.band_filling_shift_J(n) / Eg)
+        # eps2 = A sqrt((E - Eg)/Eg0) (Eg0/E)^2 = A (Eg0/Eg)^(3/2) [sqrt((E - Eg)/Eg) (Eg/E)^2]
+        Eg0 = float(self.gap_eV) * Q_E
+        return float(self.edge_amplitude) * (Eg0 / Eg) ** 1.5 * _tauc_half_chi(E / Eg, t_cut)
+
+    def eps_background(self, n_m3, lambda_m, eps_inf):
+        """eps_inf + chi(E; n) - chi(E; n_ref) (real, below the gap)."""
+        return eps_inf + (self.interband_chi(n_m3, lambda_m)
+                          - self.interband_chi(self.n_ref_m3, lambda_m))
+
+
+@dataclass(frozen=True)
+class TabulatedBackground:
+    """Measured background eps_inf(n) (e.g. from ellipsometry of films of different density): ABSOLUTE
+    values (real or complex, Im >= 0) at densities n_m3, interpolated linearly in log10(n) (log_n=True)
+    or in n; wavelength-independent. DrudeOptical.eps_inf is NOT used when this model is set. Outside the
+    table: extrapolate='raise' (default; no silent extrapolation) or 'hold' (the end values, opt-in --
+    e.g. for the near-empty nodes of a depletion layer)."""
+    n_m3: tuple
+    eps_inf: tuple
+    log_n: bool = True
+    extrapolate: str = "raise"
+
+    def __post_init__(self):
+        n = np.asarray(self.n_m3, dtype=np.float64).ravel()
+        e = np.asarray(self.eps_inf).ravel()
+        if n.size < 2 or n.size != e.size:
+            raise ValueError("TabulatedBackground: n_m3 and eps_inf need the same length >= 2")
+        if not np.all(np.diff(n) > 0.0) or (self.log_n and n[0] <= 0.0):
+            raise ValueError("TabulatedBackground: n_m3 must be strictly increasing (and > 0 with log_n)")
+        if not np.all(np.isfinite(e)) or (np.iscomplexobj(e) and np.any(e.imag < 0.0)):
+            raise ValueError("TabulatedBackground: eps_inf must be finite with Im >= 0")
+        if self.extrapolate not in ("raise", "hold"):
+            raise ValueError("TabulatedBackground: extrapolate must be 'raise' or 'hold'")
+
+    def eps_background(self, n_m3, lambda_m, eps_inf):
+        n_tab = np.asarray(self.n_m3, dtype=np.float64).ravel()
+        e_tab = np.asarray(self.eps_inf).ravel()
+        n = np.asarray(n_m3, dtype=np.float64)
+        if self.extrapolate == "raise" and (float(np.min(n)) < n_tab[0] * (1.0 - 1e-12)
+                                            or float(np.max(n)) > n_tab[-1] * (1.0 + 1e-12)):
+            raise ValueError("TabulatedBackground: density outside the table [{:.4g}, {:.4g}] m^-3 (pass "
+                             "extrapolate='hold' to use the end values)".format(n_tab[0], n_tab[-1]))
+        if self.log_n:
+            xq, xt = np.log10(np.clip(n, n_tab[0], n_tab[-1])), np.log10(n_tab)
+        else:
+            xq, xt = n, n_tab
+        re = np.interp(xq, xt, e_tab.real)
+        if np.iscomplexobj(e_tab):
+            return re + 1j * np.interp(xq, xt, e_tab.imag)
+        return re
 
 
 def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,

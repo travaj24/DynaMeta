@@ -34,6 +34,13 @@ from dynameta.carriers.ac_analysis import ssac_admittance    # noqa: E402
 from dynameta.carriers.dc_solve import solve_dc              # noqa: E402
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder, OhmicContactNoiseError   # noqa: E402
 from dynameta.sweep import BiasPoint                         # noqa: E402
+# v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the shared
+# validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so every build
+# of it warns once.
+# This child runs under -W error and the advisory is not what it tests: ignore exactly that message.
+import warnings  # noqa: E402
+from dynameta.warning_types import AdvisoryWarning  # noqa: E402
+warnings.filterwarnings("ignore", message=r".*dos_mass_kg_of_n_m3 is density-dependent.*", category=AdvisoryWarning)
 
 FF_REF = [1e9, 1e11, 1e13, 1e15]             # validation/devsim_noise.py FREQS_G (gate G)
 FF_TE = [1e9, 1e11]
@@ -112,10 +119,21 @@ def te_design():
                   electrodes=el, materials=reg)
 
 
-def ref_builder(tag="nm"):
+def ref_design():
+    """The shared validation device of validation/_reference_device.py (drift-diffusion) on the LEGACY z mesh lines.
+    These scenarios test the noise
+    method's state handling (bitwise repeats, restores, equality with the hand recipe, FDT through the method):
+    nothing here is about mesh accuracy, and every comparison is between solves on one mesh. The v0.16 default
+    screening grading (188 instead of 17 z nodes across the film) made this file 7x slower (58 s -> 403 s; W7
+    65 s -> 865 s); semiconductor_refinement="legacy" is the v0.15.1 mesh these gates were measured on."""
+    import dataclasses
     from validation._reference_device import build_reference_modulator
-    return LayeredDevsimBuilder(build_reference_modulator("drift_diffusion"), mesh_name=tag + "_m",
-                                device_name=tag + "_d")
+    d = build_reference_modulator("drift_diffusion")
+    return dataclasses.replace(d, mesh_2d=dataclasses.replace(d.mesh_2d, semiconductor_refinement="legacy"))
+
+
+def ref_builder(tag="nm"):
+    return LayeredDevsimBuilder(ref_design(), mesh_name=tag + "_m", device_name=tag + "_d")
 
 
 def run(scenario):
@@ -208,11 +226,9 @@ def run(scenario):
         # The restore writes the double-rounded state back, so the bitwise repeat is not implied by seq_ref.
         import warnings
         from dynameta.carriers import extended_precision as XP
-        from validation._reference_device import build_reference_modulator
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter("always")
-            b = LayeredDevsimBuilder(build_reference_modulator("drift_diffusion"), mesh_name="nx_m",
-                                     device_name="nx_d", extended_precision=True)
+            b = LayeredDevsimBuilder(ref_design(), mesh_name="nx_m", device_name="nx_d", extended_precision=True)
             cf = b.solve(BiasPoint({GATE: 0.0, "bot_contact": 0.5}, "b05"))
             n_build = len(rec)
             res["seq"] = [digest(b.noise_spectrum(FF_REF, gate=GATE, vg=v, per_cell=False)) for v in (0.0, 1.0, 0.0)]

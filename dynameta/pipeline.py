@@ -16,13 +16,14 @@ defaults are the layered DEVSIM/NGSolve builders.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from dynameta.core.bridge import assemble_eps
 from dynameta.core.lift import choose_lift
 from dynameta.core.n_to_eps import MaterialEpsMap, NToEpsMap
-from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeometryBuilder
+from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeometryBuilder, solver_capability
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
 from dynameta.optics.tmm_reference import end_media_indices   # pure (no ngsolve); shared n_super/n_sub
@@ -53,6 +54,23 @@ def _fem_optical_solver(design, geo, eps_by_region, lambda_m, n_super, n_sub,
                       factor_cache=factor_cache)
 
 
+def _carrier_solve_kwargs(carrier, optical_solver, carrier_solve_kwargs) -> dict:
+    """The keyword arguments run_pipeline passes to carrier.solve (run_pipeline docstring,
+    carrier_solve_kwargs): the caller's dict when given; {'grid_n_z': None} (native z mesh lines) for a
+    LayeredDevsimBuilder feeding an optical solver with native_carrier_grid = True; {} otherwise.
+    The flag is read through core.interfaces.solver_capability, so it survives every wrapper that
+    declares itself one (the result cache, the EMT screen), so a wrapper keeps the inner solver's capabilities.
+    The class is looked up in sys.modules, never imported, so a DEVSIM-free run never imports DEVSIM
+    (a carrier cannot be a LayeredDevsimBuilder unless that module is loaded)."""
+    if carrier_solve_kwargs is not None:
+        return dict(carrier_solve_kwargs)
+    mod = sys.modules.get("dynameta.carriers.devsim_layered")
+    if (mod is not None and isinstance(carrier, mod.LayeredDevsimBuilder)
+            and solver_capability(optical_solver, "native_carrier_grid") is True):
+        return {"grid_n_z": None}
+    return {}
+
+
 def run_pipeline(design: Design, sweep: Sweep, *,
                    verbose: bool = True,
                    carrier_solver: Optional[CarrierSolver] = None,
@@ -60,7 +78,8 @@ def run_pipeline(design: Design, sweep: Sweep, *,
                    optical_solver: Optional[Callable[..., OpticalResult]] = None,
                    n_to_eps: Optional[NToEpsMap] = None,
                    extra_fields: Optional[object] = None,
-                   on_error: str = "raise") -> List[SweepRow]:
+                   on_error: str = "raise",
+                   carrier_solve_kwargs: Optional[dict] = None) -> List[SweepRow]:
     """Run the full Design + Sweep through carriers -> bridge -> optics.
 
     on_error='skip' converts a failing optical point into an all-NaN row (with a warning)
@@ -99,6 +118,17 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     callable must return a dict with the SAME key set at every bias (only the VALUES vary) -- a key
     that appears or disappears mid-sweep would silently switch which effect terms are driven (a
     RuntimeWarning fires on drift). None (the default) leaves the carrier-only path byte-identical.
+
+    carrier_solve_kwargs: keyword arguments for every ``carrier_solver.solve(bias_point, **kwargs)`` call
+    (e.g. ``{'grid_n_x': 128, 'grid_n_z': 64}`` or ``{'grid_n_z': None}``). None (the default) picks them
+    (v0.16): when the carrier solver is a ``LayeredDevsimBuilder`` AND the optical solver declares
+    ``native_carrier_grid = True`` (the layered TMM / RCWA / PMM / Berreman solvers, which slice a
+    non-uniform z axis), the carriers are returned on their NATIVE z mesh lines (``grid_n_z=None``, see
+    ``LayeredDevsimBuilder.solve``) so the optics sees the graded accumulation/depletion layer as DEVSIM
+    resolved it instead of a 32-point uniform resample. Every other combination -- the default FEM optics
+    (its VoxelCoefficient needs uniform axes), a bring-your-own carrier solver, an optical solver without
+    the attribute -- calls ``solve(bias_point)`` exactly as before. Pass ``{'grid_n_z': 32}`` to restore
+    the v0.15.1 uniform grid on the layered path.
     """
     if not sweep.bias_points or not len(sweep.wavelengths_nm):     # no silent empty-sweep passthrough
         raise ValueError("run_pipeline: sweep must have at least one bias point and one wavelength "
@@ -112,12 +142,13 @@ def run_pipeline(design: Design, sweep: Sweep, *,
         from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
         carrier_solver = LayeredDevsimBuilder(design)
     carrier = carrier_solver
+    solve_kw = _carrier_solve_kwargs(carrier, optical_solver, carrier_solve_kwargs)
     # 1) carriers: solve every bias, collect CarrierFields, then free DEVSIM
     fields = {}
     for bp in sweep.bias_points:
         if verbose:
             print("[carriers] bias '{}' ...".format(bp.label), flush=True)
-        fields[bp.label] = carrier.solve(bp)
+        fields[bp.label] = carrier.solve(bp, **solve_kw)
     if hasattr(carrier, "teardown"):
         carrier.teardown()
 

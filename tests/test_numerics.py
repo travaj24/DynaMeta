@@ -61,14 +61,19 @@ def test_shared_trapz_survives_missing_numpy_trapezoid(monkeypatch):
 
 def test_density_gradient_conserve_charge_on_numpy_124(monkeypatch):
     """carriers/density_gradient.py:118 (x2) -- `conserve_charge=True` used np.trapezoid AFTER the
-    expensive BVP had already converged (ledger C-12 / S1-1)."""
+    expensive BVP had already converged (ledger C-12 / S1-1). v0.16: this 15 nm profile's rescale
+    factor is 1.104, so each call now carries the conserve_charge AdvisoryWarning (asserted, not the
+    subject here); the arrays are unchanged."""
     from dynameta.constants import M_E
     from dynameta.carriers.density_gradient import dg_correct_density_1d
+    from dynameta.warning_types import AdvisoryWarning
     z = np.linspace(0.0, 15e-9, 401)
     n_cl = np.full_like(z, 2e26)
-    ref = dg_correct_density_1d(z, n_cl, 0.35 * M_E, conserve_charge=True)
+    with pytest.warns(AdvisoryWarning, match="rescaled"):
+        ref = dg_correct_density_1d(z, n_cl, 0.35 * M_E, conserve_charge=True)
     _simulate_numpy_124(monkeypatch)
-    got = dg_correct_density_1d(z, n_cl, 0.35 * M_E, conserve_charge=True)
+    with pytest.warns(AdvisoryWarning, match="rescaled"):
+        got = dg_correct_density_1d(z, n_cl, 0.35 * M_E, conserve_charge=True)
     assert np.array_equal(got, ref)                          # byte-identical, not merely close
 
 

@@ -315,7 +315,7 @@ def test_graded_eps_by_region_is_sliced_incidence_first():
     assert len(layers) == len(slabs) and len(layers) == 12
     got = np.array([L.eps_inf for L in layers])
     want = np.array([s.eps.real for s in slabs])
-    assert np.allclose(got, want, rtol=1e-12)
+    assert np.allclose(got, want, rtol=1e-12, atol=0)
     assert got[0] > got[-1]                                   # top (high-eps) side first
     assert abs(sum(L.thickness_m for L in layers) - 120e-9) < 1e-15
 
@@ -413,10 +413,10 @@ def test_ring_time_extends_window_for_narrow_poles():
     assert _ring_time_s([passive]) == 0.0
     narrow = FDTDLayer(thickness_m=200e-9, eps_inf=2.25, lorentz_w0_rad_s=1.3e15,
                        lorentz_gamma_rad_s=1e12, lorentz_delta_eps=0.002)
-    assert _ring_time_s([narrow]) == pytest.approx(18.4e-12, rel=1e-12)
+    assert _ring_time_s([narrow]) == pytest.approx(18.4e-12, rel=1e-12, abs=0)
     gainy = FDTDLayer(thickness_m=200e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
                       gain_dw_rad_s=2e12, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
-    assert _ring_time_s([passive, gainy]) == pytest.approx(18.4 / 2e12, rel=1e-12)
+    assert _ring_time_s([passive, gainy]) == pytest.approx(18.4 / 2e12, rel=1e-12, abs=0)
 
 
 # =====================================================================================================
@@ -584,7 +584,7 @@ def test_d3_atten_model_uses_cpml_z_defaults():
     # closed form: a(d) = 1 - exp(-27.63 (d(d+1)/2)^2 / npml^4) for m=3, R0=1e-6
     for d, n in ((1, 12), (3, 14), (5, 20)):
         want = 1.0 - math.exp(-(-4.0 * math.log(1e-6) / 2.0) * (d * (d + 1) / 2.0) ** 2 / n ** 4)
-        assert _pml_atten(d, n) == pytest.approx(want, rel=1e-12)
+        assert _pml_atten(d, n) == pytest.approx(want, rel=1e-12, abs=0)
 
 
 def test_d3_ledger_silent_violation_config_is_still_rejected():
@@ -880,7 +880,7 @@ def test_d10_ring_time_omits_raman_and_keeps_both_gain_signs():
                     gain_w_rad_s=1.6e15, gain_dw_rad_s=1e13)
     pas = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=-1e25,
                     gain_w_rad_s=1.6e15, gain_dw_rad_s=1e13)
-    assert _ring_time_s([amp]) == pytest.approx(18.4 / 1e13, rel=1e-12)
+    assert _ring_time_s([amp]) == pytest.approx(18.4 / 1e13, rel=1e-12, abs=0)
     assert _ring_time_s([pas]) == _ring_time_s([amp])        # the sign of dN changes no memory
     # the window-extension warning fires for both; the amplifying caveat only for dN > 0
     tau_small = (18.4 / 1e13) / 400.0                        # 200*tau << the pole memory
@@ -895,7 +895,7 @@ def test_d10_ring_time_omits_raman_and_keeps_both_gain_signs():
     # a pole whose memory is below the source window neither extends the warning nor caveats
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert _window_memory_s("probe", [amp], 18.4 / 1e13) == pytest.approx(18.4 / 1e13, rel=1e-12)
+        assert _window_memory_s("probe", [amp], 18.4 / 1e13) == pytest.approx(18.4 / 1e13, rel=1e-12, abs=0)
 
 
 def test_d10_amplifying_caveat_does_not_depend_on_which_pole_won_the_window():
@@ -1099,8 +1099,8 @@ def test_s5_20_sweep_entry_point_accepts_and_honours_what_the_per_wavelength_one
         sw.solve_sweep(d, None, assemble, lams, 1.0 + 0j, 1.5 + 0j)
     lo, hi = lams.min() * (1.0 - sw.band_pad), lams.max() * (1.0 + sw.band_pad)
     assert seen[-1]["ebr"] is bias, "the sweep path dropped the bias eps of a structured cell"
-    assert seen[-1]["lam"] == pytest.approx(0.5 * (lo + hi), rel=1e-15)
-    assert any(lam == pytest.approx(0.5 * (lo + hi), rel=1e-15) for lam in asked)
+    assert seen[-1]["lam"] == pytest.approx(0.5 * (lo + hi), rel=1e-15, abs=0)
+    assert any(lam == pytest.approx(0.5 * (lo + hi), rel=1e-15, abs=0) for lam in asked)
     assert (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
     # an ABSORBING end medium is still refused by both, before any rasterization
     n_before = len(seen)

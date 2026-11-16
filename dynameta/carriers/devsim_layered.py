@@ -34,7 +34,7 @@ except ImportError as _e:                                   # pragma: no cover -
 from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, ELECTRON_DENSITY, POTENTIAL)
 from dynameta.core.interfaces import RegionInfo
-from dynameta.core.resample import resample_to_grid
+from dynameta.core.resample import NotATensorGridError, resample_tensor_grid, resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
@@ -45,6 +45,8 @@ from dynameta.carriers import extended_precision as XP
 from dynameta.carriers import devsim_geometry as GEO
 from dynameta.carriers import noise_analysis as NA
 from dynameta.carriers import junction_mesh as JM
+from dynameta.carriers.screening_mesh import (   # noqa: F401  (devsim-free; re-exported here)
+    _NONDEGENERATE_X, _graded_offsets, _interface_resolution, _needs_screening, screening_length_m)
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
@@ -60,10 +62,100 @@ from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 # the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
 # eps there.
 _EDGE_METAL_W_M = 1.5e-9
+# v0.16 (gate leakage): z inset of a leaking film's edge contact box (well below any face mesh spacing, ~1e-11 m)
+_LEAK_CONTACT_INSET_M = 1e-12
 
 # the circuit solutions a DC solve writes (DEVSIM creates both on the first circuit solve, values 0.0);
 # noise_spectrum restores them with the node solutions
 _DC_CIRCUIT_SOLUTIONS = ("dcop", "dcop_prev")
+
+# Mesh-line positions closer than this [m] are one line (layer faces come from cumulative sums).
+_LINE_MERGE_M = 1e-15
+# solve(grid_n_z=...) default, and the uniform z resolution of the grid_n_z=None fallback
+_DEFAULT_GRID_N_Z = 32
+# Screening grading (Mesh2DSpec.semiconductor_refinement="screening"): the smallest z line spacing it emits.
+# Regions and interfaces are captured with bloat=1e-12 m (build_device), so node rows a few 1e-12 m apart
+# risk being captured by both neighbours. MEASURED (DEVSIM 2.11.2, the gated 6 nm degenerate film of
+# tests/test_mesh_screening_grading.py, face spacing forced, top-face density vs that file's independent 1-D
+# solve at +5 V / -3 V): 1.1e-12 m -70 % / +1.4e3 %, 2.2e-12 m +4.6e-3 / -3.8e-2, explicit lines at this floor
+# -1.9e-5 / +1.3e-4.
+_MIN_LINE_SPACING_M = 5e-12
+# An explicit line's ns/ps is this multiple of its adjacent gap, so DEVSIM inserts no point between two
+# explicit lines (it subdivides a segment only where the segment exceeds the requested spacing).
+_EXPLICIT_SPACING_X = 1.5
+
+
+def _dg_map(density_gradient) -> Dict[str, object]:
+    """v0.16: validate LayeredDevsimBuilder(density_gradient=...) -> {region: EquilibriumDensityGradient}."""
+    if not density_gradient:
+        return {}
+    from dynameta.carriers.density_gradient import EquilibriumDensityGradient
+    out = {}
+    for k, v in dict(density_gradient).items():
+        if not isinstance(k, str):
+            raise ValueError("density_gradient keys are semiconductor region (layer) names, got {!r}".format(k))
+        if not isinstance(v, EquilibriumDensityGradient):
+            raise ValueError("density_gradient[{!r}] must be a density_gradient.EquilibriumDensityGradient, got "
+                             "{!r}".format(k, v))
+        out[k] = v
+    return out
+
+
+def _charge_map(value, what: str, unit: str, owner: str = "LayeredDevsimBuilder") -> dict:
+    """`owner`(fixed_charge= / bulk_charge=) checked: None -> {}; else a mapping whose keys are a name or a
+    2-tuple of names and whose values are finite numbers (`unit` names them in the message). Shared by the
+    2-D builder and devsim_3d.Stacked3DSpec."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("{}({}=...) must be a mapping {{key: {}}}, got {!r}".format(
+            owner, what, unit, type(value).__name__))
+    out = {}
+    for k, v in value.items():
+        ok_key = isinstance(k, str) or (isinstance(k, tuple) and len(k) == 2
+                                        and all(isinstance(x, str) for x in k))
+        if not ok_key:
+            raise TypeError("{}({}=...): key {!r} must be a name or a 2-tuple of region names".format(
+                owner, what, k))
+        if isinstance(v, bool) or not isinstance(v, (int, float, np.floating, np.integer)) \
+                or not np.isfinite(float(v)):
+            raise ValueError("{}({}=...): value for {!r} must be a finite number ({}), got {!r}".format(
+                owner, what, k, unit, v))
+        out[k] = float(v)
+    return out
+
+
+def install_fixed_charges(device: str, fixed_charge: Mapping, bulk_charge: Mapping, *, pairs: Mapping,
+                          roles: Mapping) -> Dict[str, str]:
+    """The builders' fixed-charge wiring (v0.16), shared by LayeredDevsimBuilder and
+    devsim_3d.Devsim3DEquilibrium: every fixed_charge entry {interface name | (region_a, region_b): Q [C/m^2]}
+    becomes physics_equilibrium.install_sheet_charge on that interface, carried by its DIELECTRIC region when
+    it has one (the box-method result does not depend on the side; the dielectric keeps the term away from
+    the semiconductor closures), else by its first region; every bulk_charge entry {dielectric region: rho
+    [C/m^3]} becomes physics_equilibrium.install_bulk_charge. `pairs` maps frozenset({r0, r1}) to the
+    interface name, `roles` region -> "dielectric" | "semiconductor" | "metal". Unknown keys and a bulk
+    charge outside a dielectric raise. Returns {key repr: installed node-model name}."""
+    out: Dict[str, str] = {}
+    names = set(ds.get_interface_list(device=device))
+    for key, q in fixed_charge.items():
+        iface = key if isinstance(key, str) else pairs.get(frozenset(key))
+        if iface not in names:
+            raise ValueError("fixed_charge key {!r} matches no interface; built interfaces are {} (a sheet "
+                             "charge on a metal face has no interface: put it on the dielectric/semiconductor "
+                             "face)".format(key, sorted(names)))
+        regions = list(ds.get_region_list(device=device, interface=iface))
+        diel = [r for r in regions if roles.get(r) == "dielectric"]
+        out[repr(key)] = PE.install_sheet_charge(device, iface, diel[0] if diel else regions[0], q)
+    for region, rho in bulk_charge.items():
+        if not isinstance(region, str) or region not in roles:
+            raise ValueError("bulk_charge key {!r} is not a region of the device ({})".format(
+                region, sorted(roles)))
+        if roles[region] != "dielectric":
+            raise ValueError("bulk_charge: region {!r} is a {} region; a uniform fixed bulk charge is installed "
+                             "in DIELECTRIC regions only (in a semiconductor it would be a doping change)".format(
+                                 region, roles[region]))
+        out[repr(region)] = PE.install_bulk_charge(device, region, rho)
+    return out
 
 
 @dataclass
@@ -163,13 +255,74 @@ class LayeredDevsimBuilder:
     band the error converges cleanly at second order (Richardson works). It costs 2-6x the nodes. It does NOT
     help a diffusion-limited forward current, a node-sampled peak rate, z-stacked layer junctions (their
     interface lines already resolve them; the band is neutral there) or devices without a p-n junction (it
-    then warns and changes nothing). Measured comparison and recommendation: the audit note above."""
+    then warns and changes nothing). Measured comparison and recommendation: the audit note above.
+
+    EQUILIBRIUM EDGE ELECTRODES (v0.16). An edge electrode (footprint x_lo / x_hi / y_lo / y_hi) on
+    an EQUILIBRIUM semiconductor region (TransportModel.physics="equilibrium") is that region's FERMI-LEVEL
+    REFERENCE: no DEVSIM contact is made, and the electrode's voltage V sets E_F = -qV in the region (the
+    closure becomes n = N_c F_1/2((psi - V - Phi_c)/V_t); physics_equilibrium.setup_semiconductor_region
+    fermi_ref_param). This is exact for any V: an equilibrium film carries no current, so its Fermi level is
+    flat and an ohmic edge contact does nothing else. The reference covers every equilibrium semiconductor
+    region joined to the electrode's region through semiconductor/semiconductor interfaces (one Fermi level
+    for a connected equilibrium film). Two edge electrodes on one such group at different voltages raise
+    ValueError at solve (a current would flow, which equilibrium physics cannot represent).
+    Electrode(pin_potential=True) restores the v0.15.1 contact: a Potential Dirichlet at the corner nodes of the
+    electrode's edge column (on a gated film its two interface nodes) with E_F = 0, which distorts a gated
+    profile next to the edge (measured numbers:
+    docs/audit/2026-11-14-v0.16-carrier-wiring.md). Drift-diffusion and bipolar regions are unchanged: their
+    full-edge ohmic contacts are real. A region with no unpinned edge electrode keeps its v0.15.1 model
+    strings character for character.
+
+    FIXED CHARGES AND GATE WORK FUNCTIONS (v0.16):
+      fixed_charge : {interface: Q [C/m^2, signed]}, the interface given as "<lower>__<upper>" or as a 2-tuple
+                     of region names (any order): a fixed sheet charge at that region/region interface
+                     (physics_equilibrium.install_sheet_charge), carried by the DIELECTRIC side when there is
+                     one (the result does not depend on the side), else by the first region of the
+                     interface. Any physics; independent of carriers. At fixed semiconductor charge it moves
+                     the gate on the far side of the interface by -Q/C (C the dielectric stack between them).
+      bulk_charge  : {dielectric region: rho [C/m^3, signed]}, a uniform fixed space charge in that dielectric
+                     region (physics_equilibrium.install_bulk_charge); a semiconductor or metal region raises.
+      Electrode.work_function_eV on a GATE (a contact on a dielectric): the gate is pinned at Potential = bias -
+                     (phi_m - W_s)/q, W_s = chi + (E_c - E_F) of the frame reference semiconductor at psi = 0
+                     (physics_equilibrium.work_function_offset_V; band_frames() gives E_c; needs that
+                     material's TransportModel.chi_eV). Solving at bias V is the same as the device without the
+                     work function at V - (phi_m - W_s)/q (bit for bit: the ramp runs in the applied potential).
+                     A work function on a contact that lands on a semiconductor (a Schottky contact) raises.
+    Equilibrium-film interface traps: interface_traps={(film, oxide): physics_traps.FilmInterfaceTraps(...)}
+    (Fermi-Dirac occupancy at the film's Fermi level, which follows the edge reference above).
+
+    DENSITY GRADIENT ON EQUILIBRIUM FILMS (v0.16, opt-in): density_gradient={region: density_gradient.
+    EquilibriumDensityGradient(gamma=None, m_eff_kg=None)} solves the quantum-corrected density inside the same
+    Newton (carriers.physics_equilibrium_dg): n = N_c F_1/2(eta + Lambda/V_t), Lambda = b lap(sqrt n)/sqrt n,
+    sqrt(n) -> 0 at every interface with a dielectric (the dead layer at a gate oxide), a carrier reservoir at a
+    contact on the region. gamma None = the calibrated default (EQUILIBRIUM_DG_GAMMA = 1.8, fitted to the dual-gate
+    Schrodinger-Poisson solver; an UnreliableResultWarning at build when the film is outside the calibrated range);
+    m_eff_kg None = the region's DOS mass. Works with the Fermi-level reference, fixed charges, work functions and
+    film interface traps; a region with an interface to another semiconductor, a Kane band, non-equilibrium
+    physics, or a pin_potential=True edge electrode (its corner contact would overwrite the wall condition) is
+    refused. The default screening-length mesh resolves the dead layer (measured: tests/
+    test_equilibrium_density_gradient.py, docs/audit/2026-11-14-v0.16-equilibrium-density-gradient.md). None (default) makes no new DEVSIM call. Small-signal
+    (set_ssac_gate), noise and transient analyses of a DG device are not validated.
+
+    GATE LEAKAGE AND THE LATERAL FERMI-LEVEL DROP (v0.16, opt-in): gate_leakage=carriers.gate_leakage.GateLeakage(...)
+    gives each leaking equilibrium film (GateLeakage.regions, default: every equilibrium film with an unpinned x-edge
+    electrode) a Fermi-potential node field with lateral current continuity, fed by the tunnelling current of every gate
+    whose dielectric column reaches it (Tsu-Esaki/WKB through the stack, or a measured J(V) table); its edge electrodes
+    become Fermi-level contacts (inert strip just outside the cell; the film's mesh is unchanged) and may sit at
+    different voltages. Diagnostics: gate_leakage_report() and CarrierField.extras["gate_leakage"]. Refused with the
+    density gradient on the same film and with pinned / y-edge electrodes on it. None (default) makes no new DEVSIM
+    call. Notes: docs/audit/2026-11-14-v0.16-gate-leakage-lateral-drop.md.
+    Example::
+
+        LayeredDevsimBuilder(design, fixed_charge={("film", "up_oxb"): -1.6e-3},
+                             bulk_charge={"up_oxb": 2.0e5})"""
 
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
                   extended_precision: Optional[bool] = None, on_chi_temperature: str = "refuse",
-                  exact_geometry=True, junction_band=None) -> None:
+                  exact_geometry=True, junction_band=None, fixed_charge=None,
+                  bulk_charge=None, density_gradient=None, gate_leakage=None) -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
                              .format(heterointerface))
@@ -222,8 +375,36 @@ class LayeredDevsimBuilder:
         # (carriers.junction_mesh; class docstring). None / False (default) = the graded mesh, byte-identical.
         self.junction_band = JM.resolve_junction_band(junction_band)
         self.junction_band_report: List[dict] = []           # one entry per junction found (filled at build)
+        # v0.16: fixed sheet / bulk charges (class docstring); None / {} = none, byte-identical
+        self.fixed_charge = _charge_map(fixed_charge, "fixed_charge", "Q_C_m2")
+        self.bulk_charge = _charge_map(bulk_charge, "bulk_charge", "rho_C_m3")
+        # v0.16: the opt-in in-Newton density gradient on equilibrium regions (class docstring);
+        # None / {} = none, byte-identical
+        self.density_gradient = _dg_map(density_gradient)
+        # A pin_potential=True edge electrode is a Potential Dirichlet contact on the film's two corner nodes,
+        # which are also dielectric-wall nodes: the contact rows replace the dead-layer wall condition there
+        # (measured: n(face) = n_bg instead of ~1e-12 n_bg at the corners, the edge column's sheet 2.3e16 against
+        # 1.3e17 m^-2 at the cell centre). Refused before DEVSIM; the unpinned edge (Fermi-level reference) is
+        # the supported contact on a density-gradient film.
+        for E in design.electrodes:
+            if E.is_edge and E.pin_potential and E.layer in self.density_gradient:
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: density_gradient on film {!r} with the pin_potential=True edge electrode "
+                    "{!r} is not supported (the pinned corner nodes are also dielectric-wall nodes, whose "
+                    "sqrt(n) -> 0 wall condition the contact would overwrite); use pin_potential=False, the "
+                    "Fermi-level reference edge".format(E.layer, E.name))
+        # v0.16 (gate leakage, opt-in): carriers.gate_leakage.GateLeakage -> the leaking equilibrium films get a
+        # lateral Fermi-level field (class docstring); None = none, byte-identical. Planned BEFORE the regions:
+        # each film's edge electrodes need the full-edge strip.
+        self.gate_leakage = gate_leakage
+        self._leak_regions: List[str] = self._plan_leak_regions()
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
+        # v0.16: equilibrium edge electrodes that are Fermi-level references (class docstring):
+        # electrode -> its group index; group index -> the equilibrium regions whose EF_ref_V it sets
+        self._fermi_ref_electrode: Dict[str, int] = {}
+        self._fermi_ref_groups: List[List[str]] = []
+        self._wf_offset: Dict[str, float] = {}               # gate electrode -> work-function offset [V]
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
         # electrode -> circuit source that drives it, once set_ssac_gate repointed it (see _drive)
         self._circuit_gates: Dict[str, str] = {}
@@ -278,6 +459,83 @@ class LayeredDevsimBuilder:
         for k, v in self._bipolar_edge_contacts().items():
             out.setdefault(k, set()).update(v)
         return out
+
+    def _leak_edge_contacts(self) -> Dict[str, set]:
+        """v0.16 (gate leakage): layer -> x-edge sides of the edge electrodes of every leaking film. Each is a
+        Fermi-level Dirichlet that must capture the whole edge column, so it gets an inert edge-metal strip just
+        OUTSIDE the cell (x in [-w, 0] or [P, P + w]; DEVSIM captures a contact only on a boundary shared with
+        another region): the film keeps its full width and exactly the mesh it has without the leakage option
+        (the existing full-edge strips of drift-diffusion grounds are carved inside the cell instead)."""
+        out: Dict[str, set] = {}
+        for E in self.design.electrodes:
+            if E.is_edge and E.layer in getattr(self, "_leak_regions", ()):
+                out.setdefault(E.layer, set()).add(E.footprint)
+        return out
+
+    def _plan_leak_regions(self) -> List[str]:
+        """v0.16 (gate leakage): the film regions of LayeredDevsimBuilder(gate_leakage=...) -- GateLeakage.regions,
+        or every equilibrium semiconductor layer without inclusions that has an unpinned x-edge electrode.
+        Refuses: no such film, a y-edge or pin_potential electrode on one, no metal material for the strip, a
+        density gradient on the same film. Pure (no DEVSIM call)."""
+        gl = self.gate_leakage
+        if gl is None:
+            return []
+        from dynameta.carriers.gate_leakage import GateLeakage
+        if not isinstance(gl, GateLeakage):
+            raise TypeError("LayeredDevsimBuilder(gate_leakage=...) must be a carriers.gate_leakage.GateLeakage, got "
+                            "{!r}".format(gl))
+        d = self.design
+        films = []
+        for L in d.stack.layers:
+            tr = getattr(d.materials.get(L.background_material), "transport", None)
+            if (not L.inclusions and d.material_role(L.background_material) == "semiconductor" and tr is not None
+                    and tr.physics not in ("drift_diffusion", "bipolar_dd")):
+                films.append(L.name)
+        edges = {}
+        for E in d.electrodes:
+            if E.is_edge and E.layer in films:
+                edges.setdefault(E.layer, []).append(E)
+        if gl.regions is None:
+            regions = [f for f in films if any(E.footprint in ("x_lo", "x_hi") and not E.pin_potential
+                                               for E in edges.get(f, ()))]
+        else:
+            regions = list(gl.regions)
+            bad = [r for r in regions if r not in films]
+            if bad:
+                raise ValueError("LayeredDevsimBuilder(gate_leakage=...): {} not equilibrium semiconductor layer(s) "
+                                 "without inclusions (candidates: {})".format(bad, films))
+        if not regions:
+            raise ValueError("LayeredDevsimBuilder(gate_leakage=...): no equilibrium film with an x-edge electrode; the "
+                             "leakage current needs an edge contact to flow to")
+        for r in regions:
+            el = edges.get(r, [])
+            if not el:
+                raise ValueError("LayeredDevsimBuilder(gate_leakage=...): film {!r} has no edge electrode".format(r))
+            for E in el:
+                if E.footprint not in ("x_lo", "x_hi") or E.pin_potential:
+                    raise NotImplementedError(
+                        "LayeredDevsimBuilder(gate_leakage=...): electrode {!r} on the leaking film {!r} is a {} edge{}; "
+                        "only unpinned x_lo / x_hi edge electrodes (Fermi-level contacts) are supported".format(
+                            E.name, r, E.footprint, " with pin_potential=True" if E.pin_potential else ""))
+            if r in self.density_gradient:
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: density_gradient and gate_leakage on the same film {!r} are not supported "
+                    "(carriers.gate_leakage module header)".format(r))
+            # the lateral Fermi field needs a film conductivity q mu n: GateLeakage.mobility_m2Vs, or (None) the
+            # film TransportModel's mobility at n_bg. Equilibrium physics does not need a mobility, so a film
+            # material may carry none; refuse here, before DEVSIM, instead of failing inside build_device.
+            if gl.mobility_m2Vs is None:
+                L = next(x for x in d.stack.layers if x.name == r)
+                tr = d.materials.get(L.background_material).transport
+                if tr.mobility_m2Vs_of_n_m3 is None:
+                    raise ValueError(
+                        "LayeredDevsimBuilder(gate_leakage=...): film {!r} needs a mobility for its lateral Fermi "
+                        "field, but GateLeakage.mobility_m2Vs is None and the film material {!r} has no "
+                        "TransportModel.mobility_m2Vs_of_n_m3; set either one".format(r, L.background_material))
+        if self._metal_material() is None:
+            raise ValueError("LayeredDevsimBuilder(gate_leakage=...): the design has no metal material for the "
+                             "edge-metal strip of the film contact(s)")
+        return regions
 
     def _dd_full_edge_grounds(self) -> Dict[str, set]:
         """Map layer-name -> set of edge SIDES ({'x_lo','x_hi'}) carrying a GROUND electrode on a
@@ -381,6 +639,11 @@ class LayeredDevsimBuilder:
                             L.name, w * 1e9, (x1 - x0) * 1e9, P * 1e9))
                 specs.append(_RegionSpec(L.name, L.background_material, bg_role,
                                           x0, x1, zlo, zhi))
+                for side in sorted(self._leak_edge_contacts().get(L.name, ())):   # v0.16: outside the cell
+                    lo_side = side == "x_lo"
+                    specs.append(_RegionSpec(L.name + ("_lgnd_lo" if lo_side else "_lgnd_hi"),
+                                             self._metal_material(), "metal",
+                                             -w if lo_side else P, 0.0 if lo_side else P + w, zlo, zhi))
             for i, inc in enumerate(L.inclusions):
                 xlo, xhi, _, _ = inc.shape.bbox_m()
                 role = d.material_role(inc.material)
@@ -567,32 +830,100 @@ class LayeredDevsimBuilder:
         return out[0], out[1]
 
     # ---- mesh build ----
-    def build_device(self) -> None:
-        d = self.design
-        spec = d.mesh_2d
-        P = d.unit_cell.period_x_m
-        z_iv = d.z_intervals()
-        # x mesh lines: cell edges + inclusion feature edges + cell midline
-        x_lines = {0.0: spec.x_spacing_edge_m, P: spec.x_spacing_edge_m,
-                    P / 2.0: spec.x_spacing_feature_mid_m}
-        x_fixed = {0.0, P}                                   # region boundaries (the mid line is not one)
-        for L in d.stack.layers:
-            for inc in L.inclusions:
-                xlo, xhi, _, _ = inc.shape.bbox_m()
-                x_lines[xlo] = spec.x_spacing_feature_edge_m
-                x_lines[xhi] = spec.x_spacing_feature_edge_m
-                x_fixed |= {xlo, xhi}
-        # edge-metal interface line(s) for full-edge contacts (DD grounds + bipolar) -- strip boundaries
-        if self._metal_material() is not None:
-            for _ln, _sides in self._full_edge_strips().items():
-                if "x_lo" in _sides:
-                    x_lines[_EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
-                    x_fixed.add(_EDGE_METAL_W_M)
-                if "x_hi" in _sides:
-                    x_lines[P - _EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
-                    x_fixed.add(P - _EDGE_METAL_W_M)
-        x_calls = [(pos, x_lines[pos], x_lines[pos]) for pos in sorted(x_lines)]
+    def layer_screening_lengths(self) -> Dict[str, float]:
+        """{layer: screening length [m]} for every layer holding a UNIPOLAR semiconductor region (physics
+        "equilibrium" or "drift_diffusion"; the smallest screening_length_m over its materials) -- the input
+        of the default z grading (Mesh2DSpec.semiconductor_refinement="screening"). bipolar_dd regions are
+        not graded by it: their n_bg is a doping whose Debye length sets neither an inversion layer nor a
+        p-n depletion layer (carriers.junction_mesh covers junctions), so they keep the legacy lines."""
+        out: Dict[str, float] = {}
+        for s in self._specs:
+            if s.role != "semiconductor":
+                continue
+            tr = self.design.materials.get(s.material).transport
+            if getattr(tr, "physics", "equilibrium") not in ("equilibrium", "drift_diffusion"):
+                continue
+            layer = s.name.split("__incl")[0]
+            out[layer] = min(screening_length_m(tr), out.get(layer, np.inf))
+        return out
 
+    def _screening_y_lines(self, spec, z_iv, meshed_layer_names, top_z) -> List[tuple]:
+        """z mesh lines (pos, ns, ps), ascending, for Mesh2DSpec.semiconductor_refinement="screening"
+        (rule: the Mesh2DSpec docstring). Non-semiconductor layers, and semiconductor layers whose legacy
+        lines already meet the screening spacing, emit exactly their legacy lines; a face line shared by
+        two layers takes the finer of the two spacings.
+
+        Inside each refined zone every node is an EXPLICIT mesh line (a geometric sequence from the face
+        spacing to the zone-edge spacing, each line's ns/ps above its own gaps so DEVSIM inserts nothing in
+        between). Left to DEVSIM's own grading, a zone approached from below (the upper face of a layer)
+        loses its fine cells: DEVSIM 2.11.2 drops the generated points within ~1e-10 mesh units before a
+        line, i.e. 0.1 nm in this builder's SI metres (MEASURED: lines 0 -> 1 nm graded 0.1 -> 0.01 nm end
+        [..., 0.0218, 0.1076, 0.01] nm), so the upper face of every film had a ~0.1 nm cell next to its
+        face cell whatever the requested spacing. Explicit lines are kept at any separation >= the floor
+        _MIN_LINE_SPACING_M."""
+        izone = spec.interface_zone_m
+        coarse = spec.coarse_ps_m
+        ls = self.layer_screening_lengths()
+        lines: Dict[int, list] = {}           # rounded key -> [pos, ns, ps, ns_explicit, ps_explicit]
+
+        def put(pos, ns, ps, xns=False, xps=False):
+            """Merge a line. An EXPLICIT side (an explicit sequence continues on it) keeps its own spacing;
+            otherwise the finer spacing wins."""
+            k = int(round(pos / _LINE_MERGE_M))
+            if k not in lines:
+                lines[k] = [pos, ns, ps, xns, xps]
+                return
+            e = lines[k]
+            for i, v, x in ((1, ns, xns), (2, ps, xps)):
+                if x and not e[i + 2]:
+                    e[i], e[i + 2] = v, True
+                elif x == e[i + 2]:
+                    e[i] = min(e[i], v)
+
+        for nm in meshed_layer_names:
+            zlo, zhi = z_iv[nm]
+            thk = zhi - zlo
+            L = ls.get(nm)
+            if L is None or not _needs_screening(spec, L):
+                ip = spec.interface_ps_m                     # the legacy lines of this layer
+                put(zlo, ip, ip)
+                zone = min(izone, 0.45 * thk)
+                if zone > 0:
+                    put(zlo + zone, coarse, coarse)
+                    put(zhi - zone, coarse, coarse)
+                if thk > 4 * izone:
+                    put(0.5 * (zlo + zhi), coarse, coarse)
+                continue
+            ips = max(min(spec.interface_ps_m, spec.screening_interface_factor * L), _MIN_LINE_SPACING_M)
+            zs = min(spec.screening_zone_factor * L, 0.45 * thk)
+            ss = max(min(max(spec.screening_ps_factor * L, ips), coarse), ips)
+            off = _graded_offsets(ips, ss, zs)               # 0 = face ... zs = zone edge
+            gaps = np.diff(off)
+            n = off.size
+            for k in range(n):
+                g_in = gaps[k - 1] if k > 0 else None        # gap towards the face
+                g_out = gaps[k] if k < n - 1 else None       # gap away from the face
+                w_in = _EXPLICIT_SPACING_X * g_in if g_in is not None else None
+                w_out = _EXPLICIT_SPACING_X * g_out if g_out is not None else None
+                # lower face, sequence ascending from zlo: "in" is below (ns), "out" above (ps)
+                ns_lo = w_in if w_in is not None else ips    # at the face: the outside grows from ips
+                ps_lo = w_out if w_out is not None else ss   # at the zone edge: DEVSIM grades from ss
+                put(zlo + off[k], ns_lo, ps_lo, xns=w_in is not None, xps=w_out is not None)
+                # upper face, mirrored: "in" is above (ps), "out" below (ns)
+                put(zhi - off[k], ps_lo, ns_lo, xns=w_out is not None, xps=w_in is not None)
+            # beyond the zone the spacing grows towards coarse_ps_m at the midline; the midline spacing is
+            # capped at a quarter of the zone-to-midline gap so DEVSIM's geometric grading from ss stays gentle
+            gap = 0.5 * thk - zs
+            mid_sp = min(coarse, 0.25 * gap)
+            if mid_sp > ss:
+                put(0.5 * (zlo + zhi), mid_sp, mid_sp)
+        put(top_z, spec.interface_ps_m, spec.interface_ps_m)
+        return [(e[0], e[1], e[2]) for e in (lines[k] for k in sorted(lines))]
+
+    def _y_mesh_lines(self, spec):
+        """(y_calls, meshed_layer_names): the z mesh lines (pos, ns, ps) build_device adds before any
+        junction band, for Mesh2DSpec `spec`. Pure (no DEVSIM call)."""
+        z_iv = self.design.z_intervals()
         # y mesh lines: interface-zone refinement over meshed layers
         izone = spec.interface_zone_m
         # map region names back to their parent layer for z lookup; the edge-metal strip
@@ -612,6 +943,229 @@ class LayeredDevsimBuilder:
                 y_calls.append((0.5 * (zlo + zhi), spec.coarse_ps_m, spec.coarse_ps_m))
         top_z = max(z_iv[nm][1] for nm in meshed_layer_names)
         y_calls.append((top_z, spec.interface_ps_m, spec.interface_ps_m))
+        # v0.16 (Mesh2DSpec.semiconductor_refinement): "legacy" -- and "screening" on a device none of whose
+        # layers it refines -- keeps the calls above exactly (same lines, same order)
+        if getattr(spec, "semiconductor_refinement", "legacy") != "legacy":
+            ls = self.layer_screening_lengths()
+            if any(_needs_screening(spec, ls[nm]) for nm in meshed_layer_names if nm in ls):
+                y_calls = self._screening_y_lines(spec, z_iv, meshed_layer_names, top_z)
+        return y_calls, meshed_layer_names
+
+    def _interface_plan(self) -> List[tuple]:
+        """(r0, r1, xl, xh, z_if) of every interface build_device makes, in its order: z-adjacent meshed
+        regions sharing an x-overlap, r0 the lower. ONLY between regions that both carry Potential (metals
+        are inert with no Potential solution, so a continuity interface would fail; their boundaries are
+        handled by Dirichlet contacts instead). Pure (no DEVSIM call)."""
+        out = []
+        for a in self._specs:
+            for b in self._specs:
+                if a.name >= b.name:
+                    continue
+                if a.role == "metal" or b.role == "metal":
+                    continue
+                if abs(a.z_hi - b.z_lo) < 1e-15 or abs(b.z_hi - a.z_lo) < 1e-15:
+                    xl = max(a.x_lo, b.x_lo); xh = min(a.x_hi, b.x_hi)
+                    if xh <= xl:
+                        continue
+                    z_if = a.z_hi if abs(a.z_hi - b.z_lo) < 1e-15 else b.z_hi
+                    r0, r1 = (a.name, b.name) if a.z_hi <= b.z_lo + 1e-15 else (b.name, a.name)
+                    out.append((r0, r1, xl, xh, z_if))
+        return out
+
+    def _equilibrium_regions(self) -> List[str]:
+        """Semiconductor regions solved in equilibrium mode (Potential only, n from the closure)."""
+        out = []
+        for s in self._specs:
+            if s.role == "semiconductor":
+                tr = self.design.materials.get(s.material).transport
+                if tr.physics not in ("drift_diffusion", "bipolar_dd"):
+                    out.append(s.name)
+        return out
+
+    def _plan_fermi_references(self) -> None:
+        """v0.16 (class docstring): find the edge electrodes that are Fermi-level references -- an
+        edge footprint, pin_potential False, on an equilibrium semiconductor region -- and group them with
+        every equilibrium region connected to theirs through semiconductor/semiconductor interfaces (one
+        Fermi level per connected equilibrium film). Fills _fermi_ref_electrode {electrode: group} and
+        _fermi_ref_groups [[region, ...], ...]. Pure (no DEVSIM call)."""
+        eq = [r for r in self._equilibrium_regions() if r not in self._leak_regions]   # v0.16: leak films own theirs
+        refs = [E for E in self.design.electrodes
+                if E.is_edge and not E.pin_potential and E.layer in eq]
+        self._fermi_ref_electrode, self._fermi_ref_groups = {}, []
+        if not refs:
+            return
+        adj: Dict[str, set] = {r: set() for r in eq}
+        for r0, r1, _xl, _xh, _z in self._interface_plan():
+            if r0 in adj and r1 in adj:
+                adj[r0].add(r1)
+                adj[r1].add(r0)
+        comp: Dict[str, int] = {}
+        for E in refs:
+            if E.layer in comp:
+                self._fermi_ref_electrode[E.name] = comp[E.layer]
+                continue
+            k = len(self._fermi_ref_groups)
+            todo, seen = [E.layer], []
+            while todo:
+                r = todo.pop()
+                if r in comp:
+                    continue
+                comp[r] = k
+                seen.append(r)
+                todo.extend(sorted(adj[r] - set(comp)))
+            self._fermi_ref_groups.append(sorted(seen))
+            self._fermi_ref_electrode[E.name] = k
+
+    def fermi_references(self) -> Dict[str, List[str]]:
+        """{edge electrode: [equilibrium regions whose Fermi level it sets]} for every equilibrium edge
+        electrode that is a Fermi-level reference (class docstring); {} when there is none.
+        Available after build_device()."""
+        return {e: list(self._fermi_ref_groups[k]) for e, k in self._fermi_ref_electrode.items()}
+
+    def _check_reference_voltages(self, targets: Mapping[str, float]) -> None:
+        """Refuse a bias that puts two edge electrodes of one Fermi-reference group (pinned or not) at
+        different voltages: their equilibrium region would have to carry a current."""
+        if not self._fermi_ref_groups:
+            return
+        for k, regions in enumerate(self._fermi_ref_groups):
+            members = [E.name for E in self.design.electrodes
+                       if E.is_edge and E.layer in regions]
+            vals = {e: float(targets[e]) for e in members}
+            if len(set(vals.values())) > 1:
+                raise ValueError(
+                    "LayeredDevsimBuilder: edge electrodes {} sit on the equilibrium semiconductor region(s) {} "
+                    "but are biased at different voltages ({}). An equilibrium (Potential-only) region has ONE "
+                    "Fermi level, set by its edge electrodes, and carries no current, so two contacts at "
+                    "different voltages cannot be represented. Bias them equally, keep one, or solve the region "
+                    "with physics='drift_diffusion' (a current-carrying film); Electrode(pin_potential=True) on "
+                    "every one of them restores the v0.15.1 potential-pinned columns.".format(
+                        members, regions, ", ".join("{} = {!r} V".format(e, v) for e, v in vals.items())))
+
+    def _driven_electrodes(self) -> list:
+        """The design electrodes the solve ramps, in design order: a Fermi-reference group is driven once,
+        by its first electrode (its members share one parameter and, by _check_reference_voltages, one
+        voltage)."""
+        seen, out = set(), []
+        for E in self.design.electrodes:
+            k = self._fermi_ref_electrode.get(E.name)
+            if k is not None:
+                if k in seen:
+                    continue
+                seen.add(k)
+            out.append(E)
+        return out
+
+    def _seed_voltages(self) -> Dict[str, float]:
+        """The zero-bias seed of every electrode: grounds at fixed_voltage_V, the rest at 0; a
+        Fermi-reference group takes the fixed voltage of its first ground (0 if it has none)."""
+        zero = {E.name: (E.fixed_voltage_V if E.role == "ground" else 0.0) for E in self.design.electrodes}
+        for k in range(len(self._fermi_ref_groups)):
+            members = [E for E in self.design.electrodes if self._fermi_ref_electrode.get(E.name) == k]
+            g = next((E.fixed_voltage_V for E in members if E.role == "ground"), 0.0)
+            for E in members:
+                zero[E.name] = g
+        return zero
+
+    def _applied(self, electrode: str, v: float) -> float:
+        """The potential an electrode at bias v applies: v, or v + the gate's work-function offset."""
+        off = self._wf_offset.get(electrode)
+        return v if off is None else v + off
+
+    def _wire_work_functions(self) -> None:
+        """v0.16: the work-function offset -(phi_m - W_s)/q of every gate with
+        Electrode.work_function_eV, W_s = chi + q Phi_c of the frame reference semiconductor (its affinity at
+        the region's temperature and its E_c above E_F at psi = 0 in the common frame, band_frames()).
+        _drive applies it as bias + offset. Refuses a work function on a contact that lands on a
+        semiconductor (a metal/semiconductor Schottky contact, not modelled) and a device without a
+        semiconductor (no W_s)."""
+        self._wf_offset = {}
+        wf = [E for E in self.design.electrodes if E.work_function_eV is not None]
+        if not wf:
+            return
+        semis = [sp.name for sp in self._specs if sp.role == "semiconductor"]
+        if not semis:
+            raise ValueError("LayeredDevsimBuilder: electrode(s) {} carry work_function_eV but the device has no "
+                             "semiconductor region, so there is no semiconductor work function W_s to refer it "
+                             "to".format([E.name for E in wf]))
+        for E in wf:
+            if self._contact_region.get(E.name) in semis:
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: electrode '{}' has work_function_eV but its contact lands on the "
+                    "semiconductor region '{}': a metal/semiconductor contact with a work function is a Schottky "
+                    "contact, which this builder does not model (its contacts are ohmic). work_function_eV "
+                    "applies to gates on a dielectric.".format(E.name, self._contact_region[E.name]))
+        ref = self._reference_semiconductor(semis)
+        sp = next(x for x in self._specs if x.name == ref)
+        tr = self.design.materials.get(sp.material).transport
+        chi = band_data_at_T(tr, transport_temperature_K(tr)).chi_eV
+        if chi is None:
+            raise ValueError(
+                "LayeredDevsimBuilder: electrode(s) {} carry work_function_eV, which is referred to the work "
+                "function W_s = chi + (E_c - E_F) of the frame reference semiconductor '{}' (material '{}'), "
+                "but its TransportModel.chi_eV is None. Set chi_eV (eV).".format(
+                    [E.name for E in wf], ref, sp.material))
+        phi_c = self._frames[ref][0]
+        for E in wf:
+            self._wf_offset[E.name] = PE.work_function_offset_V(E.work_function_eV, chi, phi_c)
+
+    def _install_fixed_charges(self) -> None:
+        """v0.16: the requested fixed sheet charges (fixed_charge) and dielectric bulk charges
+        (bulk_charge), after the region physics and the interface continuity (class docstring)."""
+        if not self.fixed_charge and not self.bulk_charge:
+            return
+        install_fixed_charges(
+            self.device, self.fixed_charge, self.bulk_charge,
+            pairs={frozenset((r0, r1)): "{}__{}".format(r0, r1) for r0, r1 in self._iface_pairs},
+            roles={s.name: s.role for s in self._specs})
+
+    def build_device(self) -> None:
+        d = self.design
+        spec = d.mesh_2d
+        P = d.unit_cell.period_x_m
+        z_iv = d.z_intervals()
+        # x mesh lines: cell edges + inclusion feature edges + cell midline
+        x_lines = {0.0: spec.x_spacing_edge_m, P: spec.x_spacing_edge_m,
+                    P / 2.0: spec.x_spacing_feature_mid_m}
+        x_fixed = {0.0, P}                                   # region boundaries (the mid line is not one)
+        for L in d.stack.layers:
+            for inc in L.inclusions:
+                xlo, xhi, _, _ = inc.shape.bbox_m()
+                x_lines[xlo] = spec.x_spacing_feature_edge_m
+                x_lines[xhi] = spec.x_spacing_feature_edge_m
+                x_fixed |= {xlo, xhi}
+        # v0.16 full-run fixes: the x edges of every patterned (CrossSection) electrode footprint. A gate
+        # contact captures the nodes inside its footprint (add_2d_contact below), so without a line at an edge
+        # the contact snapped to the nearest existing node column: MEASURED, a 16 nm Rectangle gate (x 11..27 nm)
+        # on a full metal layer over a 4 nm x mesh captured x 12..24 nm only (12 nm, off-centre). An edge that
+        # already has a line within _LINE_MERGE_M (e.g. a gate drawn on its own inclusion) adds nothing, so
+        # those meshes are unchanged.
+        for E in d.electrodes:
+            if E.is_edge or isinstance(E.footprint, str):
+                continue
+            exlo, exhi = E.footprint.bbox_m()[:2]
+            for xe in (exlo, exhi):
+                if 0.0 < xe < P and all(abs(xe - q) > _LINE_MERGE_M for q in x_lines):
+                    x_lines[xe] = spec.x_spacing_feature_edge_m
+                    x_fixed.add(xe)
+        # edge-metal interface line(s) for full-edge contacts (DD grounds + bipolar) -- strip boundaries
+        if self._metal_material() is not None:
+            for _ln, _sides in self._full_edge_strips().items():
+                if "x_lo" in _sides:
+                    x_lines[_EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
+                    x_fixed.add(_EDGE_METAL_W_M)
+                if "x_hi" in _sides:
+                    x_lines[P - _EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
+                    x_fixed.add(P - _EDGE_METAL_W_M)
+        # v0.16 (gate leakage): the outer boundary line of each leaking film's strip outside the cell (the lines in
+        # [0, P] keep their spacing, so the cell's mesh is unchanged); none requested -> no line
+        for _sides in self._leak_edge_contacts().values():
+            for _pos in ([-_EDGE_METAL_W_M] if "x_lo" in _sides else []) + ([P + _EDGE_METAL_W_M] if "x_hi" in _sides
+                                                                            else []):
+                x_lines[_pos] = _EDGE_METAL_W_M
+                x_fixed.add(_pos)
+        x_calls = [(pos, x_lines[pos], x_lines[pos]) for pos in sorted(x_lines)]
+
+        y_calls, meshed_layer_names = self._y_mesh_lines(spec)
         if self.junction_band is not None:                   # opt-in; off = the calls above, unchanged
             y_fixed = {z for nm in meshed_layer_names for z in z_iv[nm]}
             x_calls, y_calls = self._junction_band_lines(x_calls, x_fixed, y_calls, y_fixed)
@@ -627,31 +1181,22 @@ class LayeredDevsimBuilder:
             ds.add_2d_region(mesh=self.mesh_name, region=s.name, material=s.material,
                               xl=s.x_lo, xh=s.x_hi, yl=s.z_lo, yh=s.z_hi, bloat=1e-12)
 
-        # interfaces between z-adjacent meshed regions sharing x-overlap. ONLY
-        # between regions that both carry Potential (skip metals -- they are
-        # inert with no Potential solution, so a continuity interface would fail;
-        # their boundaries are handled by Dirichlet contacts instead).
-        for a in self._specs:
-            for b in self._specs:
-                if a.name >= b.name:
-                    continue
-                if a.role == "metal" or b.role == "metal":
-                    continue
-                if abs(a.z_hi - b.z_lo) < 1e-15 or abs(b.z_hi - a.z_lo) < 1e-15:
-                    xl = max(a.x_lo, b.x_lo); xh = min(a.x_hi, b.x_hi)
-                    if xh <= xl:
-                        continue
-                    z_if = a.z_hi if abs(a.z_hi - b.z_lo) < 1e-15 else b.z_hi
-                    r0, r1 = (a.name, b.name) if a.z_hi <= b.z_lo + 1e-15 else (b.name, a.name)
-                    self._iface_pairs.append((r0, r1))       # for the heterointerface wiring below
-                    ds.add_2d_interface(mesh=self.mesh_name,
-                                          name="{}__{}".format(r0, r1),
-                                          region0=r0, region1=r1,
-                                          xl=xl, xh=xh, yl=z_if, yh=z_if, bloat=1e-12)
+        # interfaces between z-adjacent meshed regions sharing x-overlap (_interface_plan)
+        for r0, r1, xl, xh, z_if in self._interface_plan():
+            self._iface_pairs.append((r0, r1))               # for the heterointerface wiring below
+            ds.add_2d_interface(mesh=self.mesh_name,
+                                  name="{}__{}".format(r0, r1),
+                                  region0=r0, region1=r1,
+                                  xl=xl, xh=xh, yl=z_if, yh=z_if, bloat=1e-12)
 
         # contacts
+        self._plan_fermi_references()
         for E in d.electrodes:
             zlo, zhi = z_iv[E.layer]
+            if E.name in self._fermi_ref_electrode:
+                # v0.16: an equilibrium edge electrode is the region's Fermi-level reference
+                # (EF_ref_V, set in _drive), not a DEVSIM contact -- class docstring
+                continue
             if E.is_edge:
                 region = E.layer
                 if (self._metal_material() is not None
@@ -666,10 +1211,18 @@ class LayeredDevsimBuilder:
                     xb = _EDGE_METAL_W_M if E.footprint == "x_lo" else (P - _EDGE_METAL_W_M)
                     xlo, xhi = xb - 1e-10, xb + 1e-10
                 else:
-                    # Thin x-slab at the cell DOMAIN boundary. DEVSIM captures only ~2 box-corner
-                    # nodes here (no adjacent region) -- a weak 2-node carrier pin, fine for the
-                    # equilibrium solve (n is local) but too weak to anchor a continuity equation.
-                    # The full-edge branch above is the DD fix; this remains for equilibrium grounds.
+                    # Thin x-slab at the cell DOMAIN boundary over the layer's full z range. DEVSIM
+                    # captures only the ~2 box-corner nodes of the edge column (MEASURED v0.16: "with 2
+                    # nodes"; on a gated film these are its two interface nodes, so the Dirichlet pins
+                    # n = n_bg exactly where the accumulation layer forms -- a ~0.7 / ~0.04 relative distortion
+                    # at the contact column / 8 nm in (tests/test_layered_edge_reference.py) -- while the column
+                    # interior floats; a single-layer bar with no
+                    # neighbouring region captures none and DEVSIM drops the contact). On an equilibrium
+                    # region it is made only for Electrode(pin_potential=True) (v0.15.1 behaviour);
+                    # otherwise the electrode is a Fermi-level reference (above). Too weak for a
+                    # continuity equation: the full-edge branch is the DD fix. v0.16: on a leaking film
+                    # (gate_leakage) the strip just outside the cell makes this slab capture the whole edge
+                    # column, the Fermi-level Dirichlet of carriers.gate_leakage.setup_fermi_contact.
                     xlo = (0.0 - 1e-10) if E.footprint == "x_lo" else (P - 1e-10)
                     xhi = (0.0 + 1e-10) if E.footprint == "x_lo" else (P + 1e-10)
                 yl_c, yh_c = zlo, zhi
@@ -682,9 +1235,16 @@ class LayeredDevsimBuilder:
                     bx = E.footprint.bbox_m()
                     xlo, xhi = bx[0], bx[1]
                 yl_c, yh_c = min(ybnd, zlo), max(ybnd, zhi)
+            bloat_c = 1e-10
+            if E.is_edge and E.layer in self._leak_regions:
+                # v0.16 (gate leakage): leave out the column's two end nodes. DEVSIM gives a node on both a contact
+                # and an interface to the contact only (MEASURED: the film/oxide interface then lacks its corner
+                # node, Potential continuity is lost there and the edge column's oxide field is off by 2x); the
+                # corners stay interface nodes with an ordinary Fermi-level row next to the Dirichlet column.
+                yl_c, yh_c, bloat_c = zlo + _LEAK_CONTACT_INSET_M, zhi - _LEAK_CONTACT_INSET_M, 1e-13
             ds.add_2d_contact(mesh=self.mesh_name, name=E.name, material="metal",
                                 region=region, xl=xlo, xh=xhi, yl=yl_c, yh=yh_c,
-                                bloat=1e-10)
+                                bloat=bloat_c)
             self._contact_region[E.name] = region
 
         ds.finalize_mesh(mesh=self.mesh_name)
@@ -697,10 +1257,13 @@ class LayeredDevsimBuilder:
         # their ohmic contacts also pin the electron quasi-Fermi level.
         self._dd_regions = set()
         self._bipolar_regions = set()
+        ref_regions = {r for g in self._fermi_ref_groups for r in g}
         for s in self._specs:
             if s.role == "semiconductor":
                 tr = self.design.materials.get(s.material).transport
-                dos = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
+                # v0.16: the DOS mass at n_bg -- the same float as before -- through the ONE guard
+                # (TransportModel.dos_mass_at_bg), which warns once per material when the callable varies
+                dos = tr.dos_mass_at_bg("LayeredDevsimBuilder region '{}'".format(s.name))
                 if tr.physics == "bipolar_dd":
                     self._setup_bipolar_region(s, tr, dos)
                     self._dd_regions.add(s.name)         # treated as DD for the abs-tol scaling
@@ -728,10 +1291,20 @@ class LayeredDevsimBuilder:
                         field_mobility=tr.field_dependent_mobility, v_sat_ms=tr.v_sat_ms,
                         ct_beta=tr.ct_beta, **({"statistics": _st} if _st is not None else {}))
                     self._dd_regions.add(s.name)
-                else:
+                elif s.name in self._leak_regions:           # v0.16 (gate leakage): E_F as a node solution
                     PE.setup_semiconductor_region(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
-                        eps_static=tr.eps_static, dos_mass_kg=dos)
+                        eps_static=tr.eps_static, fermi_ref_param=PE.FERMI_REF_PARAM, fermi_ref_node=True,
+                        **PE.closure_kwargs(tr, dos))
+                elif s.name in ref_regions:                  # v0.16: an edge Fermi-level reference
+                    PE.setup_semiconductor_region(
+                        self.device, s.name, n_bg_m3=tr.n_bg_m3,
+                        eps_static=tr.eps_static, fermi_ref_param=PE.FERMI_REF_PARAM,
+                        **PE.closure_kwargs(tr, dos))
+                else:                                        # the v0.15.1 call (v0.16: + a Kane band)
+                    PE.setup_semiconductor_region(
+                        self.device, s.name, n_bg_m3=tr.n_bg_m3,
+                        eps_static=tr.eps_static, **PE.closure_kwargs(tr, dos))
             elif s.role == "dielectric":
                 eps_r = self._dielectric_eps_static(s.material)
                 PE.setup_dielectric_region(self.device, s.name, eps_r)
@@ -743,10 +1316,13 @@ class LayeredDevsimBuilder:
         # this replaced the audit-regrade-7.1 refusal that stood here while the interface wired Potential
         # only -- a silently carrier-BLOCKING junction). Contacts below pin Potential at bias + s(r).
         self._frames = self._semiconductor_frames()
+        self._wire_work_functions()                         # v0.16: gate offsets in the common frame
         for iface in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, iface)
         self._install_interface_traps()
+        self._install_fixed_charges()                       # v0.16: none requested -> no call
         self._wire_heterointerfaces()
+        self._install_density_gradient()                    # v0.16: none requested -> no call
         for c in ds.get_contact_list(device=self.device):
             cr = self._contact_region.get(c)
             off = self._frames.get(cr, (0.0, 0.0))[1]
@@ -754,11 +1330,103 @@ class LayeredDevsimBuilder:
                 BP.setup_contact_ohmic_bipolar(self.device, c, psi_offset_V=off)  # Potential+Electrons+Holes
             elif cr in self._dd_regions:
                 DD.setup_contact_ohmic_dd(self.device, c, psi_offset_V=off)   # Potential + Electrons (=N_D)
+            elif cr in self._leak_regions:
+                continue                     # v0.16 (gate leakage): a Fermi-level Dirichlet (_install_gate_leakage)
             else:
                 PE.setup_contact(self.device, c, psi_offset_V=off)            # Potential only
         if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
             self._install_oxide_tunneling()
+        if self._leak_regions:                              # v0.16 (gate leakage): none requested -> no call
+            self._install_gate_leakage()
         self._built = True
+
+    def _install_density_gradient(self) -> None:
+        """v0.16: physics_equilibrium_dg.setup_equilibrium_dg on every requested region (class docstring)."""
+        if not self.density_gradient:
+            return
+        from dynameta.carriers import physics_equilibrium_dg as EQDG
+        if self._bipolar_regions:
+            raise NotImplementedError(
+                "LayeredDevsimBuilder(density_gradient=...): this device also has bipolar region(s) {}; its staged "
+                "bipolar solve does not seed or ramp the equilibrium density gradient".format(
+                    sorted(self._bipolar_regions)))
+        roles = {sp.name: sp for sp in self._specs}
+        for name, spec in self.density_gradient.items():
+            sp = roles.get(name)
+            if sp is None or sp.role != "semiconductor":
+                raise ValueError("LayeredDevsimBuilder(density_gradient=...): {!r} is not a semiconductor region of "
+                                 "this device; semiconductor regions: {}".format(
+                                     name, sorted(r for r, x in roles.items() if x.role == "semiconductor")))
+            tr = self.design.materials.get(sp.material).transport
+            if tr.physics != "equilibrium":
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder(density_gradient=...): region {!r} uses physics={!r}; the builder's density "
+                    "gradient is the equilibrium one (physics_equilibrium_dg). For drift-diffusion / bipolar regions "
+                    "use physics_density_gradient directly.".format(name, tr.physics))
+            m = spec.m_eff_kg
+            if m is None:                                   # the closure's DOS mass at n_bg (the same float)
+                m = float(tr.dos_mass_at_bg("LayeredDevsimBuilder density gradient '{}'".format(name)))
+            gamma = EQDG.EQUILIBRIUM_DG_GAMMA if spec.gamma is None else float(spec.gamma)
+            EQDG.setup_equilibrium_dg(self.device, name, m_eff_kg=m, gamma=gamma, u_floor_rel=spec.u_floor_rel)
+
+    def _dg_regions(self) -> List[str]:
+        """The equilibrium regions carrying the density gradient (empty when none was requested)."""
+        if not self.density_gradient:
+            return []
+        from dynameta.carriers import physics_equilibrium_dg as EQDG
+        return EQDG.equilibrium_dg_regions(self.device)
+
+    def _install_gate_leakage(self) -> None:
+        """v0.16: the lateral Fermi-level field of every leaking film (carriers.gate_leakage.setup_fermi_field_region),
+        its edge contacts (setup_fermi_contact) and the tunnelling sink of every gate whose dielectric column reaches
+        it (setup_gate_leakage; the gate's Fermi potential is its bias, its work-function offset removed)."""
+        from dynameta.carriers import gate_leakage as GL
+        from dynameta.carriers import tunneling as TN
+        from dynameta.constants import M_E
+        gl = self.gate_leakage
+        chi = {}
+        for sp in self._specs:
+            if sp.role == "semiconductor":
+                chi[sp.material] = self.design.materials.get(sp.material).transport.chi_eV
+        used = set()
+        roles = {sp.name: sp.role for sp in self._specs}
+        for region in self._leak_regions:
+            sp = next(x for x in self._specs if x.name == region)
+            tr = self.design.materials.get(sp.material).transport
+            mu = gl.mobility_m2Vs if gl.mobility_m2Vs is not None else float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3))
+            GL.setup_fermi_field_region(self.device, region, mobility_m2Vs=mu)
+            for E in self.design.electrodes:
+                if E.is_edge and E.layer == region:
+                    GL.setup_fermi_contact(self.device, E.name)
+            ck = PE.closure_kwargs(tr, tr.dos_mass_at_bg("LayeredDevsimBuilder gate leakage '{}'".format(region)))
+            m_sup = (ck["band"].m0_kg if "band" in ck else ck["dos_mass_kg"]) / M_E
+            n = 0
+            for E in self.design.electrodes:
+                if E.is_edge or (gl.gates is not None and E.name not in gl.gates):
+                    continue
+                if roles.get(self._contact_region.get(E.name)) != "dielectric":
+                    continue
+                if TN.dielectric_column(self.device, region, E.name) is None:
+                    continue
+                GL.setup_gate_leakage(self.device, region, E.name, gl, gate_offset_V=self._wf_offset.get(E.name, 0.0),
+                                      semiconductor_material=sp.material, chi_eV=chi, m_supply_over_m0=m_sup)
+                used.add(E.name)
+                n += 1
+            if n == 0:
+                raise ValueError("LayeredDevsimBuilder(gate_leakage=...): no gate electrode reaches the film {!r} through "
+                                 "dielectric regions".format(region))
+        missing = sorted(set(gl.gates or ()) - used)
+        if missing:
+            raise ValueError("LayeredDevsimBuilder(gate_leakage=...): gate(s) {} reach no leaking film".format(missing))
+
+    def gate_leakage_report(self, *, per_cell: bool = True) -> Dict[str, Dict[str, object]]:
+        """{film region: carriers.gate_leakage.gate_leakage_report} at the current solution (currents in A and powers
+        in W for the cell's period_y when per_cell, else per unit depth)."""
+        from dynameta.carriers import gate_leakage as GL
+        depth = self.design.unit_cell.period_y_m if per_cell else None
+        return {r: GL.gate_leakage_report(self.device, r, contacts=[E.name for E in self.design.electrodes
+                                                                    if E.is_edge and E.layer == r], depth_m=depth)
+                for r in self._leak_regions}
 
     def _install_oxide_tunneling(self) -> None:
         """v0.15: the self-consistent oxide-tunnelling term from each bipolar semiconductor region to each
@@ -803,8 +1471,10 @@ class LayeredDevsimBuilder:
         """The frame reference: the region of the first GROUND electrode that sits on a semiconductor
         (its contact frame is then unchanged), else the first semiconductor region in plan order."""
         for E in self.design.electrodes:
-            if E.role == "ground" and self._contact_region.get(E.name) in semis:
-                return self._contact_region[E.name]
+            # v0.16: an equilibrium edge Fermi reference makes no contact but sits on its layer's region
+            r = self._contact_region.get(E.name) or (E.layer if E.name in self._fermi_ref_electrode else None)
+            if E.role == "ground" and r in semis:
+                return r
         return semis[0]
 
     def _own_phi_c(self, region: str, tr) -> float:
@@ -887,7 +1557,7 @@ class LayeredDevsimBuilder:
         sp = next(x for x in self._specs if x.name == region)
         tr = self.design.materials.get(sp.material).transport
         phi_c = self._frames[region][0]
-        m_n = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
+        m_n = tr.dos_mass_at_bg("LayeredDevsimBuilder region '{}'".format(region))   # v0.16 DOS-mass-at-n_bg guard
         a_n = float(tr.richardson_n_Am2K2) if tr.richardson_n_Am2K2 else HJ.richardson_constant_Am2K2(m_n)
         if region not in self._bipolar_regions:             # unipolar DD: electrons only, FD g always on
             return HJ.HeteroSide(region, phi_c, "N_c", a_n, fd=True)
@@ -1030,13 +1700,53 @@ class LayeredDevsimBuilder:
                                     ndim=2))
         return out
 
-    def solve(self, bias, *, grid_n_x: int = 256, grid_n_z: int = 32,
+    def solve(self, bias, *, grid_n_x: int = 256, grid_n_z: Optional[int] = _DEFAULT_GRID_N_Z,
                 rel_tol: float = 1e-5, max_iter: int = 60,
                 v_step: float = 0.25, abs_tol: Optional[float] = None,
                 verbose: bool = False) -> CarrierField:
+        """Solve the device at `bias` (a sweep.BiasPoint) and return its CarrierField.
+
+        Every semiconductor region carries `node_fields` (the DEVSIM nodes, exact) and `grid_fields` on
+        `grid_axes_m` = {"x", "y"} (y is the through-stack axis), which is what core.bridge.assemble_eps
+        reads:
+          grid_n_z=<int> (default 32): a uniform grid_n_x x grid_n_z grid over the region's bounding box,
+              linearly interpolated from the nodes (core.resample.resample_to_grid) -- the layout the FEM
+              optics needs (its VoxelCoefficient assumes uniform axes). Unchanged from v0.15.1.
+          grid_n_z=None: the region's NATIVE z mesh lines (its unique node y) with a uniform grid_n_x
+              axis in x, each z line interpolated along x only (core.resample.resample_tensor_grid): no
+              resampling error through the stack, which the layered optics (TMM / RCWA / PMM /
+              Berreman, which slice a non-uniform z axis) need to see a graded accumulation layer as
+              the carrier solve resolved it. run_pipeline selects it automatically for a layered
+              optical solver (see its carrier_solve_kwargs). A region that is not a tensor grid of mesh
+              lines falls back to the uniform grid_n_x x 32 grid with an AdvisoryWarning. Do not hand a
+              native grid to the FEM optics: EpsField.voxel_bounds_u refuses a non-uniform axis.
+
+        extras["interface_resolution"] = {semiconductor region: max |ln(n_{k+1}/n_k)| over z-adjacent
+        nodes} (diagnostic only, to compare meshes: it scales with the spacing at an accumulation or
+        depletion face -- _interface_resolution; geometry.specs.Mesh2DSpec.semiconductor_refinement).
+
+        rel_tol, abs_tol, max_iter: DEVSIM's Newton tests (carriers.dc_solve.solve_dc). TIGHT CONVERGENCE
+        ON A POTENTIAL-ONLY DEVICE (every semiconductor in physics="equilibrium"; Potential is the only
+        unknown): DEVSIM's relative test is |dx| / (|x| + 1e-10), and at a 0 V seed -- or in the
+        screened interior of a degenerate film at any bias -- the potential is ~0, so rel_tol becomes
+        the absolute test |dx| < rel_tol x 1e-10 V, which round-off cannot meet below rel_tol ~ 5e-7
+        (the failure message then carries dc_solve.ZERO_UNKNOWN_NOTE). Set a tight target with abs_tol
+        IN VOLTS instead and keep rel_tol at its default, e.g. solve(bias, abs_tol=1e-14): that is
+        stricter than rel_tol=1e-7 on a 0.5 V swing and converges. There is no automatic mapping from
+        rel_tol to abs_tol. (The zero-bias seed solve uses the same rel_tol / abs_tol.)
+        abs_tol is in volts ONLY on such a Potential-only device: DEVSIM applies its one absolute_error to
+        every equation, each in its own variable's unit (densities m^-3 on drift-diffusion / bipolar regions,
+        sqrt(n) in m^-3/2 on density-gradient regions). With equilibrium density-gradient regions an explicit
+        abs_tol below the round-off-attainable update of the sqrt(n) rows (dc_solve.ABS_TOL_ULPS unit
+        round-offs of the device's solution size, the criterion dc_solve.default_abs_tol uses) is refused with
+        a ValueError before any Newton (it used to run max_iter iterations and fail at a relative 3e-16);
+        leave abs_tol=None there and tighten rel_tol.
+        """
         if not self._built:
             self.build_device()
         self._check_circuit_contacts()
+        if abs_tol is not None and self._dg_regions():
+            self._check_abs_tol_with_dg(float(abs_tol))
         if self._bipolar_regions:
             return self._solve_bipolar(bias, grid_n_x=grid_n_x, grid_n_z=grid_n_z, rel_tol=rel_tol,
                                        max_iter=max_iter, v_step=v_step, abs_tol=abs_tol, verbose=verbose)
@@ -1053,15 +1763,33 @@ class LayeredDevsimBuilder:
                 E.name, E.fixed_voltage_V if E.role == "ground" else 0.0)
                 for E in d.electrodes}
 
-        def _ramp(from_v):
-            for E in d.electrodes:
-                target = _targets()[E.name]
-                v_now = from_v[E.name]
+        self._check_reference_voltages(_targets())          # v0.16: one Fermi level per group
+
+        dg = bool(self._dg_regions())                       # v0.16: opt-in density gradient
+        leak = bool(self._leak_regions)                     # v0.16: gate leakage (exponential in the bias)
+
+        def _ramp(from_u):
+            # v0.16: the ramp runs in the APPLIED potential u (bias + a gate's work-function offset; the bias
+            # itself when there is none, the same arithmetic as before) from `from_u` (applied potentials)
+            # and drives a Fermi-reference group once (_driven_electrodes); otherwise exactly as before
+            if dg or leak:                                  # v0.16 (density gradient / gate leakage): adaptive steps
+                from dynameta.carriers import physics_equilibrium_dg as EQDG
+                for E in self._driven_electrodes():
+                    EQDG.adaptive_continuation(
+                        lambda u, _e=E.name: self._set_drive(_e, u), from_u[E.name],
+                        self._applied(E.name, _targets()[E.name]),
+                        lambda: solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
+                                         max_iter=max_iter, semiconductor_regions=semi, verbose=verbose),
+                        step=v_step)
+                return
+            for E in self._driven_electrodes():
+                target = self._applied(E.name, _targets()[E.name])
+                v_now = from_u[E.name]
                 n_steps = max(1, int(abs(target - v_now) / v_step + 0.5))
                 dv = (target - v_now) / n_steps
                 for _ in range(n_steps):
                     v_now += dv
-                    self._drive(E.name, v_now)
+                    self._set_drive(E.name, v_now)
                     solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
                               max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
 
@@ -1073,26 +1801,69 @@ class LayeredDevsimBuilder:
         prev = getattr(self, "_last_converged_bias", None)
         if prev is not None:
             try:
-                _ramp(dict(prev))
+                _ramp({e: self._applied(e, v) for e, v in prev.items()})
                 self._last_converged_bias = _targets()
                 return self._to_carrier_field(bias, grid_n_x, grid_n_z)
             except Exception:
                 if verbose:
                     print("[devsim] continuation from previous bias failed; "
                           "falling back to the full flat-band ramp", flush=True)
-        # zero-bias seed (grounds at fixed_voltage, biased at 0)
-        zero = {}
-        for E in d.electrodes:
-            v = E.fixed_voltage_V if E.role == "ground" else 0.0
-            zero[E.name] = v
-            self._drive(E.name, v)
-        solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
-                  max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
+        # zero-bias seed (grounds at fixed_voltage, biased at 0; applied potentials, so a gate with a work
+        # function is seeded at 0 and reaches its offset through the ramp; a Fermi-reference group once)
+        zero = self._seed_voltages()
+        for E in self._driven_electrodes():
+            self._set_drive(E.name, zero[E.name])
+        if self._dg_regions():                              # v0.16: opt-in; no call otherwise
+            self._solve_dg_seed(method=method, abs_tol=abs_tol, rel_tol=rel_tol, max_iter=max_iter,
+                                semi=semi, verbose=verbose)
+        else:
+            solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
+                      max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
         _ramp(zero)
         self._last_converged_bias = _targets()
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)
 
-    def _solve_bipolar(self, bias, *, grid_n_x: int, grid_n_z: int, rel_tol: float, max_iter: int,
+    def _check_abs_tol_with_dg(self, abs_tol: float) -> None:
+        """Refuse an explicit abs_tol that the sqrt(n) rows of an equilibrium density-gradient region cannot
+        meet (solve() docstring): below dc_solve.ABS_TOL_ULPS unit round-offs of the device's DEVSIM solution
+        size (the attainability criterion of dc_solve.default_abs_tol), evaluated on the current node values
+        (sqrt(n) is seeded at sqrt(n_bg) when the region is set up)."""
+        from dynameta.carriers import dc_solve as DC
+        u = DC.UNIT_ROUNDOFF_EXTENDED if XP.is_enabled(self.device) else DC.UNIT_ROUNDOFF_DOUBLE
+        need = DC.ABS_TOL_ULPS * u * DC.solution_size(self.device)
+        if abs_tol < need:
+            big = max(float(np.max(np.abs(ds.get_node_model_values(device=self.device, region=r, name="QSqrtN"))))
+                      for r in self._dg_regions())
+            raise ValueError(
+                "LayeredDevsimBuilder.solve(abs_tol={:.3g}): this device has equilibrium density-gradient region(s) "
+                "{}, and DEVSIM applies its one absolute error to EVERY equation, including the sqrt(n) rows "
+                "(QSqrtNEquation; sqrt(n) up to {:.3g} m^-3/2 here), so abs_tol is not in volts on it. The smallest "
+                "attainable value is ~{:.3g} ({} unit round-offs of the solution size). Leave abs_tol=None (the "
+                "default, round-off attainable) and tighten rel_tol, or pass abs_tol >= {:.3g}.".format(
+                    abs_tol, self._dg_regions(), big, need, DC.ABS_TOL_ULPS, need))
+
+    def _solve_dg_seed(self, *, method, abs_tol, rel_tol, max_iter, semi, verbose) -> None:
+        """v0.16: the zero-bias seed solve of a device with equilibrium density-gradient regions: the
+        classical solve with b = 0 (Lambda = 0 off the walls), then the wall-shaped seed and a b ramp to the
+        full value (physics_equilibrium_dg.seed_equilibrium_dg / set_equilibrium_dg_fraction)."""
+        from dynameta.carriers import physics_equilibrium_dg as EQDG
+        regs = self._dg_regions()
+
+        def _solve():
+            solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol, max_iter=max_iter,
+                     semiconductor_regions=semi, verbose=verbose)
+
+        for r in regs:
+            EQDG.set_equilibrium_dg_fraction(self.device, r, 0.0)
+            EQDG.seed_equilibrium_dg(self.device, r)
+        _solve()
+        for r in regs:
+            EQDG.set_equilibrium_dg_fraction(self.device, r, EQDG.DG_RAMP[0])
+            EQDG.seed_equilibrium_dg(self.device, r)
+        EQDG.adaptive_continuation(lambda f: [EQDG.set_equilibrium_dg_fraction(self.device, r, f) for r in regs],
+                                   EQDG.DG_RAMP[0], 1.0, _solve, step=EQDG.DG_RAMP[0])
+
+    def _solve_bipolar(self, bias, *, grid_n_x: int, grid_n_z: Optional[int], rel_tol: float, max_iter: int,
                        v_step: float, abs_tol: Optional[float], verbose: bool) -> CarrierField:
         """Coupled-Newton solve for a bipolar (3-variable) device: (1) seed Potential/Electrons/Holes
         from the charge-neutral equilibrium node models (built-in potential psi = V_t log(n0/n_i));
@@ -1153,9 +1924,13 @@ class LayeredDevsimBuilder:
                                values=ds.get_node_model_values(device=self.device, region=s,
                                                                name="IntrinsicHoles"))
         PT.seed_kinetic_traps(self.device, sorted(self._bipolar_regions))   # v0.15: no-op without kinetic traps
-        for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
-            v = E.fixed_voltage_V if E.role == "ground" else 0.0
-            self._drive(E.name, v)
+        # v0.16: an equilibrium Fermi-reference group (a mixed device) is checked and driven once; the ramp
+        # runs in the applied potential (bias + work-function offset; the bias itself without one)
+        self._check_reference_voltages({E.name: bias.voltages.get(
+            E.name, E.fixed_voltage_V if E.role == "ground" else 0.0) for E in d.electrodes})
+        zero = self._seed_voltages()
+        for E in self._driven_electrodes():                 # bias = 0 (grounds at fixed) for equilibrium
+            self._set_drive(E.name, zero[E.name])
         # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed.
         # solve_dc is the identical ds.solve call plus the C10-d solution-level FD-ceiling
         # check on the converged state (the layered bipolar path previously bypassed it).
@@ -1164,14 +1939,15 @@ class LayeredDevsimBuilder:
         # (5) ramp the biased electrodes to their targets (a fine step -- the diode I-V is exponential,
         # so a coarse step overshoots and the coupled Newton diverges).
         vbip = min(v_step, 0.05)
-        for E in d.electrodes:
-            target = bias.voltages.get(E.name, E.fixed_voltage_V if E.role == "ground" else 0.0)
-            v_now = E.fixed_voltage_V if E.role == "ground" else 0.0
+        for E in self._driven_electrodes():
+            target = self._applied(E.name, bias.voltages.get(
+                E.name, E.fixed_voltage_V if E.role == "ground" else 0.0))
+            v_now = zero[E.name]
             n_steps = max(1, int(abs(target - v_now) / vbip + 0.5))
             dv = (target - v_now) / n_steps
             for _ in range(n_steps):
                 v_now += dv
-                self._drive(E.name, v_now)
+                self._set_drive(E.name, v_now)
                 solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
                          max_iter=max_iter)
         if verbose:
@@ -1190,11 +1966,34 @@ class LayeredDevsimBuilder:
         silently returned the OLD operating point (reference modulator, 1 V -> solve(2 V): every node
         Potential equal to the 1 V state to 1.1e-16 V, 1.0 V off a fresh 2 V solve in upper_al2o3).
         A circuit-driven electrode is now driven by circuit_alter on its source (the parameter is
-        still written, so anything reading it stays consistent)."""
-        ds.set_parameter(device=self.device, name="{}_bias".format(electrode), value=float(v))
+        still written, so anything reading it stays consistent).
+
+        v0.16: `v` is the electrode's BIAS; a gate with Electrode.work_function_eV applies v + its offset
+        (_applied), and an equilibrium edge Fermi reference sets EF_ref_V of its regions (_set_drive)."""
+        self._set_drive(electrode, self._applied(electrode, v))
+
+    def _set_drive(self, electrode: str, u: float) -> None:
+        """Write the APPLIED potential u of `electrode` (its bias, plus a work-function offset for a gate
+        that has one): the <name>_bias parameter its contact Dirichlet reads, its circuit source once
+        set_ssac_gate repointed it, or -- for an equilibrium edge Fermi reference (no contact) -- the region
+        parameter EF_ref_V of every region of its group (the <name>_bias parameter is still written)."""
+        ds.set_parameter(device=self.device, name="{}_bias".format(electrode), value=float(u))
+        k = self._fermi_ref_electrode.get(electrode)
+        if k is not None:
+            for r in self._fermi_ref_groups[k]:
+                ds.set_parameter(device=self.device, region=r, name=PE.FERMI_REF_PARAM, value=float(u))
+            return
         src = self._circuit_gates.get(electrode)
         if src is not None:
-            ds.circuit_alter(name=src, value=float(v))
+            ds.circuit_alter(name=src, value=float(u))
+
+    def _refuse_fermi_reference(self, electrode: str, owner: str) -> None:
+        if electrode in self._fermi_ref_electrode:
+            raise ValueError(
+                "{}('{}'): this electrode is an equilibrium edge Fermi-level reference (v0.16) -- it "
+                "sets the Fermi level of region(s) {} and has no DEVSIM contact, so it cannot be circuit-driven. "
+                "Drive a gate, or build it with Electrode(pin_potential=True) for the v0.15.1 potential-pinned "
+                "contact.".format(owner, electrode, self._fermi_ref_groups[self._fermi_ref_electrode[electrode]]))
 
     def _check_circuit_contacts(self) -> None:
         """Refuse a solve() the builder cannot drive: an electrode repointed circuit-driven OUTSIDE
@@ -1240,6 +2039,7 @@ class LayeredDevsimBuilder:
             raise RuntimeError(
                 "set_ssac_gate('{}') requires a built device; call build_device() or solve() first "
                 "(the electrode contact must exist).".format(electrode_name))
+        self._refuse_fermi_reference(electrode_name, "set_ssac_gate")
         if electrode_name not in self._contact_region:
             raise ValueError("unknown electrode '{}'; built contacts are {}.".format(
                 electrode_name, sorted(self._contact_region)))
@@ -1292,6 +2092,8 @@ class LayeredDevsimBuilder:
         """Short-circuit current noise S_I(f) of the dielectric GATE `gate` (noise_analysis.noise_spectrum
         on '<source_name>.I') at gate bias `vg`, in ONE call. It is the hand recipe (solve, set_ssac_gate,
         circuit_alter, a DC re-settle, noise_analysis.noise_spectrum; validation/devsim_noise.py gate G)
+        (v0.16: for a gate with Electrode.work_function_eV the circuit source carries the APPLIED potential,
+        bias + offset; solve() and this method add it, a raw ds.circuit_alter must too)
         with its traps removed:
           * the gate is made circuit-driven ONCE (set_ssac_gate, recorded); later calls reuse it. DEVSIM
             circuits are process-global and cannot be removed in-process, so the same gate under another
@@ -1403,6 +2205,7 @@ class LayeredDevsimBuilder:
         if not self._built or getattr(self, "_last_converged_bias", None) is None:
             raise RuntimeError("noise_spectrum: the builder must be built AND solved first (call "
                                "solve(bias)); the noise is taken about a converged DC operating point.")
+        self._refuse_fermi_reference(gate, "noise_spectrum")
         if gate not in self._contact_region:
             raise ValueError("noise_spectrum: unknown electrode {!r}; built contacts are {}.".format(
                 gate, sorted(self._contact_region)))
@@ -1501,6 +2304,7 @@ class LayeredDevsimBuilder:
         d = self.design
         regions: Dict[str, CarrierRegion] = {}
         n_bg_by_region: Dict[str, float] = {}
+        resolution: Dict[str, float] = {}
         for s in self._specs:
             if s.role != "semiconductor":
                 continue
@@ -1509,15 +2313,30 @@ class LayeredDevsimBuilder:
             n = np.array(ds.get_node_model_values(device=self.device, region=s.name, name="Electrons"))
             pot = np.array(ds.get_node_model_values(device=self.device, region=s.name, name="Potential"))
             nodes = np.column_stack([x, y])
-            grid = resample_to_grid(nodes, {ELECTRON_DENSITY: n, POTENTIAL: pot},
-                                      (grid_n_x, grid_n_z))
+            node_fields = {ELECTRON_DENSITY: n, POTENTIAL: pot}
+            axes = None
+            if grid_n_z is None:                              # v0.16: native z lines (solve docstring)
+                try:
+                    axes, gf = resample_tensor_grid(x, y, node_fields, grid_n_x)
+                except NotATensorGridError as e:
+                    warnings.warn(
+                        "LayeredDevsimBuilder.solve(grid_n_z=None): semiconductor region '{}' is not a "
+                        "tensor grid of mesh lines ({}), so its native z lines cannot be returned; it is "
+                        "resampled onto the uniform {} x {} grid instead (pass an integer grid_n_z to "
+                        "choose the uniform resolution).".format(s.name, e, grid_n_x, _DEFAULT_GRID_N_Z),
+                        AdvisoryWarning, stacklevel=3)
+            if axes is None:
+                grid = resample_to_grid(nodes, node_fields,
+                                          (grid_n_x, _DEFAULT_GRID_N_Z if grid_n_z is None else grid_n_z))
+                axes = {"x": grid["axis_0"], "y": grid["axis_1"]}
+                gf = {ELECTRON_DENSITY: grid[ELECTRON_DENSITY], POTENTIAL: grid[POTENTIAL]}
             regions[s.name] = CarrierRegion(
                 name=s.name, role=s.role, material=s.material, nodes_m=nodes,
-                node_fields={ELECTRON_DENSITY: n, POTENTIAL: pot},
-                grid_axes_m={"x": grid["axis_0"], "y": grid["axis_1"]},
-                grid_fields={ELECTRON_DENSITY: grid[ELECTRON_DENSITY],
-                              POTENTIAL: grid[POTENTIAL]})
+                node_fields=node_fields, grid_axes_m=axes, grid_fields=gf)
             n_bg_by_region[s.name] = float(d.materials.get(s.material).transport.n_bg_m3)
+            ir = _interface_resolution(x, y, n)
+            if ir is not None:
+                resolution[s.name] = ir
         # terminal currents (driver D1): per-unit-depth [A/m] scaled by period_y to [A]; an
         # equilibrium device yields {} -> NO extras key (the byte-identical off-switch). A
         # best-effort diagnostic -- a failure warns, never breaks the solve.
@@ -1538,6 +2357,10 @@ class LayeredDevsimBuilder:
             extras["oxide_tunneling"] = self._oxide_tunneling_extras()
         if self.extended_precision:                           # v0.15 provenance; off adds no key
             extras["extended_precision"] = True
+        if self._leak_regions:                                # v0.16 gate leakage; off adds no key
+            extras["gate_leakage"] = self.gate_leakage_report()
+        if resolution:                                        # v0.16 diagnostic (_interface_resolution)
+            extras["interface_resolution"] = resolution
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=self._device_temperature_K(), regions=regions, n_bg_by_region=n_bg_by_region,

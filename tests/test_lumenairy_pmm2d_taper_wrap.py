@@ -105,8 +105,8 @@ def test_canonical_cell_split_shift_and_noop():
         assert -1e-18 <= x0 and x1 <= PER + 1e-18 and -1e-18 <= y0 and y1 <= PER + 1e-18
     assert d.stack.layers[0].inclusions[0].shape.cx_m == 0.0          # input untouched
     # interval reduction: crossing, entirely outside, full period
-    assert np.allclose(_wrap_intervals(-0.1 * PER, 0.2 * PER, PER), [(0.9 * PER, PER), (0, 0.2 * PER)])
-    assert np.allclose(_wrap_intervals(1.1 * PER, 1.3 * PER, PER), [(0.1 * PER, 0.3 * PER)])
+    assert np.allclose(_wrap_intervals(-0.1 * PER, 0.2 * PER, PER), [(0.9 * PER, PER), (0, 0.2 * PER)], atol=0)
+    assert np.allclose(_wrap_intervals(1.1 * PER, 1.3 * PER, PER), [(0.1 * PER, 0.3 * PER)], atol=0)
     assert _wrap_intervals(-0.2 * PER, 0.9 * PER, PER) == [(0.0, PER)]
     # a CIRCLE crossing x shifts the WHOLE origin: the circle lands inside, and the rectangle of the
     # other layer moves by the same vector (relative position preserved mod P)
@@ -178,7 +178,7 @@ def test_layer_eps_tensor_cell_is_the_shared_periodic_painter():
     inc = s != complex(2.4)
     # inclusions: eps * I3 with exactly the scalar painter's values (priority + wrap identical)
     assert np.array_equal(t[inc], s[inc][:, None, None] * np.eye(3))
-    assert np.allclose(t[~inc], eps_lc)                                     # background = tensor
+    assert np.allclose(t[~inc], eps_lc, atol=0)                                     # background = tensor
     assert inc[0].any() and inc[-1].any()                                   # both wrapped sides
     top = Rectangle(PER / 2, PER / 2, 0.3 * PER, 0.3 * PER)
     lay_t = Layer("p", 1e-7, "air", inclusions=[
@@ -283,7 +283,10 @@ def test_rcwa_tensor_background_keeps_inclusions():
     ebr = {"p": EpsField(tensor=eps_lc)}
     sq = Rectangle(PER / 2, PER / 2, PER / 2, PER / 2)
     d = _one(sq, thk=250e-9, bg="lcm")
-    sol = make_lumenairy_rcwa_solver(n_orders=4)
+    # raster_sampling='point': this gate pins the bridge's POINT painter against a direct RCWAStack
+    # on the same cell-centred raster (v0.16 made the area-weighted node-lattice raster the
+    # default; on this cell it moves R by 3.3e-6, 0.09590640610965069 -> 0.09590307142300354)
+    sol = make_lumenairy_rcwa_solver(n_orders=4, raster_sampling="point")
     with_p = _s(sol, d, ebr)
     bare = _s(sol, _design([Layer("p", 250e-9, "lcm")]), ebr)
     assert abs(with_p.R - bare.R) > 1e-2
@@ -296,7 +299,8 @@ def test_rcwa_tensor_background_keeps_inclusions():
     st.add_layer(250e-9, eps_tensor_cell=cell)
     st.set_source(LAM, theta=0.0, phi=0.0)
     assert abs(float(np.sum(st.solve().efficiencies()[1][0])) - with_p.R) < 1e-12
-    assert _s(make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="auto"), d, ebr).R == with_p.R
+    assert _s(make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="auto",
+                                         raster_sampling="point"), d, ebr).R == with_p.R
     from dynameta.optics.lumenairy_bridge._common import LumenairyFeatureUnavailable, lumenairy_has
     if lumenairy_has("rcwa_analytic_shapes"):
         with pytest.raises(ShapesNotRepresentable, match="TENSOR background"):

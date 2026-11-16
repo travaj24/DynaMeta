@@ -93,21 +93,21 @@ def test_pmm2d_ext_translation_helpers():
     stripe = Rectangle(0.375 * PER, PER / 2.0, 0.35 * PER, PER)
     d = _pillar(stripe)
     xw, yw, tile = _rect_strip_tile(d.stack.layers[0], d, LAM, PER, PER, 1.0 + 0j)
-    assert np.allclose(np.array(xw) / PER, [0.2, 0.55])
-    assert np.allclose(np.array(yw) / PER, [0.25, 0.5])
+    assert np.allclose(np.array(xw) / PER, [0.2, 0.55], atol=0)
+    assert np.allclose(np.array(yw) / PER, [0.25, 0.5], atol=0)
     assert tile.shape == (3, 3)
-    assert np.allclose(tile[1, :], 4.0) and np.allclose(tile[[0, 2], :], 1.0)
+    assert np.allclose(tile[1, :], 4.0, atol=0) and np.allclose(tile[[0, 2], :], 1.0, atol=0)
     # TENSOR background on the union grid: (4, 4, 3, 3), pillar = 4 I, rest = tensor
     eps_lc = _uniaxial(1.5, 1.7, 30.0, 40.0)
     d = _pillar(patch, bg="lcm")
     bg = _layer_background(d.stack.layers[0], d, LAM, EpsField(tensor=eps_lc))
     cell = layer_to_pure_cell(d.stack.layers[0], d, LAM, PER, PER, 4, bg_eps=bg)
     assert cell.shape == (4, 4, 3, 3)
-    assert np.allclose(cell[1:3, 1:3], 4.0 * np.eye(3))
-    assert np.allclose(cell[0, 0], eps_lc) and np.allclose(cell[3, 2], eps_lc)
+    assert np.allclose(cell[1:3, 1:3], 4.0 * np.eye(3), atol=0)
+    assert np.allclose(cell[0, 0], eps_lc, atol=0) and np.allclose(cell[3, 2], eps_lc, atol=0)
     # a scalar background stays the v1 (N, N) cell, bit for bit
     v1 = layer_to_pure_cell(d.stack.layers[0], d, LAM, PER, PER, 4)
-    assert v1.shape == (4, 4) and np.allclose(v1[0, 0], 2.4)
+    assert v1.shape == (4, 4) and np.allclose(v1[0, 0], 2.4, atol=0)
 
 
 @needs_lum

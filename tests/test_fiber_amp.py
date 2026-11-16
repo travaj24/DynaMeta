@@ -758,13 +758,13 @@ def test_beat_noise_matches_soa_and_thermal_limit():
     rho = bn.meta["rho_sp_W_per_Hz"]
     soa = detector_noise_variances(bn.meta["P_signal_out_W"], rho, R_A_W=bn.responsivity_A_W,
                                    B_Hz=10e9, dnu_opt_Hz=50e9, m_pol=2)
-    assert np.isclose(bn.var_sp_sp, soa["spont_spont"], rtol=1e-12)
-    assert np.isclose(bn.var_sig_sp, soa["sig_spont"], rtol=1e-12)
-    assert np.isclose(bn.var_shot, soa["shot"], rtol=1e-12)
+    assert np.isclose(bn.var_sp_sp, soa["spont_spont"], rtol=1e-12, atol=0)
+    assert np.isclose(bn.var_sig_sp, soa["sig_spont"], rtol=1e-12, atol=0)
+    assert np.isclose(bn.var_shot, soa["shot"], rtol=1e-12, atol=0)
     bn2 = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=50e9)
     R = bn2.responsivity_A_W
     assert np.isclose(bn2.var_sp_sp,
-                      2.0 * (R * bn2.meta["rho_sp_W_per_Hz"] * 50e9) ** 2, rtol=1e-12)
+                      2.0 * (R * bn2.meta["rho_sp_W_per_Hz"] * 50e9) ** 2, rtol=1e-12, atol=0)
 
 
 def test_beat_nf_eta_independent_and_above_floor():
@@ -784,7 +784,7 @@ def test_beat_nf_eta_independent_and_above_floor():
 def test_cladding_pump_overlap_uses_dopant_radius():
     # S3-9 (P1): Gamma_p must be the pump power fraction inside the DOPED radius b, not the core
     fib = FiberSpec(5.0e-6, 0.06, 1.0e26, 2.0, dopant_radius_m=2.5e-6, clad_radius_m=62.5e-6)
-    assert np.isclose(cladding_pump_overlap(fib), (2.5 / 62.5) ** 2, rtol=1e-12)
+    assert np.isclose(cladding_pump_overlap(fib), (2.5 / 62.5) ** 2, rtol=1e-12, atol=0)
     amp = FiberAmplifier(YB, fib, [Pump(1e-6, 0.915e-6, "fwd", cladding=True)],
                          [Signal(1e-9, 1.060e-6)], None)
     r = amp.solve()
@@ -870,7 +870,7 @@ def test_nondefault_m_modes_propagates_to_noise_and_detection():
     # m=1: sp-sp variance = R^2 rho^2 (2Bo-Be)Be exactly (single polarization)
     R = bn1.responsivity_A_W
     rho = bn1.meta["rho_sp_W_per_Hz"]
-    assert np.isclose(bn1.var_sp_sp, R ** 2 * rho ** 2 * (2 * 50e9 - 10e9) * 10e9, rtol=1e-12)
+    assert np.isclose(bn1.var_sp_sp, R ** 2 * rho ** 2 * (2 * 50e9 - 10e9) * 10e9, rtol=1e-12, atol=0)
     assert nr1.fwd_ase.psd_1pol.size > 0
 
 

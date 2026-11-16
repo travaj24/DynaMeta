@@ -85,18 +85,26 @@ def main():
     ef_ec = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * 1.0e25) ** (2.0 / 3.0)
     kin = np.maximum(ef_ec + Q * phi, 1e-3 * ef_ec)
     n_cl = (1.0 / (3.0 * np.pi ** 2)) * (2.0 * MSTAR * kin / HBAR ** 2) ** 1.5
-    n_dgc = dg_correct_density_1d(zsp, n_cl, MSTAR, hard_wall="left")
+    # v0.16: this accumulation profile loses 36.9 % of its classical carrier sheet to the frozen-
+    # potential dead layer, so the thin-film guard must flag it (UnreliableResultWarning); the shape gate
+    # below is unchanged
+    import warnings
+    from dynameta.warning_types import UnreliableResultWarning
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        n_dgc = dg_correct_density_1d(zsp, n_cl, MSTAR, hard_wall="left")
+    guard_warned = any(issubclass(w.category, UnreliableResultWarning) for w in rec)
     half = len(zsp) // 2
     z_cl = zsp[int(np.argmax(n_cl[:half]))]
     z_dg = zsp[int(np.argmax(n_dgc[:half]))]
     z_sp = zsp[1 + int(np.argmax(n_sp[1:half]))]
     supp = n_dgc[2] / n_cl[2]                              # near-wall suppression
     g_c = bool(z_cl == zsp[0] and z_dg > 0.4e-9 and 0.5 <= z_dg / z_sp <= 2.0 and supp < 0.1
-               and bool(getattr(res, "converged", False)))
+               and bool(getattr(res, "converged", False)) and guard_warned)
     ok = ok and g_c
     print("[dg] GATE C: classical peak AT the interface (z = {:.2f} nm); DG peak {:.2f} nm vs "
-          "SP {:.2f} nm (ratio {:.2f}); near-wall suppression {:.1e} -> {}".format(
-              z_cl * 1e9, z_dg * 1e9, z_sp * 1e9, z_dg / z_sp, supp,
+          "SP {:.2f} nm (ratio {:.2f}); near-wall suppression {:.1e}; thin-film guard warned: {} -> {}".format(
+              z_cl * 1e9, z_dg * 1e9, z_sp * 1e9, z_dg / z_sp, supp, guard_warned,
               "PASS" if g_c else "FAIL"), flush=True)
 
     # ---- GATE D: guards + the dead-layer scale ----

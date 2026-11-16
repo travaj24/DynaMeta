@@ -55,6 +55,7 @@ import numpy as np
 from dynameta.constants import C_LIGHT
 from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
 from dynameta.core.interfaces import OpticalResult
+from dynameta.core.lateral import is_laterally_uniform
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 from dynameta.optics.fdtd_nd.grid import (check_z_subcell, layer_masks, mix_profile, pad_masks,
@@ -228,7 +229,7 @@ def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Di
     the bias modulation -- or crashing on a DrudeOptical carrier region whose eps needs n_m3). A TENSOR
     entry raises (the scalar FDTD grid cannot carry anisotropy -- use the FEM); a layer with lateral
     inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
-    from dynameta.core.layered import slice_eps_field
+    from dynameta.core.layered import slice_layer_eps_field
     from dynameta.optics.tmm_reference import S as _S_NM
     require_supported_geometry(design, "design_to_fdtd_layers")   # 2026-11-02: Stack.features / Inclusion.taper
     layers = []
@@ -243,15 +244,16 @@ def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Di
                 "scalar FDTD grid cannot represent it -- use the FEM solver.".format(L.name))
         if ef is not None and not getattr(ef, "is_uniform", True):
             v = np.asarray(ef.values_zyx)
-            if not np.allclose(v, v[:, :1, :1], rtol=1e-12, atol=0.0):
+            if not is_laterally_uniform(v):
                 raise NotImplementedError(
                     "design_to_fdtd_layers: layer '{}' carries a laterally-STRUCTURED gridded "
                     "EpsField; the uniform-stack FDTD seam cannot represent it -- use the FEM "
                     "solver or the RCWA bridge.".format(L.name))
-            # slice_eps_field returns ascending-z (substrate-first) slabs; incidence order
+            # slice_layer_eps_field returns ascending-z (substrate-first) slabs; incidence order
             # is superstrate-first, so reversed (same contract as the TMM extractor and the
             # lumenairy bridges, audit C5-1); axes are nm solver units (the bridge convention)
-            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM)):
+            # and the slabs must sum to the layer thickness (it raises otherwise)
+            for slab in reversed(slice_layer_eps_field(ef, L, 1.0 / _S_NM)):
                 layers.append(_eps_to_fdtd_layer(float(slab.thickness_m), complex(slab.eps), lambda_m))
             continue
         if ef is not None and getattr(ef, "scalar", None) is not None:
@@ -310,9 +312,11 @@ def fit_drude_lorentz(lambdas_m, eps_values, *, with_drude=True):
     w = 2.0 * math.pi * C_LIGHT / lam
     wmid = float(np.median(w)); wmax = float(np.max(w)); wmin = float(np.min(w))
 
+    from dynameta.materials.lattice_optical import lorentz_susceptibility   # the one Lorentz kernel
+
     def model(p):
         einf, wp, gd, w0, gl, de = p
-        return einf - wp ** 2 / (w ** 2 + 1j * w * gd) + de * w0 ** 2 / (w0 ** 2 - w ** 2 - 1j * w * gl)
+        return einf - wp ** 2 / (w ** 2 + 1j * w * gd) + lorentz_susceptibility(w, de, w0, gl)
 
     def resid(p):
         d = model(p) - eps

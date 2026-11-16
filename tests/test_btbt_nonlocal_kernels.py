@@ -340,7 +340,7 @@ def test_walker_discards_and_counts():
     p = NL.trace_paths_1d(x, psi, EG_EV, 3.5e-9, so, full)      # the path is 3.73 nm long
     assert p.stats["too_long"] == 1 and p.start.size == 0
     res = NL.path_rates_1d(x, psi, np.full(12, -300.0), np.full(12, -300.0), ph, 0.0, 1.0, so, full)
-    assert res["length"][0] == pytest.approx(3 * h + (EG_EV - 0.9) / 0.3 * h, rel=1e-14)
+    assert res["length"][0] == pytest.approx(3 * h + (EG_EV - 0.9) / 0.3 * h, rel=1e-14, abs=0)
 
 
 # =====================================================================================================

@@ -139,7 +139,7 @@ def test_r1_estimator_equals_the_quadrature_error_on_a_known_field(kind):
     # Adversarial misses: logf +1.21e-3 (uniform), +1.13e-3 (long); linE +1.23e-3 (parabola).
     assert eps > 0.0 if kind != "parabola" else abs(eps) < 1e-12
     if kind == "long":
-        assert rep["worst_edge_m"][1] - rep["worst_edge_m"][0] == pytest.approx(0.128e-9, rel=1e-9)
+        assert rep["worst_edge_m"][1] - rep["worst_edge_m"][0] == pytest.approx(0.128e-9, rel=1e-9, abs=0)
     # ADVERSARIAL: the cruder models of the continuum miss the oracle by far more than the tolerance
     bad = "linE" if kind == "parabola" else "logf"
     assert abs(_crude(s, h, kind, bad) - eps) >= 1e-5, (kind, bad, _crude(s, h, kind, bad), eps)

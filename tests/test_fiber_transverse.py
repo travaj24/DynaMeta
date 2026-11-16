@@ -87,7 +87,7 @@ def test_cladding_pump_overlap_emerges_from_the_quadrature():
     waveguide.cladding_pump_overlap becomes an OUTPUT of the model instead of an input."""
     fib = _fiber()
     amp = _amp(fiber=fib)
-    assert float(amp.gamma_quad[0]) == pytest.approx(cladding_pump_overlap(fib), rel=1e-13)
+    assert float(amp.gamma_quad[0]) == pytest.approx(cladding_pump_overlap(fib), rel=1e-13, abs=0)
 
 
 def test_exact_lp_overlap_matches_the_independent_lma_routine():
@@ -105,7 +105,7 @@ def test_exact_lp_overlap_matches_the_independent_lma_routine():
 
 def test_radial_grid_weights_tile_the_cross_section():
     grid = RadialGrid.build([0.0, 3e-6, 5e-5], n_nodes_per_panel=8, n_azimuthal=4)
-    assert grid.integrate(np.ones(grid.size)) == pytest.approx(np.pi * (5e-5) ** 2, rel=1e-14)
+    assert grid.integrate(np.ones(grid.size)) == pytest.approx(np.pi * (5e-5) ** 2, rel=1e-14, abs=0)
     assert grid.n_azimuthal == 4 and grid.size == 8 * 2 * 4
 
 
@@ -130,7 +130,7 @@ def test_closed_form_matches_the_solver_quadrature():
     assert 0.5 < s0 < 5.0                                  # genuinely saturated, not a soft case
     J_quad = ((amp.local_gain_per_m([P_p, P_s])[1] + N_T * SA_S * float(amp.gamma_quad[1]))
               / (N_T * (SA_S + SE_S)))
-    assert J_quad == pytest.approx(float(tshb_closed_form_J(n2_0, n2_inf, s0, gam)), rel=1e-12)
+    assert J_quad == pytest.approx(float(tshb_closed_form_J(n2_0, n2_inf, s0, gam)), rel=1e-12, abs=0)
 
 
 def test_kappa_is_tanh_over_x_squared_with_the_right_limits():
@@ -338,7 +338,7 @@ def test_result_carries_the_resolved_extras_and_duck_types_for_noise():
     # nbar2_z is the DOPANT-AREA average of the resolved field, by contract
     w = amp.grid.dA_m2 * (~outside)
     assert res.nbar2_z[10] == pytest.approx(
-        float(np.dot(w, res.nbar2_rz[10]) / amp.fiber.a_dope_m2), rel=1e-12)
+        float(np.dot(w, res.nbar2_rz[10]) / amp.fiber.a_dope_m2), rel=1e-12, abs=0)
     assert res.meta["resolved"] is True and res.meta["mcc"] is None
     assert res.nbar2_mode_z.shape == (n_z,)
     # the SteadyStateResult meta contract is honoured, so the noise helpers consume it
@@ -468,7 +468,7 @@ def test_refuses_an_r_max_inside_the_inner_cladding():
     # at or above R_clad it is accepted and reproduces cladding_pump_overlap exactly
     amp = ResolvedFiberAmplifier(YB, fib, [Pump(5.0, 0.976e-6, "fwd", cladding=True)],
                                  [Signal(1e-6, 1.030e-6)], None, r_max_m=200e-6)
-    assert float(amp.gamma_quad[0]) == pytest.approx(cladding_pump_overlap(fib), rel=1e-13)
+    assert float(amp.gamma_quad[0]) == pytest.approx(cladding_pump_overlap(fib), rel=1e-13, abs=0)
     # and a CORE-pumped plan is free to use a small r_max -- the guard is cladding-pump-only
     core = ResolvedFiberAmplifier(YB, fib, [Pump(5.0, 0.976e-6, "fwd", cladding=False)],
                                   [Signal(1e-6, 1.030e-6)], None, r_max_m=20e-6)

@@ -22,6 +22,10 @@ _LAZY = {
     "solve_fem_pols":        "dynameta.optics.solver",
     "FEMFactorCache":        "dynameta.optics.solver",
     "pardiso_available":     "dynameta.optics.solver",
+    # v0.16: the 2-D periodic TM finite-element referee (NGSolve, like every name here)
+    "solve_fem_2d_tm":       "dynameta.optics.fem_2d_tm",
+    "solve_design_2d_tm":    "dynameta.optics.fem_2d_tm",
+    "make_fem_2d_tm_optical_solver": "dynameta.optics.fem_2d_tm",
 }
 __all__ = list(_LAZY)
 

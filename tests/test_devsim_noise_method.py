@@ -154,18 +154,27 @@ def test_w4_sequence_0_1_0_gives_a_bitwise_repeat_and_leaves_the_state(runs):
 @pytest.mark.slow
 def test_w7_extended_precision_sequence_0_1_0_repeats_bitwise():
     """W7 (P2; v0.15 follow-up, nightly: MEASURED 4.1-4.3 min on the loaded Windows dev box -- the extended
-    build + solve ~86 s, the +1 V call's extended re-settle ramp ~130 s). seq_ref's 0 / +1 / 0 V sequence (bottom
+    build + solve ~86 s, the +1 V call's extended re-settle ramp ~130 s; 865 s on the v0.16 default mesh, 54 s on
+    the legacy z lines the child now pins, tests/_noise_method_child.ref_design). seq_ref's 0 / +1 / 0 V sequence (bottom
     gate +0.5 V, so the 0 V state is not the exactly representable flat band) on a builder with
     extended_precision=True: the third result is bitwise the first and the second differs. Not implied by W4:
     the method's restore writes the double-rounded state back into a device whose Newton runs in 128 bits, so
     the third call's re-settle starts from a different representation than the first's (it still lands on the
     same bits: MEASURED). The only warnings are the extended-precision 'noise solve buys nothing' advisory, one
-    per frequency per call (P2 W7: the method adds none of its own), and none at the build. Sensitivity: the
-    +1 V digest differs from the 0 V one, and the device really is extended (both asserted)."""
+    per frequency per call (P2 W7: the method adds none of its own), and at the build exactly ONE: the
+    DOS-mass advisory for its semiconductor film. That advisory is correct for this device: the film's DOS
+    mass (validation/_reference_device) varies by ~78 % over [0.1, 10] n_bg while the electrostatics
+    (extended precision included) uses one DOS mass per region; the recorder's simplefilter("always") overrides
+    the child's module-level ignore, so it is asserted here rather than filtered. Sensitivity: the +1 V digest
+    differs from the 0 V one, and the device really is extended (both asserted)."""
     r = _run(("seq_xp",))["seq_xp"]
     assert r["extended"] == [True, True]
     assert r["seq"][2] == r["seq"][0] and r["seq"][1] != r["seq"][0]
-    assert r["warnings_build"] == []
+    build = r["warnings_build"]
+    assert len(build) == 1, build
+    cat, msg = build[0]
+    assert (cat == "AdvisoryWarning" and msg.startswith("LayeredDevsimBuilder region '")
+            and "dos_mass_kg_of_n_m3 is density-dependent" in msg), build
     calls = r["warnings_calls"]
     assert len(calls) == 3 * 4 and all(c == "AdvisoryWarning" and "extended_precision: a 'noise' solve" in m
                                        for c, m in calls), calls

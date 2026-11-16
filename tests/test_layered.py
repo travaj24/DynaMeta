@@ -133,7 +133,7 @@ def test_slice_eps_field_uniform_and_structured():
     su = slice_eps_field(_EF(vu, [0.0, 50.0, 100.0], False), 1e-9)
     assert len(su) == 2 and all(s.is_uniform for s in su)
     assert np.isclose(su[0].eps, 5.0) and np.isclose(su[1].eps, 7.5)   # midpoints of 4/6, 6/9
-    assert np.isclose(su[0].thickness_m, 50e-9)
+    assert np.isclose(su[0].thickness_m, 50e-9, atol=0)
     # laterally-structured field -> eps_cell slab with the documented (Ny,Nx)->(Nx,Ny) transpose
     vs = np.zeros((2, 2, 3), complex)                      # (Nz=2, Ny=2, Nx=3)
     vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 1.0
@@ -159,7 +159,7 @@ def test_r29_slice_eps_field_honours_n_slices_on_every_branch():
     vs = np.zeros((3, 2, 3), complex)                      # structured scalar (Nz, Ny, Nx)
     vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 3.0; vs[2] = vs[0] + 10.0
     ss = slice_eps_field(_EF(vs, z), 1e-9, n_slices=4)
-    assert len(ss) == 4 and all(s.thickness_m == pytest.approx(25e-9) for s in ss)
+    assert len(ss) == 4 and all(s.thickness_m == pytest.approx(25e-9, rel=1e-6, abs=0) for s in ss)
     for k, s in enumerate(ss):
         zc = 12.5 + 25.0 * k
         off = np.interp(zc, z, [0.0, 3.0, 10.0])           # the per-cell offset, linear in z
@@ -168,7 +168,7 @@ def test_r29_slice_eps_field_honours_n_slices_on_every_branch():
     vt = np.zeros((3, 2, 3, 3, 3), complex)                # tensor (Nz, Ny, Nx, 3, 3), structured
     vt[..., 0, 0] = vs; vt[..., 1, 1] = 2.0; vt[..., 2, 2] = 3.0
     st = slice_eps_field(_EF(vt, z), 1e-9, n_slices=5)
-    assert len(st) == 5 and sum(s.thickness_m for s in st) == pytest.approx(100e-9)
+    assert len(st) == 5 and sum(s.thickness_m for s in st) == pytest.approx(100e-9, rel=1e-6, abs=0)
     assert np.allclose(st[0].eps_tensor_cell[..., 0, 0], (vs[0] + np.interp(10.0, z, [0, 3, 10])).T)
     with pytest.raises(ValueError):
         slice_eps_field(_EF(vs, z), 1e-9, n_slices=0)
@@ -338,3 +338,32 @@ def test_byo_eps_seam_enforces_time_convention():
         require_solver_time_convention(bad, "unit-test")
     require_solver_time_convention({"a": object()}, "unit-test")   # no label -> no opinion
     require_solver_time_convention(None, "unit-test")              # empty seam
+
+
+def test_slice_eps_field_identical_samples_on_the_default_grid_are_uniform():
+    """v0.16 hand-over fix: a laterally uniform field on the default 256 x 256 lateral grid, stored as the
+    NON-contiguous (z fastest) view the bridge builds, is uniform. Before the fix the slicer compared each
+    sample with numpy's lateral mean, which carries ~1.75e-12 of summation round-off on that view (MEASURED),
+    so identical samples failed rtol 1e-12, the slab came out structured and the layered TMM refused the film.
+    The tolerance itself is unchanged: a 1e-11 lateral modulation (relative to the slice's max |eps|) stays
+    structured, 5e-13 collapses; a slice through a zero of eps is judged against its max |eps|."""
+    class _F:
+        def __init__(self, v, z):
+            self.values_zyx, self.z_axis_u, self.is_uniform = v, z, False
+    nz, ny, nx = 47, 256, 256
+    rng = np.random.default_rng(3)
+    prof = (-0.27 + 3.0 * rng.random(nz)) + 0.1j * rng.random(nz)       # crosses a zero of Re(eps)
+    base = np.empty((nx, ny, nz), dtype=np.complex128)                  # x, y, z: z fastest in memory
+    base[...] = prof
+    v = np.transpose(base, (2, 1, 0))                                    # (Nz, Ny, Nx) non-contiguous view
+    assert not v.flags["C_CONTIGUOUS"]
+    mean_dev = np.max(np.abs(v - v.mean(axis=(1, 2), keepdims=True)) / np.abs(v))
+    assert mean_dev > 1e-12                    # the old reference fails on identical samples (round-off)
+    z = np.linspace(0.0, 5.0, nz)
+    slabs = slice_eps_field(_F(v, z), 1e-9)
+    assert len(slabs) == nz - 1 and all(s.is_uniform for s in slabs)
+    for amp, uniform in ((1e-11, False), (5e-13, True)):
+        w = np.array(v)
+        w[nz // 2, 7, 11] += amp * np.max(np.abs(w[nz // 2]))
+        out = slice_eps_field(_F(w, z), 1e-9)
+        assert all(s.is_uniform for s in out) is uniform, amp

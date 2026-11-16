@@ -30,6 +30,11 @@ class OpticalModelEffect:
     optical: object   # any object exposing eps(lambda_m, *, n_m3=None)
 
     def eps(self, fields: dict, lambda_m: float):
+        # v0.16: a model whose response needs more than the density (DrudeOptical with boundary
+        # scattering: a tensor, possibly position-dependent) takes the whole field bundle; every other
+        # model keeps the scalar call below, unchanged.
+        if getattr(self.optical, "field_response", False):
+            return self.optical.eps_fields(fields, lambda_m)
         return self.optical.eps(lambda_m, n_m3=fields.get("n"))
 
 

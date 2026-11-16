@@ -702,10 +702,13 @@ def eryb_fit_to_device(build: Callable, target: DeviceTarget, *,
 
     WHY BOTH OBSERVABLES, ALWAYS. The 2026-09-14 note's limit 8: Dong's own paper fits two
     mutually inconsistent one-pool coefficients (1.1e-21 from the Yb parasitic threshold, 2.63e-21
-    from the maximum output) to the SAME laser. Output power is sensitive almost entirely to the
-    PRODUCT f k_tr -- the effective transfer strength -- while the 1-um fraction is sensitive to
-    the SPLIT, because it is the uncoupled pool that radiates at 1 um. Fit one and the other is
-    unconstrained; fit both and the covariance this routine returns says how well each is pinned.
+    from the maximum output) to the SAME laser. Output power depends mainly on the PRODUCT f k_tr
+    -- the effective transfer strength -- but not only on it: the uncoupled pool's 1-um ASE also
+    takes pump power, so along a contour of constant f k_tr the output power still moves (by about
+    23 % between f = 0.30 and 0.95 on the test suite's synthetic device), and a power-only fit pins
+    the power, not the product. The 1-um fraction is sensitive to the SPLIT, because it is the
+    uncoupled pool that radiates at 1 um. Fit one and the other is poorly constrained; fit both and
+    the covariance this routine returns says how well each is pinned.
 
     `build(f, k_tr)` must return a configured `ErYbAmplifier` (the caller owns the fiber, the
     densities, the pump geometry and the ASE bands -- this routine owns only the two parameters).

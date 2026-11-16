@@ -10,8 +10,12 @@ GATE C (bipolar seam): the forward-biased p-n diode of validation/bipolar_diode_
         contact_currents_A in CarrierField.extras; each entry equals the manual
         (electron + hole) get_contact_current sum * period_y EXACTLY, and conserves charge.
 GATE D (equilibrium off-switch): the same bar with physics='equilibrium' (Poisson-only) has NO
-        contact_currents_A key -- continuity contact equations do not exist, the extractor
-        returns {}, and extras stays empty (byte-identical).
+        contact_currents_A key -- continuity contact equations do not exist and the extractor
+        returns {}. extras carries no current entry (other diagnostics may be present: the v0.16
+        interface_resolution). Since v0.16 the bar's unpinned edge electrodes are Fermi-level
+        references (no DEVSIM contact); with pin_potential=True their domain-boundary slabs capture
+        no node of this single-layer bar either (MEASURED: DEVSIM drops both), so this bar never had
+        a contact -- the gate checks the extractor's off-switch on a contact-free equilibrium device.
 
 Run: python -m validation.contact_current_drivers
 """
@@ -138,11 +142,12 @@ def main():
     b3 = LayeredDevsimBuilder(de, mesh_name="cceq_m", device_name="cceq_d")
     cf3 = b3.solve(BiasPoint({"anode": 0.0}, "eq"))
     raw = extract_contact_currents(b3.device, depth_m=de.unit_cell.period_y_m)
+    contacts = sorted(ds.get_contact_list(device=b3.device))
     _teardown(b3)
     g_d = bool("contact_currents_A" not in cf3.extras and raw == {})
     ok = ok and g_d
-    print("[cc] GATE D: equilibrium device -> extractor {{}} and NO extras key (extras = {}) "
-          "-> {}".format(dict(cf3.extras), "PASS" if g_d else "FAIL"), flush=True)
+    print("[cc] GATE D: equilibrium device (contacts {}) -> extractor {{}} and no contact_currents_A key "
+          "(extras keys = {}) -> {}".format(contacts, sorted(cf3.extras), "PASS" if g_d else "FAIL"), flush=True)
 
     print("[cc] *** D1 CONTACT-CURRENT EXTRACTOR: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

@@ -23,6 +23,7 @@ Gates:
 
 Run: python -m pytest tests/test_nonlocal_tmm.py -q
 """
+import dataclasses
 import math
 
 import numpy as np
@@ -440,3 +441,518 @@ def test_q23_stack_rt_refuses_a_gain_layer_on_the_real_axis():
     res = nt.stack_rt(1.5e16, [gain], pol="p", theta_rad=0.6, check_energy=False)
     assert res.A < 0.0                                     # what used to be returned silently
     nt.stack_rt(1.5e16 - 1.0e14j, [gain], pol="p", k_par_m=1.0e7)   # complex omega: no check
+
+
+# ================================================================================================
+# v0.16: RUNS of hydrodynamic sub-layers of ONE conductor (graded density; walls only at conductor
+# boundaries)
+# ================================================================================================
+# Fixture (the generic gated film): air | 6 nm oxide (n 2.00) | film | 6 nm oxide | glass (n 1.45), p-pol,
+# 60 deg, 1200 nm; film eps_inf 4.0, parabolic band m = 0.30 m_e, gamma 1.2e14 1/s, beta = sqrt(3/5) v_F(n0)
+# LOCAL in the density, n_bg 3e26 m^-3, 6 nm.
+from dynameta.constants import EPS0 as _EPS0, HBAR as _HBAR, M_E as _M_E, Q_E as _Q_E  # noqa: E402
+from dynameta.constants import C_LIGHT as _C  # noqa: E402
+
+_MEFF = 0.30 * _M_E
+_W1200 = 2.0 * math.pi * _C / 1200e-9
+_TH60 = math.radians(60.0)
+_OXB = nt.DielectricLayer(2.00 ** 2, 6e-9)
+_NGLASS = 1.45
+
+
+def _film(n, t, cid="film", gamma=1.2e14, beta_scale=1.0):
+    wp = math.sqrt(n * _Q_E ** 2 / (_EPS0 * _MEFF))
+    vf = _HBAR * (3.0 * math.pi ** 2 * n) ** (1.0 / 3.0) / _MEFF
+    return nt.HydroLayer(4.0, wp, gamma, beta_scale * nt.beta_from_vf(vf), t, conductor_id=cid)
+
+
+def _clad_r(layers, w=_W1200, **kw):
+    return nt.stack_rt(w, [_OXB, *layers, _OXB], pol=kw.pop("pol", "p"), n_sub=_NGLASS,
+                       theta_rad=_TH60, **kw).r
+
+
+def _old_cascade_r(layers, w=_W1200, pol="p"):
+    """The v0.15.1 code path, transcribed: every layer its own 2x2 matrix (walls everywhere)."""
+    k0 = w / _C
+    kp = k0 * math.sin(_TH60)
+    M = np.eye(2, dtype=np.complex128)
+    for lay in [_OXB, *layers, _OXB]:
+        M = nt._layer_matrix(w, lay, k0, kp, pol) @ M
+    Ys = nt._admittance(1.0 + 0j, nt._kz(1.0 + 0j, k0, kp), pol)
+    eb = complex(_NGLASS) ** 2
+    Yb = nt._admittance(eb, nt._kz(eb, k0, kp), pol)
+    return nt._rt_from_matrix(M, Ys, Yb)[0]
+
+
+def test_hydro_run_uniform_split_is_the_single_layer_to_roundoff():
+    """A uniform 6 nm film cut into N identical sub-layers of one conductor IS the 6 nm film.
+
+    v0.15.1 (a hard wall J_z = 0 between every pair of sub-layers) FAILED this by 4.19e-6 (N = 2)
+    and 2.91e-3 (N = 10) in r -- at N = 10 twenty times the whole nonlocal correction (local vs
+    nonlocal: 1.35e-4). Those numbers are re-measured below through the explicit opt-in to the old
+    physics (allow_walls=True with unlabelled layers). Measured now: |dr| <= 4.7e-14 up to N = 1000.
+    """
+    one = _clad_r([_film(3e26, 6e-9)])
+    assert abs(one - (0.045905 + 0.025745j)) < 1e-6                 # the fixture value
+    for N in (2, 10, 100, 1000):
+        run = [_film(3e26, 6e-9 / N)] * N
+        assert abs(_clad_r(run) - one) < 1e-12, N
+    walls2 = _clad_r([_film(3e26, 3e-9, cid=None)] * 2, allow_walls=True)
+    walls10 = _clad_r([_film(3e26, 0.6e-9, cid=None)] * 10, allow_walls=True)
+    assert abs(walls2 - one) == pytest.approx(4.190e-6, abs=0.015e-6)
+    assert abs(walls10 - one) == pytest.approx(2.910e-3, abs=0.01e-3)
+
+
+def test_hydro_run_single_member_run_is_bit_identical_to_v0151():
+    """A run of ONE layer goes through the unchanged closed-form ABC matrix: labelling a lone
+    layer changes nothing, bit for bit (consistency + restore check). The general run solver
+    applied to one layer agrees with the closed form to round-off (consistency check of two
+    different routes: closed-form elimination vs banded global solve)."""
+    lay = _film(3e26, 6e-9)
+    bare = _film(3e26, 6e-9, cid=None)
+    assert _clad_r([lay]) == _clad_r([bare]) == _old_cascade_r([bare])
+    w, k0 = _W1200, _W1200 / _C
+    for kp in (0.0, 0.5 * k0, 0.866 * k0, 3.0 * k0):
+        Mrun = nt._hydro_run_matrix_p(w, [lay], k0, kp)
+        Mcf = nt._hydro_char_matrix_p(w, lay, k0, kp)
+        assert np.max(np.abs(Mrun - Mcf)) <= 1e-13 * np.max(np.abs(Mcf)), kp
+
+
+def _bvp_oracle_r(n0_of_z, t_film, *, tol, w=_W1200, regions=None):
+    """INDEPENDENT ORACLE: the continuously graded film solved as a two-point boundary-value
+    problem with scipy.integrate.solve_bvp. Shares no code with the solver: the equations are
+    transcribed here from Maxwell + linearized hydrodynamics with a CONTINUOUS n0(z),
+
+        curl E = i w mu0 H,   curl H = -i w eps0 eps_inf E + J,   div J = i w rho,
+        J = sigma(z) (E + grad psi),   psi = -beta(z)**2 rho / (eps0 wp(z)**2),
+        sigma = eps0 wp**2/(gamma - i w),  wp**2 = n0 e**2/(eps0 m),  beta**2 = (3/5) v_F(n0)**2,
+
+    integrated as a first-order system in (E_x, H_y, J_z, psi) with no closed-form modes and no
+    sub-layers. The two oxide claddings are separate regions of the same BVP (each region mapped onto
+    s in [0, 1], states stacked, region couplings as boundary conditions). Unknowns are scaled:
+    z in nm, h = Z0 H_y, j = J_z/(w eps0), p = psi/(1 nm). Boundary conditions: incident unit
+    tangential E from air, J_z = 0 at the two film faces (conductor boundaries), outgoing in glass.
+    regions (optional) = [(n0_of_z, thickness), ...] top first: the ONE conductor as several BVP regions
+    (each its own density function; e.g. a density step), coupled by continuity of E_x, H_y, J_z and
+    psi -- the interface conditions of one electron gas, written here independently of the solver."""
+    from scipy.integrate import solve_bvp
+    regions = [(n0_of_z, t_film)] if regions is None else list(regions)
+    K = len(regions)
+    k0 = w / _C
+    kp = k0 * math.sin(_TH60)
+    q = kp / k0
+    L0 = 1e-9
+    eps_h = 2.00 ** 2
+    t_h = 6e-9
+    gam = 1.2e14
+    kzs = np.sqrt(k0 ** 2 - kp ** 2 + 0j)
+    ys = k0 / kzs                                   # eps_sup k0 / kz_sup, eps_sup = 1
+    eb = _NGLASS ** 2
+    kzb = np.sqrt(eb * k0 ** 2 - kp ** 2 + 0j)
+    yb = eb * k0 / kzb
+
+    def diel(e, h, eps, scale):
+        ez = (-1j * q * h) / (1j * eps)
+        return scale * L0 * (1j * k0 * h + 1j * kp * ez), scale * L0 * (1j * k0 * eps * e)
+
+    def film(s, e, h, j, p, n0_of_z, t_film):
+        n = n0_of_z(s * t_film)
+        wp2 = n * _Q_E ** 2 / (_EPS0 * _MEFF)
+        vf = _HBAR * np.cbrt(3.0 * np.pi ** 2 * n) / _MEFF
+        b2 = 0.6 * vf ** 2
+        st = wp2 / (w * (gam - 1j * w))             # sigma/(w eps0)
+        ez = (j - 1j * q * h) / (1j * 4.0)
+        jx = st * (e + 1j * kp * L0 * p)            # J_x/(w eps0)
+        sc = t_film / L0
+        de = sc * L0 * (1j * k0 * h + 1j * kp * ez)
+        dh = sc * L0 * (1j * k0 * 4.0 * e - k0 * jx)
+        dj = sc * (L0 * (-1j * kp * jx) - 1j * (wp2 / b2) * L0 * L0 * p)
+        dp = sc * (j / st - ez)
+        return de, dh, dj, dp
+
+    def pack(cs):
+        return np.array([part for c in cs for part in (np.real(c), np.imag(c))])
+
+    def fun(s, Y):
+        C = Y[0::2] + 1j * Y[1::2]       # states: oxide (e, h) | film regions (e, h, j, p) | oxide (e, h)
+        out = list(diel(C[0], C[1], eps_h, t_h / L0))
+        for k, (nk, tk) in enumerate(regions):
+            out += film(s, *C[2 + 4 * k: 6 + 4 * k], nk, tk)
+        out += diel(C[2 + 4 * K], C[3 + 4 * K], eps_h, t_h / L0)
+        return pack(out)
+
+    def bc(ya, yb_):
+        A = ya[0::2] + 1j * ya[1::2]
+        B = yb_[0::2] + 1j * yb_[1::2]
+        cond = [A[1] + ys * A[0] - 2.0 * ys,                # air side: unit incident tangential E
+                B[0] - A[2], B[1] - A[3],                   # oxide | film: E_x, H_y continuous
+                A[4], B[4 * K]]                             # J_z = 0 at both conductor faces
+        for k in range(K - 1):                              # inside the conductor: E_x, H_y, J_z, psi
+            cond += [B[2 + 4 * k + i] - A[6 + 4 * k + i] for i in range(4)]
+        cond += [B[4 * K - 2] - A[2 + 4 * K], B[4 * K - 1] - A[3 + 4 * K],   # film | oxide
+                 B[3 + 4 * K] - yb * B[2 + 4 * K]]          # glass side: outgoing only
+        return pack(cond)
+    s = np.linspace(0.0, 1.0, 401)
+    Y0 = np.zeros((8 + 8 * K, s.size))
+    Y0[0] = 1.0
+    sol = solve_bvp(fun, bc, s, Y0, tol=tol, max_nodes=100000, bc_tol=1e-12)
+    assert sol.status == 0, sol.message
+    y = sol.sol(0.0)
+    return complex(y[0], y[1]) - 1.0
+
+
+_NB, _NS, _LD, _TF = 3e26, 1.6e27, 1.0e-9, 6e-9
+
+
+def _accum(z):
+    """A smooth accumulation layer: 1.6e27 m^-3 at the top face decaying over 1 nm to 3e26."""
+    return _NB + (_NS - _NB) * np.exp(-np.asarray(z) / _LD)
+
+
+def test_hydro_run_graded_run_converges_to_the_bvp_oracle_at_second_order():
+    """The sub-layer staircase of a continuously graded film converges to the INDEPENDENT
+    solve_bvp oracle at second order (cell-averaged density, hydro_layers_from_profile).
+
+    MEASURED (oracle r = 0.0511472975392+0.0203706038213i; oracle at tol 1e-8 vs 1e-10: 1.4e-13):
+      N =   8  |dr| 3.378e-4
+      N =  16  |dr| 8.681e-5   rate 1.96
+      N =  32  |dr| 2.181e-5   rate 1.99
+      N =  64  |dr| 5.461e-6   rate 2.00
+    v0.15.1 FAILED this: with a wall between every sub-layer (the old physics, allow_walls=True)
+    the N = 64 staircase is off by 7.01e-3 and does not converge. The REJECTED alternative interface
+    condition (continuity of the pressure beta**2 n1 instead of psi) converges to a DIFFERENT
+    answer: |dr| plateaus at 1.3e-3 (measured N = 8..256: 2.0e-3, 1.5e-3, 1.3e-3, 1.3e-3, ...).
+    The N = 64 bar and the walls bar keep their ratios to the measured values (1.17x and 0.94x).
+    """
+    r_or = _bvp_oracle_r(_accum, _TF, tol=1e-8)
+    r_or_fine = _bvp_oracle_r(_accum, _TF, tol=1e-10)
+    assert abs(r_or - r_or_fine) < 1e-11                        # oracle self-convergence
+    z = np.linspace(0.0, _TF, 4001)
+    nz = _accum(z)
+    errs = []
+    for N in (8, 16, 32, 64):
+        run = nt.hydro_layers_from_profile(z, nz, m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14,
+                                           n_layers=N)
+        errs.append(abs(_clad_r(run) - r_or))
+    rates = [math.log2(a / b) for a, b in zip(errs, errs[1:])]
+    assert all(1.9 < r < 2.1 for r in rates), (errs, rates)
+    assert errs[-1] < 6.4e-6, errs
+    # the rejected pressure-continuity condition: a plateau, not convergence
+    run64 = nt.hydro_layers_from_profile(z, nz, m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14,
+                                         n_layers=64)
+    r_p = _clad_r_with_interface(run64, "pressure")
+    assert abs(r_p - r_or) > 100 * errs[-1]
+    # the old physics (walls everywhere) on the same staircase
+    walls = [nt.HydroLayer(x.eps_inf, x.wp, x.gamma, x.beta, x.thickness_m) for x in run64]
+    assert abs(_clad_r(walls, allow_walls=True) - r_or) > 6.6e-3
+
+
+def _clad_r_with_interface(run, interface, w=_W1200, n_sub=_NGLASS, clad=True):
+    """Cascade with the run matrix built under a chosen interface condition (private hook)."""
+    k0 = w / _C
+    kp = k0 * math.sin(_TH60)
+    M = np.eye(2, dtype=np.complex128)
+    outer = [_OXB] if clad else []
+    for lay in outer:
+        M = nt._layer_matrix(w, lay, k0, kp, "p") @ M
+    M = nt._hydro_run_matrix_p(w, run, k0, kp, interface=interface) @ M
+    for lay in outer:
+        M = nt._layer_matrix(w, lay, k0, kp, "p") @ M
+    Ys = nt._admittance(1.0 + 0j, nt._kz(1.0 + 0j, k0, kp), "p")
+    eb = complex(n_sub) ** 2
+    Yb = nt._admittance(eb, nt._kz(eb, k0, kp), "p")
+    r, t, _ = nt._rt_from_matrix(M, Ys, Yb)
+    return r if clad else (r, t, Ys, Yb)
+
+
+def _profile_run(N, beta_scale=1.0, gamma=1.2e14, cid="graded"):
+    z = np.linspace(0.0, _TF, 4001)
+    run = nt.hydro_layers_from_profile(z, _accum(z), m_eff_kg=_MEFF, eps_inf=4.0, gamma=gamma,
+                                       n_layers=N, conductor_id=cid)
+    if beta_scale != 1.0:
+        run = [dataclasses.replace(x, beta=x.beta * beta_scale) for x in run]
+    return run
+
+
+def test_hydro_run_local_limit_of_a_run_is_the_local_graded_cascade():
+    """beta -> 0 in every sub-layer: the run converges to the LOCAL graded-layer transfer matrix
+    (each sub-layer a plain slab at its eps_T), linearly in beta (the longitudinal boundary layers
+    have width ~ beta/wp). MEASURED (16 sub-layers of the accumulation profile) |dr| = 1.50e-4 /
+    1.50e-5 / 1.50e-6 at beta x 1e-2 / 1e-3 / 1e-4; exact beta = D = 0 in every member is the local cascade bit for bit."""
+    run = _profile_run(16)
+    local = [nt.DielectricLayer(nt.eps_transverse(_W1200, x), x.thickness_m) for x in run]
+    r_loc = _clad_r(local)
+    exact0 = [dataclasses.replace(x, beta=0.0) for x in run]
+    assert _clad_r(exact0) == r_loc
+    d = [abs(_clad_r(_profile_run(16, beta_scale=s)) - r_loc) for s in (1e-2, 1e-3, 1e-4)]
+    assert d[0] > d[1] > d[2]
+    assert d[0] / d[1] == pytest.approx(10.0, rel=0.1)
+    assert d[1] / d[2] == pytest.approx(10.0, rel=0.1)
+    assert d[2] < 1e-5
+
+
+def test_hydro_run_energy_balance_lossless_and_lossy():
+    """Energy is a physics anchor that DISCRIMINATES the interface condition: the conserved flux in
+    a hydrodynamic conductor is S_z - (1/2) Re(psi* J_z), continuous only when psi and J_z are.
+    A LOSSLESS (gamma = D = 0) graded run below the plasma frequency (2500 nm: every sub-layer
+    metallic, longitudinal waves evanescent, no absorption channel) must give A = 0. MEASURED:
+    |A| <= 2.0e-15 (psi continuity, this solver; with or without the oxide claddings) vs, for the bare
+    run in air|run|glass, A = -3.3e-6 / -5.8e-6 / -6.0e-6 (N = 4 / 16 / 64) under the rejected
+    pressure continuity (spurious gain at every interface, not vanishing with refinement). A lossy
+    run gives R, T, A >= 0."""
+    w = 2.0 * math.pi * _C / 2500e-9
+    for N in (4, 16, 64):
+        run = _profile_run(N, gamma=0.0)
+        res = nt.stack_rt(w, [_OXB, *run, _OXB], pol="p", n_sub=_NGLASS, theta_rad=_TH60)
+        assert abs(res.A) < 1e-12, (N, res.A)
+        r, t, Ys, Yb = _clad_r_with_interface(run, "pressure", w=w, clad=False)
+        # same stack without claddings under the rejected condition, for the gain measurement
+        A_p = 1.0 - abs(r) ** 2 - abs(t) ** 2 * Yb.real / Ys.real
+        res0 = nt.stack_rt(w, run, pol="p", n_sub=_NGLASS, theta_rad=_TH60)
+        assert abs(res0.A) < 1e-12
+        assert A_p < -1e-6, (N, A_p)
+    lossy = nt.stack_rt(_W1200, [_OXB, *_profile_run(32), _OXB], pol="p", n_sub=_NGLASS,
+                        theta_rad=_TH60)
+    assert lossy.R > 0.0 and lossy.T > 0.0 and lossy.A > 1e-3
+
+
+def test_hydro_run_te_is_unaffected_by_runs():
+    """s-pol has no longitudinal coupling: a run, the same layers walled (old path, opt-in) and the
+    local cascade at eps_T are the SAME numbers, bit for bit."""
+    run = _profile_run(16)
+    walled = [dataclasses.replace(x, conductor_id=None) for x in run]
+    local = [nt.DielectricLayer(nt.eps_transverse(_W1200, x), x.thickness_m) for x in run]
+    a = _clad_r(run, pol="s")
+    b = _clad_r(walled, pol="s", allow_walls=True)
+    c = _clad_r(local, pol="s")
+    assert a == b == c == _old_cascade_r(walled, pol="s")
+
+
+def test_hydro_run_adjacency_rules_and_walls_opt_in_is_v0151_bit_for_bit():
+    """Walls only at conductor boundaries. Two adjacent unlabelled HydroLayers (or an unlabelled one
+    against a labelled one) are refused; allow_walls=True restores the v0.15.1 physics EXACTLY (A/B
+    against the v0.15.1 per-layer cascade transcribed in _old_cascade_r). Different ids = two
+    conductors in contact = a wall. A dielectric between two same-id layers keeps a wall on both of
+    its sides (each layer is a run of one). A run mixing local-limit and nonlocal members is refused."""
+    a1, a2 = _film(3e26, 3e-9, cid=None), _film(6e26, 3e-9, cid=None)
+    with pytest.raises(ValueError, match="allow_walls"):
+        _clad_r([a1, a2])
+    with pytest.raises(ValueError, match="allow_walls"):
+        _clad_r([a1, _film(6e26, 3e-9, cid="x")])
+    with pytest.raises(ValueError, match="allow_walls"):
+        nt.pole_function([a1, a2])
+    old = _old_cascade_r([a1, a2])
+    assert _clad_r([a1, a2], allow_walls=True) == old
+    # different conductors in contact: walls, no error, identical to the opt-in old path
+    b1, b2 = _film(3e26, 3e-9, cid="A"), _film(6e26, 3e-9, cid="B")
+    assert _clad_r([b1, b2]) == old
+    # a dielectric between same-id layers: each side walled
+    spacer = nt.DielectricLayer(2.25, 2e-9)
+    c1, c2 = _film(3e26, 3e-9, cid="A"), _film(6e26, 3e-9, cid="A")
+    assert _clad_r([c1, spacer, c2]) == _old_cascade_r([a1, spacer, a2])
+    # and the same pair WITHOUT the spacer is a run, which differs
+    assert abs(_clad_r([c1, c2]) - old) > 1e-4
+    with pytest.raises(ValueError, match="mixes local-limit"):
+        _clad_r([c1, dataclasses.replace(c2, beta=0.0)])
+    with pytest.raises(ValueError, match="wp > 0"):
+        _clad_r([c1, dataclasses.replace(c2, wp=0.0)])
+
+
+# r of the step run (top 0.5 nm at n_top, 5.5 nm at 3e26, one conductor) at 1020 nm, the labelled
+# resonance case below, for n_top = 3e26 / 6e26 / 9e26 / 1.2e27 (regression values of this solver)
+_RUN_R = (0.044450960573 + 0.032580900141j, 0.044551591039 + 0.031606786741j,
+          0.044624098379 + 0.030795234935j, 0.044701859519 + 0.030008192087j)
+_W1020 = 2.0 * math.pi * _C / 1020e-9
+_N_TOP = (3e26, 6e26, 9e26, 1.2e27)
+
+
+def _step_run_r(n_top, w, walls=False):
+    """Top 0.5 nm at n_top over 5.5 nm at 3e26 m^-3: one conductor (a run), or with a wall between."""
+    cid = None if walls else "film"
+    return _clad_r([_film(n_top, 0.5e-9, cid=cid), _film(3e26, 5.5e-9, cid=cid)], w=w, allow_walls=walls)
+
+
+def _longitudinal_order(lam_m):
+    """Re(k_z,L) d / pi of the uniform 6 nm film at 3e26 m^-3 (60 deg): the order of the longitudinal
+    standing wave across the film."""
+    w = 2.0 * math.pi * _C / lam_m
+    k0 = w / _C
+    kp = k0 * math.sin(_TH60)
+    kz = np.sqrt(complex(nt.kL_squared(w, _film(3e26, 6e-9))) - kp ** 2)
+    return float((kz * 6e-9 / math.pi).real)
+
+
+def test_hydro_run_restores_the_normal_field_response_of_a_thin_top_sublayer():
+    """Top 0.5 nm of the 6 nm film at density n_top, the remaining 5.5 nm at 3e26 m^-3. As ONE conductor
+    (a run: E_x, H_y, J_z and psi continuous at the density step) the sub-layer acts through its normal
+    field too; with a wall between the two (v0.15.1, J_z = 0 on both sides of the step) only through its
+    tangential permittivity.
+
+    (a) Independent route, across the band: the run equals the two-region solve_bvp oracle (the same
+    one-conductor interface conditions, transcribed independently) at 950 / 1150 / 1350 nm to 1e-11
+    (MEASURED <= 2.3e-14; the oracle's own tol 1e-8 vs 1e-10 change is <= 2.3e-14; the run is exact per
+    uniform sub-layer, so the bar is the oracle's convergence with a 100x margin). The walled model
+    misses the same oracle by >= 3.5e-5 (MEASURED 6.1e-4 / 3.5e-5 / 1.3e-3).
+    (b) The normal-field part of the response to n_top, Delta = |(r_run(1.2e27) - r_run(3e26)) -
+    (r_wall(1.2e27) - r_wall(3e26))| (the wall's own effect at n_top = bulk subtracted), is > 4e-6 at
+    every 50 nm from 950 to 1350 nm (MEASURED 4.6e-5 / 2.1e-4 / 8.8e-5 / 1.7e-5 / 8.2e-6 / 9.1e-6 /
+    1.4e-5 / 2.4e-5 / 4.9e-5; the bar is half the smallest).
+    (c) Labelled resonance case: the response of the run to n_top is clearly NON-LINEAR only near a
+    longitudinal standing-wave resonance of the film, Re(k_z,L) d = m pi with m odd (m = 4 at 1198 nm
+    leaves it linear, ptp/max of the Im steps 0.0035: the even orders couple to the normal field only
+    through the film's asymmetry). The test locates m = 5 (1018.9 nm) and there the run's Im r steps are non-linear
+    (ptp / max > 0.1, MEASURED 0.19) while the walled ones stay linear (< 0.01, MEASURED 0.0012). At
+    1020 nm (within 5 nm of it) the run is pinned to 1e-9 and the walled table to 2e-6 (regression
+    values); the n_top = bulk point is the uniform film to round-off."""
+    from scipy.optimize import brentq
+    # (a) the run is the one-conductor physics at every wavelength, the walls are not
+    for lam in (950e-9, 1150e-9, 1350e-9):
+        w = 2.0 * math.pi * _C / lam
+        regions = [(lambda z: np.full(np.shape(z), 1.2e27), 0.5e-9), (lambda z: np.full(np.shape(z), 3e26), 5.5e-9)]
+        r_or = _bvp_oracle_r(None, None, tol=1e-8, w=w, regions=regions)
+        assert abs(_step_run_r(1.2e27, w) - r_or) < 1e-11, (lam, abs(_step_run_r(1.2e27, w) - r_or))
+        assert abs(_step_run_r(1.2e27, w, walls=True) - r_or) > 3.0e-5, lam
+    # (b) the normal-field part of the n_top response is present across the band
+    for lam_nm in range(950, 1351, 50):
+        w = 2.0 * math.pi * _C / (lam_nm * 1e-9)
+        delta = abs((_step_run_r(1.2e27, w) - _step_run_r(3e26, w))
+                    - (_step_run_r(1.2e27, w, walls=True) - _step_run_r(3e26, w, walls=True)))
+        assert delta > 4e-6, (lam_nm, delta)
+    # (c) the labelled resonance case, located physically
+    lam5 = brentq(lambda x: _longitudinal_order(x) - 5.0, 950e-9, 1100e-9, xtol=1e-13)
+    assert abs(lam5 - 1020e-9) < 5e-9, lam5
+    w5 = 2.0 * math.pi * _C / lam5
+    di = np.diff([_step_run_r(n, w5).imag for n in _N_TOP])
+    dw = np.diff([_step_run_r(n, w5, walls=True).imag for n in _N_TOP])
+    assert np.ptp(di) > 0.1 * abs(di).max()                         # run: clearly non-linear
+    assert np.ptp(dw) < 0.01 * abs(dw).max()                        # walled: linear
+    w = _W1020
+    rs = [_step_run_r(n, w) for n in _N_TOP]
+    assert abs(rs[0] - _clad_r([_film(3e26, 6e-9)], w=w)) < 1e-12   # n_top = bulk: uniform film
+    walls = [_step_run_r(n, w, walls=True) for n in _N_TOP]
+    for got, want in zip(walls, (0.043875 + 0.032154j, 0.043961 + 0.031369j,
+                                 0.044047 + 0.030584j, 0.044131 + 0.029799j)):
+        assert abs(got - want) < 2e-6                               # the walled table
+    for got, want in zip(rs, _RUN_R):
+        assert abs(got - want) < 1e-9
+
+
+def test_hydro_run_profile_constructor():
+    """hydro_layers_from_profile: exact cell means of the piecewise-linear profile (sheet density
+    conserved), local beta(n) = beta_from_vf(v_F(n)), one conductor_id, input validation."""
+    z = np.array([0.0, 1e-9, 3e-9, 6e-9])
+    n = np.array([2e27, 1e27, 6e26, 3e26])
+    run = nt.hydro_layers_from_profile(z, n, m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14)
+    assert len(run) == 3 and all(x.conductor_id == "graded" for x in run)
+    nk = [_EPS0 * _MEFF * x.wp ** 2 / _Q_E ** 2 for x in run]
+    assert nk == pytest.approx([1.5e27, 8e26, 4.5e26], rel=1e-12)
+    from dynameta.core.numerics import trapz
+    sheet = trapz(n, z)
+    for N in (1, 7, 64):
+        rr = nt.hydro_layers_from_profile(z, n, m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14,
+                                          n_layers=N)
+        tot = sum(_EPS0 * _MEFF * x.wp ** 2 / _Q_E ** 2 * x.thickness_m for x in rr)
+        assert tot == pytest.approx(sheet, rel=1e-12)
+        assert sum(x.thickness_m for x in rr) == pytest.approx(6e-9, rel=1e-12, abs=0)   # metres: no abs floor
+    x0 = run[0]
+    vf = _HBAR * (3 * math.pi ** 2 * 1.5e27) ** (1 / 3) / _MEFF
+    assert x0.beta == pytest.approx(math.sqrt(0.6) * vf, rel=1e-12)
+    assert nt.beta_from_density(1.5e27, _MEFF, "thomas_fermi") == pytest.approx(vf / math.sqrt(3),
+                                                                                 rel=1e-12)
+    for bad in (dict(z_m=z[::-1], n_m3=n), dict(z_m=z, n_m3=-n), dict(z_m=z[:1], n_m3=n[:1]),
+                dict(z_m=z, n_m3=n[:3])):
+        with pytest.raises(ValueError):
+            nt.hydro_layers_from_profile(m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14, **bad)
+    with pytest.raises(ValueError):
+        nt.hydro_layers_from_profile(z, n, m_eff_kg=_MEFF, eps_inf=4.0, gamma=1.2e14,
+                                     conductor_id=None)
+
+
+def test_hydro_run_kernel_generator_modes_and_constitutive_law():
+    """The importable kernel is self-consistent (consistency checks): the closed-form modes are
+    eigenvectors of the generator with eigenvalues i*kz, kz_T^2 = eps_T k0^2 - k_par^2 and kz_L^2 =
+    k_L^2 - k_par^2; sigma = -i w eps0 (eps_T - eps_inf); psi = c rho with c = -beta_eff^2/(eps0
+    wp^2) (GNOR included, complex omega included)."""
+    for lay, w in ((_film(3e26, 1e-9), _W1200), (_film(1.6e27, 1e-9), _W1200 * (1 - 0.01j)),
+                   (dataclasses.replace(_film(6e26, 1e-9), D=2e-4), _W1200)):
+        for kp in (0.0, 0.7 * _W1200 / _C, 2.5 * _W1200 / _C):
+            K = nt.hydro_state_generator(w, lay, kp)
+            Phi, kz = nt.hydro_modes(w, lay, kp)
+            res = K @ Phi - Phi @ np.diag(1j * kz)
+            assert np.max(np.abs(res)) < 1e-12 * np.max(np.abs(K)) * np.max(np.abs(Phi))
+            k0 = w / _C
+            assert kz[0] ** 2 == pytest.approx(nt.eps_transverse(w, lay) * k0 ** 2 - kp ** 2,
+                                               rel=1e-12)
+            assert kz[2] ** 2 == pytest.approx(nt.kL_squared(w, lay) - kp ** 2, rel=1e-12)
+            assert kz[0].imag >= 0.0 and kz[2].imag >= 0.0
+        sig = nt.hydro_conductivity(w, lay)
+        assert sig == pytest.approx(-1j * w * _EPS0 * (nt.eps_transverse(w, lay) - lay.eps_inf),
+                                    rel=1e-12)
+        c = nt.hydro_psi_per_charge(w, lay)
+        assert c == pytest.approx(-nt.beta_eff_squared(w, lay) / (_EPS0 * lay.wp ** 2), rel=1e-15, abs=0)   # ~1e-8
+    assert nt.HYDRO_INTERFACE_FIELDS == ("E_x", "H_y", "J_z", "psi")
+    with pytest.raises(ValueError):
+        nt.hydro_state_generator(_W1200, _film(3e26, 1e-9, gamma=1.2e14, beta_scale=0.0), 1e6)
+
+
+def test_hydro_run_run_solver_is_stable_for_thin_and_strongly_evanescent_sublayers():
+    """Split identity in the hard regimes (a run of N identical sub-layers vs the closed-form
+    single layer, relative to |r|): a Na-like 3 nm film below omega_p (|k_z,L| ~ 9e9 1/m, decay
+    0.1 nm) cut into 300 sub-layers of 0.01 nm; a 40 nm film where exp(-|k_z,L| d) underflows
+    (|k_z,L| d ~ 360) cut into 40 and into 4000; GNOR; complex omega. A 4x4 transfer-matrix product
+    would carry exp(+330) here. MEASURED worst relative |dr| = 1.9e-13 (bar 1e-12)."""
+    na = nt.HydroLayer(1.0, 8.65e15, 3e12, nt.beta_from_vf(1.07e6), 3e-9, conductor_id="na")
+    cases = [(na, 0.6 * 8.65e15, 300), (na, 1.05 * 8.65e15, 300),
+             (dataclasses.replace(na, thickness_m=40e-9), 0.6 * 8.65e15, 40),
+             (dataclasses.replace(na, thickness_m=40e-9), 0.6 * 8.65e15, 4000),
+             (dataclasses.replace(na, D=2e-4), 1.02 * 8.65e15, 50),
+             (na, (0.95 - 0.01j) * 8.65e15, 50)]
+    worst = 0.0
+    for lay, w, N in cases:
+        kp = 0.7 * w.real / _C
+        one = nt.stack_rt(w, [lay], pol="p", k_par_m=kp, n_sub=1.3)
+        sub = dataclasses.replace(lay, thickness_m=lay.thickness_m / N)
+        many = nt.stack_rt(w, [sub] * N, pol="p", k_par_m=kp, n_sub=1.3)
+        rel = abs(many.r - one.r) / abs(one.r)
+        worst = max(worst, rel)
+        assert rel < 1e-12, (N, w, rel)
+
+
+def test_hydro_run_validity_diagnostic():
+    """hydro_validity: u = |k_L| v_F / omega per layer. The near-infrared degenerate-oxide fixture
+    is OUTSIDE the high-frequency hydrodynamic validity (u = 1.07 at 3e26, 1200 nm): flagged, and
+    stack_rt(check_validity=True) warns. A Na-like film just above omega_p (u ~ 0.1) is inside.
+    The degeneracy check flags a depletion-level density at 300 K."""
+    from dynameta.warning_types import UnreliableResultWarning
+    rep = nt.hydro_validity(_W1200, [_OXB, _film(3e26, 6e-9), _OXB])
+    assert not rep.ok and "Landau" in rep.message
+    assert math.isnan(rep.u[0]) and rep.u[1] == pytest.approx(1.07, abs=0.01)
+    with pytest.warns(UnreliableResultWarning, match="validity"):
+        _clad_r([_film(3e26, 6e-9)], check_validity=True)
+    na = nt.HydroLayer(1.0, 8.65e15, 3e12, nt.beta_from_vf(1.07e6), 3e-9)
+    ok = nt.hydro_validity(1.01 * 8.65e15, [na])
+    assert ok.ok and ok.u[0] < 0.2 and ok.message == ""
+    nt.stack_rt(1.01 * 8.65e15, [na], pol="p", theta_rad=0.5, check_validity=True)   # no warning
+    tf = nt.hydro_validity(1.01 * 8.65e15, [na], convention="thomas_fermi")
+    assert not tf.ok                                              # static limit needs u >> 1
+    dep = nt.hydro_validity(_W1200, [_film(1e25, 1e-9)], m_eff_kg=_MEFF, T_K=300.0,
+                            u_limit=1e9)
+    assert not dep.ok and "degenerate" in dep.message and dep.degeneracy[0] < 10.0
+    assert nt.hydro_validity(_W1200, [_film(1.6e27, 1e-9)], m_eff_kg=_MEFF, T_K=300.0,
+                             u_limit=1e9).ok
+
+
+def test_hydro_run_pole_function_refuses_nonlocal_runs_only():
+    """pole_function: a p-pol nonlocal run of >= 2 sub-layers has no analytic clearing factor ->
+    NotImplementedError. A labelled single layer is bit-identical to v0.15.1; s-pol runs and
+    local-limit runs work."""
+    run = _profile_run(4)
+    with pytest.raises(NotImplementedError):
+        nt.pole_function(run, k_par_m=1e6)
+    f_lab = nt.pole_function([_film(3e26, 6e-9)], k_par_m=1e6)
+    f_old = nt.pole_function([_film(3e26, 6e-9, cid=None)], k_par_m=1e6)
+    wc = _W1200 * (1 - 0.02j)
+    assert f_lab(wc) == f_old(wc)
+    assert np.isfinite(nt.pole_function(run, pol="s", k_par_m=1e6)(wc))
+    loc = [dataclasses.replace(x, beta=0.0) for x in run]
+    assert np.isfinite(nt.pole_function(loc, k_par_m=1e6)(wc))

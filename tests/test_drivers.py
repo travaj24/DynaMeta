@@ -158,7 +158,7 @@ def test_pcm_extra_fields_matches_direct_integrate():
     out = fields("b0")
     direct = float(sw.integrate(t, T, x0=0.0)[-1])
     assert set(out) == {"crystalline_fraction"}
-    assert out["crystalline_fraction"] == pytest.approx(direct, rel=1e-12)
+    assert out["crystalline_fraction"] == pytest.approx(direct, rel=1e-12, abs=0)
     assert 0.0 < out["crystalline_fraction"] <= 1.0
     # melt pulse at the end resets toward amorphous
     T_melt = T.copy(); T_melt[-40:] = 950.0

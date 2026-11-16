@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0, HBAR, Q_E
+from dynameta.constants import C_LIGHT, EPS0, HBAR, M_E, Q_E
 from dynameta.core.backend import is_jax_array
 from dynameta.core.numerics import trapz
 from dynameta.core.effects.base import (_E_vec, _photon_energy_J, kramers_kronig_dn,
                                         kramers_kronig_dn_rows)
-from dynameta.warning_types import UnreliableResultWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
 # ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
@@ -562,55 +563,144 @@ class BursteinMossEdge:
 
 # ---- Intersubband quantum eps_zz from sub-band wavefunctions (R7) -------------------------
 
+_Z_RESPONSES = ("subbands", "drude_plus_subbands")
+_FSUM_CHECKS = ("warn", "off")
+_FSUM_BAND = (0.9, 1.05)
+# below this f-sum ratio the sub-band set is refused (fsum_check="warn"): more than half
+# of the electrons' z response is missing, so eps_zz is not a degraded approximation but a different material
+# (it tends to eps_inf exactly as the ratio tends to 0 -- the default density() output of a 5-10 nm film keeps
+# only the occupied sub-band and gave eps_zz = eps_inf + 0j).
+_FSUM_HARD_FLOOR = 0.5
+
+
+def subband_dipole_matrix(psi, z_m) -> np.ndarray:
+    """Dipole matrix Z_ij = <psi_i| z - z_c |psi_j> [m] of sub-band states sampled on a UNIFORM grid.
+
+    The quadrature is the one the eigenvectors are normalized with (SchrodingerPoisson1D: the Riemann
+    sum, sum_k |psi_k|^2 h = 1, over the grid the states live on), so the discrete states are exactly
+    orthonormal under it and Z is invariant to the choice of the z origin: shifting z by a constant
+    adds (shift) x (overlap matrix) = (shift) x identity, which only moves the diagonal. z_c is the
+    midpoint of z_m (it fixes the diagonal; the off-diagonal elements do not depend on it). One matrix
+    product: Z = psi^T diag(z - z_c) psi h. Raises if z_m is not uniform (rtol 1e-6)."""
+    z = np.asarray(z_m, dtype=np.float64)
+    p = np.asarray(psi, dtype=np.float64)
+    if z.ndim != 1 or z.size < 2 or p.ndim != 2 or p.shape[0] != z.size:
+        raise ValueError("subband_dipole_matrix: psi must be (len(z_m), n_states) on a 1-D grid z_m")
+    h = float(z[1] - z[0])
+    if not (h > 0.0) or not np.allclose(np.diff(z), h, rtol=1e-6, atol=0.0):
+        raise ValueError("subband_dipole_matrix: z_m must be uniformly spaced (rtol 1e-6): the dipole "
+                         "quadrature must be the Riemann sum the eigenvectors are normalized with")
+    zc = 0.5 * (z[0] + z[-1])
+    return (p.T @ (p * (z - zc)[:, None])) * h
+
 
 @dataclass
 class IntersubbandEffect:
-    """Diagonal-anisotropic permittivity from a quantum SubbandResult: the growth-axis (z) response
-    carries the INTERSUBBAND transitions whose dipole <psi_i|z|psi_j> lies along z, while the in-plane
-    (x, y) response is the ordinary intraband free-carrier Drude. Reads fields['subband'] (a
-    carriers.schrodinger_poisson.SubbandResult: energies_J, psi, z_m, sheet_density_m2).
+    """Diagonal-anisotropic permittivity of a film described by a quantum SubbandResult (reads
+    fields['subband']: energies_J, psi, z_m, sheet_density_m2). The in-plane response is the free
+    in-plane (intraband) motion of the sub-band electrons; the out-of-plane (z) response is the sum
+    over the INTERSUBBAND transitions, whose dipoles lie along z.
 
-        eps_xx = eps_yy = eps_inf - wp^2 / (w^2 + i w gamma_intra)              (intraband Drude)
-        eps_zz = eps_xx + sum_{i<j}  S_ij / (eps0 (w_ij^2 - w^2 - i w gamma_inter))
+    Default, z_response="subbands" (v0.16):
 
-    with wp^2 = n3d q^2/(eps0 m_opt), n3d = (sum_i n_s,i)/Leff, w_ij = (E_j - E_i)/hbar, and the
-    f-sum-rule-CONSISTENT oscillator strength built in:
+        eps_xx = eps_yy = eps_inf - wp^2 / (w^2 + i w gamma_intra) + chi_free
+        eps_zz = eps_inf + sum_{i<j} S_ij / (eps0 (w_ij^2 - w^2 - i w gamma_inter)) + chi_free
 
-        S_ij = N_ij q^2 |z_ij|^2 (2 w_ij)/hbar ,   N_ij = (n_s,i - n_s,j)/Leff ,   z_ij = <psi_i|z|psi_j>
+        wp^2 = n3d q^2 / (eps0 m_opt),  n3d = sum_i n_s,i / Leff,  w_ij = (E_j - E_i) / hbar,
+        S_ij = N_ij q^2 |z_ij|^2 (2 w_ij) / hbar,  N_ij = (n_s,i - n_s,j) / Leff,
+        chi_free = -wp_free^2 / (w^2 + i w gamma_intra),  wp_free^2 = free_density_m3 q^2 / (eps0 m_opt).
 
-    Where the mass went: write the standard Lorentz-oscillator susceptibility per transition,
-    chi_ij = (N_ij q^2 / (eps0 m0)) * f_ij / (w_ij^2 - w^2 - i w gamma), with the dimensionless TRK
-    strength f_ij = (2 m0 w_ij / hbar) |z_ij|^2; substituting f_ij, the free mass m0 CANCELS exactly,
-    leaving the dipole form S_ij above. The effective mass is NOT absent from the physics -- it enters
-    through the psi_i / E_i of the Schrodinger solve that produce z_ij and w_ij -- but it must not be
-    inserted AGAIN in the line strength (the classic double-counting bug). m_opt therefore appears
-    ONLY in the intraband Drude term.
-    The denominator uses -i w gamma (exp(-i omega t), Im(eps_zz) > 0 on resonance = absorptive).
+    Derivation. The sub-band Hamiltonian is separable: free in-plane motion (E = E_i + hbar^2 k^2/2m)
+    times the confined z states psi_i. A field along x accelerates every electron in-plane: the
+    intraband Drude term. A uniform field along z cannot accelerate a confined electron (the states have
+    no continuous z momentum); it mixes the states, and second-order perturbation theory gives the
+    Lorentz-oscillator sum above, each transition weighted by its population difference. The
+    Thomas-Reiche-Kuhn rule sum_j f_ij = 1, f_ij = (2 m w_ij / hbar) |z_ij|^2 (m the z mass of the
+    Schrodinger solve), makes the oscillator strengths of a COMPLETE set exhaust the free-carrier
+    response: sum_{i<j} (n_s,i - n_s,j) f_ij = sum_i n_s,i. So for w >> every w_ij the z sum tends to
+    -wp_z^2 / w^2 (wp_z with the Schrodinger mass), i.e. the electrons respond along z like free
+    carriers at high frequency WITHOUT any added Drude term, and as the film widens the transitions
+    crowd into a continuum and eps_zz -> eps_xx (an isotropic bulk; the difference falls as 1/L).
+    The z response therefore carries NO Drude term of the sub-band electrons: adding one (the
+    pre-0.16 form, below) counts the same electrons twice, in every regime -- for a complete set by
+    the sum rule, and for an isolated well because its confined electrons have no free z motion at all.
+    Only a SEPARATE free population that is not in the sub-band set (e.g. continuum electrons of an
+    isolated-well solve) has a Drude response, along every axis: give its density as free_density_m3
+    (it enters eps_xx and eps_zz alike, with m_opt and gamma_intra).
 
-    WHICH PAIRS RADIATE (audit R-1). The line strength is carried entirely by the population
-    DIFFERENCE N_ij = (n_s,i - n_s,j)/Leff, so a pair (i, j) contributes iff |n_s,i - n_s,j| exceeds
-    occ_floor_m2. It is NOT gated on both states being populated: the canonical intersubband
-    absorber is a FULL ground sub-band radiating into an EMPTY excited one, which has the LARGEST
-    N_ij and therefore the STRONGEST line. The shipped filter drew both i and j from the
-    occupancy-filtered set, which deleted exactly that configuration (measured: populating the
-    upper sub-band with a physically null 1e-30 m^-2 swung Im(eps_zz) from 0.028 to 89.2) and also
-    made the N_ij < 0 gain warning below unreachable for the inverted case n_s = [0, n], since the
-    pair was removed before the warning could fire.
+    Mass. The in-plane Drude uses m_opt; the z response uses the Schrodinger mass that produced psi_i
+    and E_i (it enters only through them; the free mass of the dipole form cancels -- inserting a mass
+    again in S_ij would be the classic double count). The two differ for a nonparabolic band, so the
+    thick-film limit of eps_zz is the plasma response with the PARABOLIC (Schrodinger) mass, and
+    eps_zz - eps_xx tends to wp^2 (1/m_opt - 1/m_z)/w^2 there, not to 0.
 
-    REDUCES to a scalar Drude * I when no pair has a population difference (the Lorentzian sum is
-    empty) -> diag(eps_D, eps_D, eps_D) == as_tensor(DrudeOptical.eps). v1 returns a
-    UNIFORM (3,3) slab response (sheet smeared over Leff = z[-1]-z[0]); a z-graded eps_zz(z) via the
-    local |psi(z)|^2 weighting is a documented follow-on (Leff sets the LINE STRENGTH, not the position
-    or the Leff-free f-sum rule). exp(-i omega t), Im(eps) > 0 for absorbers; pure numpy."""
+    Quadrature. z_ij uses the Riemann sum the eigenvectors are normalized with
+    (subband_dipole_matrix), measured from the midpoint of z_m, so the states are exactly orthonormal
+    under it and eps_zz does not depend on the z origin. z_m must be uniform.
+
+    f-sum diagnostic. Every call stores self.last_fsum_ratio = sum_{i<j} (n_s,i - n_s,j) f_ij / sum_i
+    n_s,i with f_ij = (2 m_sp w_ij / hbar) z_ij^2, m_sp = subband_mass_kg (default m_opt; set it to the
+    Schrodinger mass when m_opt differs). For a complete state set with m_sp = the Schrodinger mass it
+    is 1 up to the O(h^2) discretization (the discrete identity is sum_i n_s,i kappa_i / sum n_s,i,
+    kappa_i = h sum_k psi_i,k psi_i,k+1). In "subbands" mode (fsum_check="warn", the default):
+      * a ratio below 0.5 RAISES ValueError: more than half of the electrons' z
+        response is missing, so eps_zz is not an approximation but a different material -- it tends to
+        eps_inf exactly as the ratio tends to 0 (SchrodingerPoisson1D.density's default keeps only the
+        states needed for the density; for a 5 or 10 nm film that is the occupied sub-band alone, ratio 0,
+        and eps_zz came out as eps_inf + 0j behind an AdvisoryWarning). Why refuse rather than complete
+        the sum: the missing strength sits in transitions to the states that were dropped, at frequencies
+        the result does not know (near the optical frequency in a few-nm film), so no stated remainder --
+        e.g. a Drude term, i.e. all of it at zero frequency -- is right; a complete basis is cheap.
+      * a ratio in [0.5, 0.9) or above 1.05 warns (AdvisoryWarning): a mild truncation, or m_sp is not
+        the Schrodinger mass.
+    fsum_check="off" skips both (model studies: a synthetic 2-3 state well is incomplete by construction).
+
+    Example (a COMPLETE state set: every discrete state of the slab, as optics.quantum_film.QuantumFilm
+    builds it; f-sum ratio 0.9997 on a 6 nm film at 0.025 nm):
+        sp = SchrodingerPoisson1D(z_m, m_z)
+        res = sp.density(U_J, E_F_J, n_states=None, bound_tol=np.inf)
+        eps = IntersubbandEffect(4.0, m_z, 1.2e14, 1.2e14).eps({"subband": res}, 1200e-9)
+
+    Legacy, z_response="drude_plus_subbands" (DEPRECATED, removal in 0.17; AdvisoryWarning): the pre-0.16
+    eps_zz = eps_xx + sum ISB with the original trapezoid dipole quadrature on the absolute z, reproduced
+    bit for bit (free_density_m3 must be 0 there).
+
+    WHICH PAIRS RADIATE. A pair (i, j) contributes iff |n_s,i - n_s,j| > occ_floor_m2 (the
+    canonical absorber, a FULL ground sub-band radiating into an EMPTY excited one, has the largest
+    N_ij and the strongest line). An inverted pair (N_ij < 0) would be gain: it is clamped to 0 with an
+    UnreliableResultWarning ("inverted population"), anti-gain policy row (2) of core.eps_field.
+
+    Leff (the thickness the sheet densities are spread over, so that the effective layer of that
+    thickness carries the film's sheet response) is thickness_m when given. Otherwise it is the
+    distance between the film's two hard walls, read from the grid convention: a SubbandResult of a
+    Dirichlet slab solve lives on the INTERIOR nodes (the wall nodes, where psi = 0, are excluded), so
+    each wall sits one spacing h beyond the end node and Leff = z[-1] - z[0] + 2h; an end node at
+    which every state vanishes (|psi| <= 1e-10 of max |psi|) is itself the wall and adds nothing (a
+    grid written with its wall nodes included gives Leff = z[-1] - z[0]). This is the exact layer
+    thickness of the slab, so the sheet response converges as O(h^2) with the grid (that of the states
+    themselves); z[-1] - z[0] alone would be off by 2h / L (1 % on a 6 nm film at 201 nodes) and
+    converge only as O(h). Pass thickness_m when the states live on a domain that is not the
+    optical layer (e.g. a solve extended into finite oxide barriers: give the nominal film
+    thickness). The legacy z_response='drude_plus_subbands' keeps its v0.15.1 Leff = z[-1] - z[0].
+    This model is the LOCAL (uniform-field) response of the film: the same as the self-
+    consistent response of the sub-band system with its depolarization kernel replaced by the
+    uniform-field one (see dynameta.optics.quantum_film, which builds the nonlocal response).
+    exp(-i omega t), Im(eps) > 0 for absorbers; pure numpy."""
     eps_inf: float
-    m_opt_kg: float            # sub-band-averaged Kane optical mass (intraband Drude only)
+    m_opt_kg: float            # sub-band-averaged optical mass (in-plane Drude and the free population)
     gamma_intra_rad_s: float
     gamma_inter_rad_s: float   # intersubband dephasing (scalar; per-pair callable = follow-on)
     # R-1: this is the minimum |n_s,i - n_s,j| sheet-density DIFFERENCE for a pair to radiate, NOT
     # a per-sub-band occupancy floor (which silently deleted the full-ground/empty-excited absorber).
     occ_floor_m2: float = 0.0  # min |n_s,i - n_s,j| [m^-2] for an i->j line to be kept
+    z_response: str = "subbands"            # "subbands" (v0.16) | "drude_plus_subbands" (deprecated)
+    free_density_m3: float = 0.0            # a free population NOT in the sub-band set (isotropic Drude)
+    subband_mass_kg: Optional[float] = None  # m_sp of the f-sum diagnostic (None -> m_opt_kg)
+    fsum_check: str = "warn"                # "warn" | "off"
+    thickness_m: Optional[float] = None     # Leff override (None -> wall-to-wall thickness of the grid)
+    last_fsum_ratio: Optional[float] = field(default=None, init=False, repr=False, compare=False)
 
-    def eps(self, fields: dict, lambda_m: float):
+    def _inputs(self, fields):
         res = (fields or {}).get("subband")
         if res is None:
             raise ValueError("IntersubbandEffect requires fields['subband'] (a SubbandResult); none "
@@ -621,9 +711,124 @@ class IntersubbandEffect:
         ns = np.asarray(res.sheet_density_m2, dtype=np.float64)        # m^-2 per sub-band
         if psi.ndim != 2 or psi.shape[1] != E.size or ns.size != E.size:
             raise ValueError("SubbandResult psi/energies_J/sheet_density_m2 are inconsistent in shape")
-        Leff = float(z[-1] - z[0])
+        return z, psi, E, ns
+
+    #: an end node is a hard wall when every state is below this fraction of max |psi| there
+    _WALL_REL = 1e-10
+
+    def _leff(self, z, psi=None) -> float:
+        """Leff (class docstring): thickness_m, else the wall-to-wall thickness of the grid (psi
+        given), else z[-1] - z[0] (the legacy form)."""
+        if self.thickness_m is not None:
+            Leff = float(self.thickness_m)
+        else:
+            Leff = float(z[-1] - z[0])
+            if psi is not None and z.size >= 2:
+                h = float(z[1] - z[0])
+                a = np.abs(np.asarray(psi, dtype=np.float64))
+                floor = self._WALL_REL * float(np.max(a)) if a.size else 0.0
+                for end in (0, -1):                     # interior-node grid: the wall is h beyond
+                    if not (a.size and float(np.max(a[end])) <= floor):
+                        Leff += h
         if not (Leff > 0.0):
-            raise ValueError("SubbandResult z_m must span a positive width (Leff = z[-1]-z[0])")
+            raise ValueError("SubbandResult z_m must span a positive width, or thickness_m must be > 0")
+        return Leff
+
+    def eps(self, fields: dict, lambda_m: float):
+        if self.z_response not in _Z_RESPONSES:
+            raise ValueError("IntersubbandEffect: z_response must be one of {}, got {!r}".format(
+                _Z_RESPONSES, self.z_response))
+        if self.fsum_check not in _FSUM_CHECKS:
+            raise ValueError("IntersubbandEffect: fsum_check must be one of {}, got {!r}".format(
+                _FSUM_CHECKS, self.fsum_check))
+        if self.z_response == "drude_plus_subbands":
+            return self._eps_legacy(fields, lambda_m)
+        z, psi, E, ns = self._inputs(fields)
+        Leff = self._leff(z, psi)
+        order = np.argsort(E, kind="stable")                           # ascending energies
+        E, psi, ns = E[order], psi[:, order], ns[order]
+        Z = subband_dipole_matrix(psi, z)                              # Riemann, origin-free
+
+        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        drude = 1.0 / (omega * omega + 1j * omega * float(self.gamma_intra_rad_s))
+        n3d = float(np.sum(ns)) / Leff
+        wp2 = n3d * Q_E * Q_E / (EPS0 * float(self.m_opt_kg))
+        nfree = float(self.free_density_m3)
+        if not (np.isfinite(nfree) and nfree >= 0.0):
+            raise ValueError("IntersubbandEffect: free_density_m3 must be finite and >= 0")
+        chi_free = -(nfree * Q_E * Q_E / (EPS0 * float(self.m_opt_kg))) * drude
+        eps_intra = complex(self.eps_inf) - wp2 * drude + chi_free
+
+        iu, ju = np.triu_indices(E.size, 1)                            # all pairs i < j
+        dns = ns[iu] - ns[ju]
+        keep = np.abs(dns) > float(self.occ_floor_m2)
+        iu, ju, dns = iu[keep], ju[keep], dns[keep]
+        w_ij = (E[ju] - E[iu]) / HBAR                                  # >= 0
+        z_ij = Z[iu, ju]
+        self._fsum_diagnostic(ns, dns, w_ij, z_ij)
+        inv = dns < 0.0
+        if np.any(inv):                                                # population inversion -> gain
+            k = int(np.flatnonzero(inv)[0])
+            warnings.warn("IntersubbandEffect: inverted population (n_s[{}] < n_s[{}]{}) gives a gain "
+                          "line; clamping to 0".format(int(iu[k]), int(ju[k]),
+                                                       "" if inv.sum() == 1 else
+                                                       " and {} more pair(s)".format(int(inv.sum()) - 1)),
+                          UnreliableResultWarning, stacklevel=2)
+            dns = np.where(inv, 0.0, dns)
+        S_ij = (dns / Leff) * Q_E * Q_E * (z_ij * z_ij) * (2.0 * w_ij) / HBAR
+        gam = float(self.gamma_inter_rad_s)
+        chi_isb = complex(np.sum(S_ij / (EPS0 * (w_ij * w_ij - omega * omega - 1j * omega * gam))))
+        out = np.zeros((3, 3), dtype=complex)
+        out[0, 0] = eps_intra
+        out[1, 1] = eps_intra
+        out[2, 2] = complex(self.eps_inf) + chi_isb + chi_free
+        return out
+
+    def _fsum_diagnostic(self, ns, dns, w_ij, z_ij) -> None:
+        """Store (and in "subbands" mode check) the f-sum ratio; see the class docstring."""
+        m_sp = float(self.m_opt_kg if self.subband_mass_kg is None else self.subband_mass_kg)
+        total = float(np.sum(ns))
+        if not (total > 0.0):
+            self.last_fsum_ratio = float("nan")                        # no carriers: nothing to check
+            return
+        f_ij = (2.0 * m_sp * w_ij / HBAR) * (z_ij * z_ij)
+        ratio = float(np.sum(dns * f_ij) / total)
+        self.last_fsum_ratio = ratio
+        if self.z_response == "subbands" and self.fsum_check == "warn" and ratio < _FSUM_HARD_FLOOR:
+            raise ValueError(
+                "IntersubbandEffect: f-sum ratio sum (n_i - n_j) f_ij / sum n_i = {:.4g} < {}: the sub-band set "
+                "misses most of the electrons' z response, so eps_zz would tend to eps_inf instead of the film's "
+                "response. Pass a COMPLETE state set -- SchrodingerPoisson1D.density(U, E_F, n_states=None, "
+                "bound_tol=np.inf), or the states of optics.quantum_film.QuantumFilm -- (an isolated-well solve: "
+                "give the continuum density as free_density_m3); if subband_mass_kg ({:.4g} m_e) is not the "
+                "Schrodinger mass, set it; fsum_check='off' accepts an incomplete set deliberately (model "
+                "studies).".format(ratio, _FSUM_HARD_FLOOR, m_sp / M_E))
+        lo, hi = _FSUM_BAND
+        if (self.z_response == "subbands" and self.fsum_check == "warn"
+                and not (lo <= ratio <= hi)):
+            warnings.warn(
+                "IntersubbandEffect: f-sum ratio sum (n_i - n_j) f_ij / sum n_i = {:.4g} is outside "
+                "[{}, {}]: the sub-band set is incomplete (raise n_states / keep all slab states with "
+                "a large bound_tol; an isolated-well solve drops the continuum -- give its density as "
+                "free_density_m3), or subband_mass_kg ({:.4g} m_e) is not the Schrodinger mass of the "
+                "solve. eps_zz then misses part of the free-carrier z response. fsum_check='off' "
+                "silences this.".format(ratio, lo, hi, m_sp / M_E),
+                AdvisoryWarning, stacklevel=3)
+
+    def _eps_legacy(self, fields: dict, lambda_m: float):
+        """The pre-0.16 form, bit for bit: eps_zz = eps_xx(Drude) + sum ISB with the trapezoid dipole
+        quadrature on the absolute z. DEPRECATED (double counts the free-carrier z response)."""
+        if float(self.free_density_m3) != 0.0:
+            raise ValueError("IntersubbandEffect: free_density_m3 is not part of the legacy "
+                             "'drude_plus_subbands' form; use z_response='subbands'")
+        warnings.warn(
+            "IntersubbandEffect(z_response='drude_plus_subbands') is deprecated and will be removed in "
+            "0.17: it adds the sub-band electrons' own Drude term to eps_zz on top of the intersubband "
+            "sum, which already exhausts their free-carrier response (f-sum rule) -- a double count in "
+            "every regime. Use the default z_response='subbands' (and free_density_m3 for a population "
+            "outside the sub-band set).", AdvisoryWarning, stacklevel=3)
+        z, psi, E, ns = self._inputs(fields)
+        Leff = self._leff(z)
 
         omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
         n3d = float(np.sum(ns)) / Leff                                 # m^-3 total volume density

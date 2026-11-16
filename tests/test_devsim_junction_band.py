@@ -30,6 +30,7 @@ FAILS ON THE OLD CODE (098553f): TypeError (no junction_band keyword) / ImportEr
 but D1, an IDENTITY gate (its digests were recorded there), and A1's band-off half, which IS the old mesh.
 Runtime (MEASURED, Windows dev box, serial, -m "not slow"): see the solvers-devsim entry in .github/workflows/ci.yml.
 """
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -90,15 +91,24 @@ def _gaas_homo_one():
                                                              net_doping_expr=expr))], ps_if=H, coarse=H, zone=100e-9)
 
 
-def _refmod():
+def _refmod(refinement="legacy"):
+    """The shared validation device (validation/_reference_device.py). v0.16: its unipolar degenerate film is
+    refined by the default screening grading
+    (geometry.specs.Mesh2DSpec.semiconductor_refinement), which is not the mesh 0554410 recorded, so the
+    identity gates below run it with the explicit v0.15.1 restore, semiconductor_refinement="legacy" (the
+    junction band's own off-switch is what they test); test_d1_refmod_default_mesh_moved_with_v016 checks
+    that the default now differs."""
     from validation._reference_device import build_reference_modulator
-    return build_reference_modulator("drift_diffusion")
+    d = build_reference_modulator("drift_diffusion")
+    d.mesh_2d = dataclasses.replace(d.mesh_2d, semiconductor_refinement=refinement)
+    return d
 
 
 FIXTURES = {
     "gan_e4": lambda: _diode(dict(GAN, mid=1e-9), True, name="gan"),
     "si_lat": lambda: _diode(SI, None, name="si"),
     "refmod_dd": _refmod,
+    "refmod_dd_v016": lambda: _refmod("screening"),
     "gaas_pn": _gaas_stack,
     "gaas_homo_one": _gaas_homo_one,
 }
@@ -119,8 +129,14 @@ def _call_log(monkeypatch, name, **kw):
             return _f(*a, **k)
         monkeypatch.setattr(DL.ds, nm, w)
     b = DL.LayeredDevsimBuilder(FIXTURES[name](), mesh_name="m_" + name, device_name="d_" + name, **kw)
+    # v0.16 (DOS-mass-at-n_bg guard, docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
+    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so
+    # every build of it now warns once (AdvisoryWarning); the call log is unchanged (the guard makes no DEVSIM call)
+    guard = (pytest.warns(AdvisoryWarning, match="density-dependent") if name.startswith("refmod")
+             else contextlib.nullcontext())
     try:
-        b.build_device()
+        with guard:
+            b.build_device()
     finally:
         b.teardown()
         monkeypatch.undo()
@@ -136,6 +152,14 @@ def test_d1_defaults_off_mesh_call_log_is_the_0554410_digest(monkeypatch, name):
     # ADVERSARIAL (sensitivity): the band on changes the log wherever there is a junction
     if name != "refmod_dd":
         assert _call_log(monkeypatch, name, junction_band=True)[0] != CALL_LOG_0554410[name][0]
+
+
+def test_d1_refmod_default_mesh_moved_with_v016(monkeypatch):
+    """v0.16 moved pin: with the default Mesh2DSpec the shared validation device's degenerate film gets the
+    screening grading, so its call log is no longer the 0554410 digest (more mesh lines: 17 -> 188 z nodes
+    across the film); the bipolar fixtures above are not refined and keep their digests with the default spec."""
+    digest, n, _ = _call_log(monkeypatch, "refmod_dd_v016")
+    assert digest != CALL_LOG_0554410["refmod_dd"][0] and n > CALL_LOG_0554410["refmod_dd"][1]
 
 
 def _solved_digest(tag, **kw):
@@ -189,11 +213,11 @@ def test_g1_band_geometry_and_the_physical_defaults(g, mid):
     vbi, W, Emax = _depletion(g["NA"], g["ND"], g["eps_r"], g["n_i"])
     # budget: CODATA 2018 (library) vs 2022 (scipy) eps0, 6.8e-10 relative -> 1e-9
     assert e["axis"] == "x" and e["regions"] == ("pn",) and e["position_m"] == g["P"] / 2
-    assert e["V_bi"] == pytest.approx(vbi, rel=1e-9) and e["W0_m"] == pytest.approx(W, rel=1e-9)
-    assert e["peak_width_m"] == pytest.approx(VT / Emax, rel=1e-9)
+    assert e["V_bi"] == pytest.approx(vbi, rel=1e-9, abs=0) and e["W0_m"] == pytest.approx(W, rel=1e-9, abs=0)
+    assert e["peak_width_m"] == pytest.approx(VT / Emax, rel=1e-9, abs=0)
     assert e["half_width_m"] == e["W0_m"] and e["line_spacing_m"] == mid
     h = min(VT / Emax, mid)
-    assert e["spacing_m"] == pytest.approx(h, rel=1e-9)
+    assert e["spacing_m"] == pytest.approx(h, rel=1e-9, abs=0)
     xj = g["P"] / 2
     k = int(np.argmin(np.abs(xs - xj)))
     assert xs[k] == pytest.approx(xj, abs=1e-18)

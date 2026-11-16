@@ -73,7 +73,7 @@ import os
 import shutil
 import tempfile
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -167,7 +167,7 @@ class Stacked3DSpec:
                                           # (laterally-varying accumulation: gated under the
                                           # patch, free surface in the gap -- the non-separable
                                           # topology the 2D+symmetrization path approximates).
-    mesh_min_nm:     float = 0.5         # near the semi/oxide interface
+    mesh_min_nm:     float = 0.5         # near the semi/oxide interface (with density_gradient: wall_mesh_min_nm)
     mesh_max_nm:     float = 3.0
     # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
     # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (PATH) tetrahedra:
@@ -244,6 +244,45 @@ class Stacked3DSpec:
     # (M-matrix kept, measured cost); False = DEVSIM's uncorrected geometry (pre-v0.14 gmsh numbers). The
     # tensor (Kuhn) mesh is exact already and is only READ (byte-identical whatever the value).
     exact_geometry: object = True
+    # v0.16, all OPT-IN (None = byte-identical):
+    # gate_work_function_eV: metal work function phi_m [eV] of the gate. The gate is pinned at Potential =
+    #   V_gate - (phi_m - W_s)/q with W_s = chi_semi_eV + (E_c - E_F) of the BODY semiconductor at psi = 0 (its
+    #   Phi_c0; the frame the gate already refers to: flat band of the body at V_gate = 0 without a work
+    #   function) -- physics_equilibrium.work_function_offset_V. Needs chi_semi_eV. physics='equilibrium' only:
+    #   the drift-diffusion and bipolar bodies refer the gate to a different neutral level (the bipolar one to
+    #   the intrinsic level plus the built-in offset), which is not wired -- use the 2-D LayeredDevsimBuilder.
+    # fixed_charge: {interface name | (region_a, region_b): Q [C/m^2]} fixed sheet charges at region/region
+    #   interfaces of this spec's regions ('semi', the extra semiconductors, 'oxide', 'diel1', ...), carried by
+    #   the dielectric side (devsim_layered.install_fixed_charges, the same wiring as the 2-D builder). Any
+    #   physics.
+    # bulk_charge: {dielectric region: rho [C/m^3]} uniform fixed space charge in a dielectric region.
+    # interface_traps also accepts physics_traps.FilmInterfaceTraps (or a sequence of them) with
+    #   physics='equilibrium': installed on every semiconductor/dielectric interface.
+    gate_work_function_eV: Optional[float] = None
+    fixed_charge: Optional[dict] = None
+    bulk_charge: Optional[dict] = None
+    # v0.16, OPT-IN (None = byte-identical): {semiconductor region: materials.KaneBand} -- 'semi'
+    #   and/or extra-semiconductor names. That region's equilibrium closure is the band's (Kane density,
+    #   Phi_c0 calibrated on it; physics_equilibrium.setup_semiconductor_region(band=)); its DOS mass (dos_mass_kg
+    #   for 'semi', the entry's 7th field) becomes the band's DOS mass at its n_bg (KaneBand.dos_mass_kg): leave
+    #   it at its default / None, or give exactly that value (from_design does). physics='equilibrium' only.
+    bands: Optional[dict] = None
+    # v0.16, OPT-IN (None = byte-identical): a carriers.density_gradient.EquilibriumDensityGradient -> the
+    #   in-Newton density gradient on 'semi' (carriers.physics_equilibrium_dg): insulating walls on every
+    #   semi/dielectric interface (the gate oxide, dielectric inclusions), the body contact an ohmic reservoir.
+    #   physics='equilibrium', a single semiconductor (no extra_semiconductors) and the parabolic closure only.
+    #   The wall planes are meshed at wall_mesh_min_nm() (the 2-D screening face spacing when mesh_min_nm is too
+    #   coarse for the dead layer), so the default mesh_min_nm resolves it.
+    density_gradient: Optional[object] = None
+
+    def band_of(self, region_name: str):
+        """The KaneBand of a semiconductor region, or None (parabolic closure)."""
+        return PE.kane_band_of((self.bands or {}).get(region_name))
+
+    def closure_kwargs(self, region_name: str) -> dict:
+        """setup_semiconductor_region band keywords of a region: {"band": KaneBand} or {"dos_mass_kg": m}."""
+        kb = self.band_of(region_name)
+        return {"band": kb} if kb is not None else {"dos_mass_kg": self.semiconductor_dos_mass_kg(region_name)}
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -277,6 +316,30 @@ class Stacked3DSpec:
                 return float(m)
         return float(self.dos_mass_kg)
 
+    def wall_mesh_min_nm(self) -> float:
+        """The mesh size [nm] at the semiconductor/dielectric refinement plane(s). Without the density gradient:
+        mesh_min_nm. With it (its sqrt(n) -> 0 wall condition puts a dead layer of a few tenths of a nm there) the
+        2-D builder's screening rule (geometry.specs.Mesh2DSpec, L_s the screening length of 'semi' at n_bg,
+        screening_mesh.screening_length_m; L_s ~ 0.7 nm for the default spec): a mesh_min_nm finer than the
+        zone-edge spacing screening_ps_factor x L_s is kept as given; a coarser one is replaced by the face spacing
+        screening_interface_factor x L_s. The 0.5 nm default put 9 z nodes in a 12 nm film and left the DG sheet
+        1.8 % low, silently (MEASURED on the default spec against mesh_min_nm 0.02); the replaced wall size is
+        within 1e-3 of the fine mesh (+6.7e-4 on the default spec, +9.4e-4 on the generic film of
+        tests/test_equilibrium_density_gradient.py)."""
+        if self.density_gradient is None:
+            return float(self.mesh_min_nm)
+        from dynameta.carriers.screening_mesh import screening_length_m
+        from dynameta.geometry.specs import Mesh2DSpec
+        from dynameta.materials.transport_model import TransportModel
+        m = float(self.dos_mass_kg)
+        tr = TransportModel(n_bg_m3=float(self.n_bg_m3), eps_static=float(self.eps_semi), physics="equilibrium",
+                            dos_mass_kg_of_n_m3=lambda n: m)
+        ls_nm = screening_length_m(tr) * 1e9
+        rule = Mesh2DSpec()
+        if float(self.mesh_min_nm) <= float(rule.screening_ps_factor) * ls_nm:
+            return float(self.mesh_min_nm)
+        return float(rule.screening_interface_factor) * ls_nm
+
     def band_alignment(self) -> "Dict[str, Tuple[float, float]]":
         """EQUILIBRIUM band alignment of the semiconductor heterostack (audit S1-9, wave-7 2026-11-02):
         {region: (Phi_c_V, psi_neutral_V)} for 'semi' and every extra semiconductor.
@@ -301,17 +364,24 @@ class Stacked3DSpec:
         neutral default for a heterojunction band offset)."""
         from dynameta.carriers.physics_equilibrium import V_T as _VT, effective_dos_m3, invert_F12
 
-        def _phi_c0(n_bg, m):
+        def _phi_c0(n_bg, m, band=None):
+            kb = PE.kane_band_of(band)
+            if kb is not None and float(kb.alpha_per_eV) != 0.0:     # v0.16: the band's own closure
+                from dynameta.carriers import kane_band as _KB
+                return -_KB.invert_kane_closure(float(n_bg) / effective_dos_m3(float(kb.m0_kg)),
+                                                _KB.kane_b(kb.alpha_per_eV, PE.T_REF)) * _VT
+            if kb is not None:
+                m = kb.m0_kg
             return -invert_F12(float(n_bg) / effective_dos_m3(float(m))) * _VT
 
-        phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg)
+        phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg, self.band_of("semi"))
         out = {"semi": (phi0_semi, 0.0)}
         for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
             # the ONE Anderson-rule implementation, same-material rule included (v0.14.0; same operation
             # order -> bit-identical: a same-material region gets d_chi = 0.0 exactly as the {0.0, 0.0}
             # this method used to pass)
             out[nm] = HJ.anderson_alignment(
-                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))},
+                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm), self.band_of(nm))},
                 {"semi": self.chi_semi_eV, nm: chi}, "semi",
                 materials={"semi": self.semi_material, nm: mat},
                 hint="Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
@@ -361,10 +431,38 @@ class Stacked3DSpec:
                                   "suppress recombination)")
             if not (self.mobility_p_m2Vs > 0.0):
                 raise ValueError("bipolar_dd 3D spec requires mobility_p_m2Vs > 0 (hole mobility)")
-        elif self.srh_traps or self.srh_trap_energy_eV or self.interface_traps is not None:
+        elif self.srh_traps or self.srh_trap_energy_eV or (self.interface_traps is not None
+                                                            and not self._film_traps()):
             raise ValueError("Stacked3DSpec: srh_traps / srh_trap_energy_eV / interface_traps need "
-                             "physics='bipolar_dd' (the trap occupancy uses n AND p); got physics={!r}"
+                             "physics='bipolar_dd' (the trap occupancy uses n AND p); got physics={!r}. An "
+                             "equilibrium film takes physics_traps.FilmInterfaceTraps (v0.16)."
                              .format(self.physics))
+        if self._film_traps() and self.physics != "equilibrium":
+            raise ValueError("Stacked3DSpec: physics_traps.FilmInterfaceTraps (Fermi-Dirac occupancy at the "
+                             "film's Fermi level) need physics='equilibrium'; got {!r} (a bipolar region takes "
+                             "InterfaceTraps)".format(self.physics))
+        # v0.16: fixed charges and the gate work function
+        if self.fixed_charge is not None or self.bulk_charge is not None:
+            from dynameta.carriers.devsim_layered import _charge_map   # the ONE validator (shared with 2-D)
+            self.fixed_charge = _charge_map(self.fixed_charge, "fixed_charge", "Q_C_m2",
+                                            owner="Stacked3DSpec") or None
+            self.bulk_charge = _charge_map(self.bulk_charge, "bulk_charge", "rho_C_m3",
+                                           owner="Stacked3DSpec") or None
+        if self.gate_work_function_eV is not None:
+            wf = self.gate_work_function_eV
+            if isinstance(wf, bool) or not isinstance(wf, (int, float, np.floating)) \
+                    or not np.isfinite(float(wf)) or not float(wf) > 0.0:
+                raise ValueError("Stacked3DSpec.gate_work_function_eV must be a finite number > 0 (eV), got "
+                                 "{!r}".format(wf))
+            if self.physics != "equilibrium":
+                raise NotImplementedError(
+                    "Stacked3DSpec.gate_work_function_eV with physics={!r}: the 3-D {} body refers its gate to "
+                    "a neutral level that is not wired for a work function (v0.16 wires physics='equilibrium'). "
+                    "Use the 2-D LayeredDevsimBuilder, whose gates take Electrode.work_function_eV for every "
+                    "physics.".format(self.physics, self.physics))
+            if self.chi_semi_eV is None:
+                raise ValueError("Stacked3DSpec.gate_work_function_eV needs chi_semi_eV, the body "
+                                 "semiconductor's electron affinity (W_s = chi + (E_c - E_F))")
         if self.bipolar_options is not None:
             from dynameta.carriers.bipolar_options import BipolarOptions
             if not isinstance(self.bipolar_options, BipolarOptions):
@@ -414,8 +512,72 @@ class Stacked3DSpec:
         if self.heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("Stacked3DSpec.heterointerface must be 'auto', 'thermionic' or 'continuous'; "
                              "got {!r}".format(self.heterointerface))
+        if self.bands is not None:
+            self._check_bands()
+        if self.density_gradient is not None:            # v0.16
+            from dynameta.carriers.density_gradient import EquilibriumDensityGradient
+            if not isinstance(self.density_gradient, EquilibriumDensityGradient):
+                raise ValueError("Stacked3DSpec.density_gradient must be a density_gradient."
+                                 "EquilibriumDensityGradient, got {!r}".format(self.density_gradient))
+            if self.physics != "equilibrium" or self.extra_semiconductors:
+                raise NotImplementedError(
+                    "Stacked3DSpec.density_gradient: the in-Newton density gradient of the 3-D builder is wired for "
+                    "physics='equilibrium' on a single semiconductor ('semi'); got physics={!r} with {} extra "
+                    "semiconductor(s)".format(self.physics, len(self.extra_semiconductors)))
+            if self.band_of("semi") is not None:
+                raise NotImplementedError("Stacked3DSpec.density_gradient: a Kane band on 'semi' is not supported "
+                                          "(physics_equilibrium_dg: parabolic closure only)")
         if self.extra_semiconductors:
             self.band_alignment()        # audit S1-9: a heterojunction without affinities fails HERE, loudly
+
+    def _check_bands(self) -> None:
+        """v0.16: validate `bands` and set each banded region's DOS mass to its band's (module field doc)."""
+        if not isinstance(self.bands, dict):
+            raise TypeError("Stacked3DSpec.bands must be a dict {{region name: KaneBand}}, got {!r}".format(
+                type(self.bands).__name__))
+        names = ["semi"] + [e[0] for e in self.extra_semiconductor_entries()]
+        for k, v in self.bands.items():
+            if k not in names:
+                raise ValueError("Stacked3DSpec.bands: {!r} is not a semiconductor region of the spec ({})".format(
+                    k, names))
+            try:
+                ok = PE.kane_band_of(v) is not None
+            except TypeError:
+                ok = False
+            if not ok:
+                raise TypeError("Stacked3DSpec.bands[{!r}] must be a materials.KaneBand, got {!r}".format(k, v))
+        if self.bands and self.physics != "equilibrium":
+            raise NotImplementedError(
+                "Stacked3DSpec.bands with physics={!r}: the Kane band is implemented for the EQUILIBRIUM closure "
+                "only (the drift-diffusion / bipolar transport is written for a parabolic band).".format(self.physics))
+
+        def _dos(kb, nbg, given, default, what):
+            m = float(kb.dos_mass_kg(float(nbg)))
+            if given is not None and float(given) not in (m, default):
+                raise ValueError("Stacked3DSpec.bands: {} = {!r} kg disagrees with its KaneBand's DOS mass at n_bg "
+                                 "({!r} kg); the band defines it -- leave the field at its default".format(
+                                     what, given, m))
+            return m
+        kb = self.band_of("semi")
+        if kb is not None:
+            default = next(f.default for f in fields(self) if f.name == "dos_mass_kg")
+            self.dos_mass_kg = _dos(kb, self.n_bg_m3, self.dos_mass_kg, default, "dos_mass_kg")
+        if any(self.band_of(e[0]) is not None for e in self.extra_semiconductor_entries()):
+            new = []
+            for e in self.extra_semiconductor_entries():
+                kb = self.band_of(e[0])
+                new.append(e if kb is None else e[:6] + (_dos(kb, e[4], e[6], None, "extra_semiconductors "
+                                                                                  "'{}' dos_mass_kg".format(e[0])),))
+            self.extra_semiconductors = new
+
+    def _film_traps(self) -> bool:
+        """True when interface_traps is a physics_traps.FilmInterfaceTraps or a non-empty sequence of them."""
+        it = self.interface_traps
+        if it is None:
+            return False
+        specs = [it] if isinstance(it, PT.FilmInterfaceTraps) else (list(it) if isinstance(it, (list, tuple))
+                                                                     else [it])
+        return bool(specs) and all(isinstance(s, PT.FilmInterfaceTraps) for s in specs)
 
     def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
         """The full ordered stack from the body up to the gate as
@@ -438,7 +600,7 @@ class Stacked3DSpec:
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
                      interface_traps=None, extended_precision: Optional[bool] = None,
                      mesher: str = "tensor", on_chi_temperature: str = "refuse",
-                     exact_geometry=True) -> "Stacked3DSpec":
+                     exact_geometry=True, fixed_charge=None, bulk_charge=None) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -464,7 +626,15 @@ class Stacked3DSpec:
 
         extended_precision (v0.15, decision 37): None (default) follows Design.carriers.extended_precision
         (unstated = off); an explicit bool wins, with ONE AdvisoryWarning when it contradicts a stated
-        design value (extended_precision.resolve_design_flag; geometry.specs.CarrierSpec)."""
+        design value (extended_precision.resolve_design_flag; geometry.specs.CarrierSpec).
+
+        v0.16: the DOS mass of each semiconductor is read through TransportModel.dos_mass_at_bg
+        (the same float as before; one AdvisoryWarning per material whose callable is density-dependent).
+        The gate electrode's Electrode.work_function_eV becomes gate_work_function_eV (and chi_semi_eV the body
+        material's chi_eV); a work function on any OTHER electrode raises (the 3-D spec models the gate and the
+        body contact only). fixed_charge / bulk_charge are keyed by DESIGN LAYER names (a 2-tuple of layer
+        names for an interface, a dielectric layer name for a bulk charge) and mapped onto the spec's regions;
+        a layer the spec does not mesh raises."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
         extended_precision = XP.resolve_design_flag(design, extended_precision, "Stacked3DSpec.from_design")
         layers = design.stack.layers
@@ -556,7 +726,7 @@ class Stacked3DSpec:
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
                                 float(tri.eps_static), float(tri.n_bg_m3),
                                 (float(chi_i) if chi_i is not None else None),
-                                float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
+                                tri.dos_mass_at_bg("Stacked3DSpec.from_design layer '{}'".format(Li.name))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
@@ -619,19 +789,56 @@ class Stacked3DSpec:
                 btbt=_btbt_for_material(getattr(tr, "btbt", None), tr))
         elif tr.physics == "drift_diffusion" and getattr(tr, "carrier_statistics", None) is not None:
             bip = dict(carrier_statistics=tr.carrier_statistics)    # v0.15: the consistent FD transport
+        # v0.16: the gate's work function, and fixed charges keyed by Design layer names
+        wf_other = [e.name for e in design.electrodes
+                    if getattr(e, "work_function_eV", None) is not None and e is not gate_e]
+        if wf_other:
+            raise ValueError(
+                "from_design: electrode(s) {} carry work_function_eV but the 3-D spec models only the gate "
+                "electrode ('{}') and the body contact; their work function would be dropped. Remove it, or use "
+                "the 2-D LayeredDevsimBuilder, which models every gate.".format(wf_other, gate_name))
+        gate_wf = getattr(gate_e, "work_function_eV", None) if gate_e is not None else None
+        chi_semi = float(band.chi_eV) if band.chi_eV is not None else None
+        layer_region = {semi_L.name: "semi", ox_L.name: "oxide"}
+        layer_region.update({layers[i].name: layers[i].name for i in extra_idxs})
+        layer_region.update({L.name: "diel{}".format(k + 1) for k, L in enumerate(diel_layers[1:])})
+
+        def _region_of(name, what):
+            if name not in layer_region:
+                raise ValueError("from_design({}=...): layer {!r} is not meshed by the 3-D spec (it meshes {})"
+                                 .format(what, name, sorted(layer_region)))
+            return layer_region[name]
+        fc = None
+        if fixed_charge:
+            fc = {}
+            for key, q in dict(fixed_charge).items():
+                if not (isinstance(key, tuple) and len(key) == 2):
+                    raise TypeError("from_design(fixed_charge=...): keys are 2-tuples of Design layer names, got "
+                                    "{!r}".format(key))
+                fc[tuple(_region_of(k, "fixed_charge") for k in key)] = q
+        bc = ({_region_of(k, "bulk_charge"): v for k, v in dict(bulk_charge).items()} if bulk_charge else None)
+        # v0.16: every semiconductor layer whose TransportModel carries a KaneBand keeps it (its DOS mass
+        # above is already the band's, TransportModel.dos_mass_at_bg)
+        bands = {layer_region[layers[i].name]: PE.kane_band_of(design.materials.get(layers[i].background_material)
+                                                              .transport.band)
+                 for i in semi_idxs
+                 if PE.kane_band_of(design.materials.get(layers[i].background_material).transport.band) is not None}
+        bands = bands or None
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
                     n_bg_m3=n_bg, eps_semi=tr.eps_static, eps_oxide=float(eps_ox),
-                    dos_mass_kg=float(tr.dos_mass_kg_of_n_m3(n_bg)), mobility_m2Vs=mob,
+                    dos_mass_kg=tr.dos_mass_at_bg("Stacked3DSpec.from_design layer '{}'".format(semi_L.name)),
+                    mobility_m2Vs=mob,
                     physics=tr.physics, gate_patch_frac=float(frac),
                     field_region_name=layers[gate_adj_idx].name,   # the gate-adjacent (accumulation) layer
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(band.chi_eV) if (extra_semis and band.chi_eV is not None) else None),
+                    chi_semi_eV=(chi_semi if (extra_semis or gate_wf is not None) else None),
                     interface_traps=interface_traps,
-                    extended_precision=bool(extended_precision), exact_geometry=exact_geometry, **bip)
+                    extended_precision=bool(extended_precision), exact_geometry=exact_geometry,
+                    gate_work_function_eV=gate_wf, fixed_charge=fc, bulk_charge=bc, bands=bands, **bip)
 
 
 def _dd_stats(spec) -> dict:
@@ -645,17 +852,23 @@ def _dd_stats(spec) -> dict:
 _KUHN_PERMS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
 
 
-def _graded_axis(breaks, refine, h_min, h_max, dist_min=1.0, dist_max=6.0) -> np.ndarray:
+def _graded_axis(breaks, refine, h_min, h_max, dist_min=1.0, dist_max=6.0, refine_h_min=None) -> np.ndarray:
     """A 1-D node axis through every breakpoint, sized like gmsh's Threshold field: h = h_min within
     dist_min of a refinement coordinate, linear to h_max at dist_max, h_max beyond (h_max everywhere when
     `refine` is empty). Each span between breakpoints gets ceil(int ds/h) cells placed at equal steps of
     int ds/h -- a smooth grading that hits the breakpoints exactly. Coordinates in NANOMETRES (breakpoints
-    are de-duplicated at 1e-9 nm)."""
+    are de-duplicated at 1e-9 nm). refine_h_min (optional, one per refinement coordinate): that plane's own
+    h_min (the size is then the smallest of the planes' Threshold rules); None = h_min for every plane (the
+    original rule, unchanged)."""
     b = np.unique(np.round(np.asarray(breaks, dtype=float), 9))
     out = [float(b[0])]
     for a0, a1 in zip(b[:-1], b[1:]):
         sg = np.linspace(a0, a1, 2001)
-        if len(refine):
+        if len(refine) and refine_h_min is not None:
+            hm = np.asarray(refine_h_min, dtype=float)[None, :]
+            d = np.abs(sg[:, None] - np.asarray(refine, dtype=float)[None, :])
+            h = np.min(np.clip(hm + (h_max - hm) * (d - dist_min) / (dist_max - dist_min), hm, h_max), axis=1)
+        elif len(refine):
             d = np.min(np.abs(sg[:, None] - np.asarray(refine, dtype=float)[None, :]), axis=1)
             h = np.clip(h_min + (h_max - h_min) * (d - dist_min) / (dist_max - dist_min), h_min, h_max)
         else:
@@ -882,7 +1095,7 @@ class Devsim3DEquilibrium:
                                               mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
         else:
             PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
-                                           eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
+                                           eps_static=s.eps_semi, **s.closure_kwargs("semi"))
         for (name, mat, role, eps) in self._mesh_regions:       # dielectric layers + dielectric inclusions
             if name == "semi":
                 continue                                         # the gated semiconductor, set above
@@ -899,7 +1112,7 @@ class Devsim3DEquilibrium:
                                                      mobility_m2Vs=s.mobility_m2Vs, **_dd_stats(s))
                 else:
                     PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
-                                                   eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
+                                                   eps_static=eps, **s.closure_kwargs(name))
             # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
         if s.extra_semiconductors:
             # audit S1-9 (wave-7, 2026-11-02): ALIGN THE BANDS. setup_semiconductor_region calibrates each
@@ -920,14 +1133,35 @@ class Devsim3DEquilibrium:
             PE.setup_interface(self.device, itf)
         if s.interface_traps is not None:
             # D1c: D_it on every semi/dielectric interface (the gate oxide, and the sidewalls of any
-            # dielectric inclusion touching the semiconductor)
+            # dielectric inclusion touching the semiconductor). v0.16: FilmInterfaceTraps (equilibrium) go
+            # on every SEMICONDUCTOR/dielectric interface (the gate oxide meets the gate-adjacent
+            # semiconductor, which is an extra region in a heterostack)
             diel = {name for (name, _m, role, _e) in self._mesh_regions if role == "dielectric"}
+            semis = ({name for (name, _m, role, _e) in self._mesh_regions if role == "semiconductor"} | {"semi"}
+                     if s._film_traps() else {"semi"})
             for (ifn, r0, r1) in self._iface_pairs:
-                if "semi" in (r0, r1) and (r0 in diel or r1 in diel):
+                if (r0 in semis or r1 in semis) and (r0 in diel or r1 in diel):
                     PT.install_interface_traps(self.device, ifn, s.interface_traps)
+        if s.fixed_charge or s.bulk_charge:                 # v0.16: the 2-D builder's wiring, shared
+            from dynameta.carriers.devsim_layered import install_fixed_charges
+            install_fixed_charges(self.device, s.fixed_charge or {}, s.bulk_charge or {},
+                                  pairs={frozenset((r0, r1)): ifn for (ifn, r0, r1) in self._iface_pairs},
+                                  roles={name: role for (name, _m, role, _e) in self._mesh_regions})
+        self._gate_offset_V = None
+        if s.gate_work_function_eV is not None:             # v0.16: W_s of the body at psi = 0
+            self._gate_offset_V = PE.work_function_offset_V(
+                s.gate_work_function_eV, s.chi_semi_eV,
+                float(ds.get_parameter(device=self.device, region="semi", name="Phi_c0")))
         self._hetero_ifaces = {}
         if s.extra_semiconductors and self._dd:
             self._wire_heterointerfaces()
+        self._dg_ready = False
+        if s.density_gradient is not None:                  # v0.16: opt-in; no call otherwise
+            from dynameta.carriers import physics_equilibrium_dg as EQDG
+            g = s.density_gradient
+            EQDG.setup_equilibrium_dg(
+                self.device, "semi", m_eff_kg=float(s.dos_mass_kg if g.m_eff_kg is None else g.m_eff_kg),
+                gamma=EQDG.EQUILIBRIUM_DG_GAMMA if g.gamma is None else float(g.gamma), u_floor_rel=g.u_floor_rel)
         for c in ds.get_contact_list(device=self.device):
             # the "body" contact is on the semiconductor; for unipolar DD it must also pin the
             # electron density (Electrons = N_D), for bipolar it pins Electrons AND Holes to their
@@ -1133,9 +1367,16 @@ class Devsim3DEquilibrium:
                 solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
                           max_iter=100, semiconductor_regions=semis)
         else:
-            ds.set_parameter(device=self.device, name="gate_bias", value=vg)
-            XP.solve(type="dc", solver_type="direct", absolute_error=1e10,
-                      relative_error=1e-5, maximum_iterations=80)
+            # v0.16: a gate work function applies V_gate + its offset (equilibrium only, Stacked3DSpec)
+            off = getattr(self, "_gate_offset_V", None)
+            target = vg if off is None else vg + off
+            if self.spec.density_gradient is not None and "QSqrtN" in ds.get_node_model_list(
+                    device=self.device, region="semi"):
+                self._solve_dg(target)                          # v0.16: opt-in
+            else:
+                ds.set_parameter(device=self.device, name="gate_bias", value=target)
+                XP.solve(type="dc", solver_type="direct", absolute_error=1e10,
+                          relative_error=1e-5, maximum_iterations=80)
         # emit the GATE-ADJACENT semiconductor (where accumulation forms) -- 'semi' for a single
         # semiconductor, the last extra semiconductor for a heterostack.
         fdr = self._field_dev_region
@@ -1187,6 +1428,33 @@ class Devsim3DEquilibrium:
             temperature_K=HJ.temperature_of_V_t(HJ.region_V_t(self.device, fdr)), regions={rname: reg},
             n_bg_by_region={rname: self.spec.semiconductor_nbg(fdr)},
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m), extras=extras)
+
+    def _solve_dg(self, target: float) -> None:
+        """v0.16: equilibrium solve of a 'semi' carrying the density gradient. First solve: the classical
+        solve at b = 0 straight at the target gate potential (as the classical path does), then the wall-shaped
+        seed and the b ramp (physics_equilibrium_dg.DG_RAMP). Later solves: an adaptive gate ramp from the last
+        converged gate potential (physics_equilibrium_dg.adaptive_continuation, 0.25 V steps, halved on failure)."""
+        from dynameta.carriers import physics_equilibrium_dg as EQDG
+
+        def _solve():
+            XP.solve(type="dc", solver_type="direct", absolute_error=1e10, relative_error=1e-5,
+                     maximum_iterations=80)
+
+        if not self._dg_ready:
+            ds.set_parameter(device=self.device, name="gate_bias", value=target)
+            EQDG.set_equilibrium_dg_fraction(self.device, "semi", 0.0)
+            EQDG.seed_equilibrium_dg(self.device, "semi")
+            _solve()
+            EQDG.set_equilibrium_dg_fraction(self.device, "semi", EQDG.DG_RAMP[0])
+            EQDG.seed_equilibrium_dg(self.device, "semi")
+            EQDG.adaptive_continuation(lambda f: EQDG.set_equilibrium_dg_fraction(self.device, "semi", f),
+                                       EQDG.DG_RAMP[0], 1.0, _solve, step=EQDG.DG_RAMP[0])
+            self._dg_ready = True
+            self._dg_last_gate = target
+            return
+        EQDG.adaptive_continuation(lambda v: ds.set_parameter(device=self.device, name="gate_bias", value=v),
+                                   float(self._dg_last_gate), target, _solve, step=0.25)
+        self._dg_last_gate = target
 
     def teardown(self) -> None:
         from dynameta.carriers import eq_registry as _R
@@ -1282,7 +1550,7 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", semi_ox)
         ft = gmsh.model.mesh.field.add("Threshold")
         gmsh.model.mesh.field.setNumber(ft, "InField", fd)
-        gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.mesh_min_nm)
+        gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.wall_mesh_min_nm())   # DG: the wall size
         gmsh.model.mesh.field.setNumber(ft, "SizeMax", s.mesh_max_nm)
         gmsh.model.mesh.field.setNumber(ft, "DistMin", 1.0)
         gmsh.model.mesh.field.setNumber(ft, "DistMax", 6.0)
@@ -1339,6 +1607,10 @@ class Devsim3DEquilibrium:
         if patterned:
             for v in (Lnm / 2 - ph, Lnm / 2 + ph):
                 xb.append(v); yb.append(v); xr.append(v); yr.append(v)
+        # density gradient: every semi/dielectric wall plane gets the wall size (Stacked3DSpec.wall_mesh_min_nm);
+        # without it every plane keeps mesh_min_nm (the original axes, unchanged)
+        hw = s.wall_mesh_min_nm()
+        xh, yh = [], []
         inc_geo = []
         for inc in s.inclusions:
             if inc.in_layer not in z_of:
@@ -1348,10 +1620,19 @@ class Devsim3DEquilibrium:
             x0, y0 = Lnm / 2 - wx / 2, Lnm / 2 - wy / 2
             inc_geo.append((inc, x0, x0 + wx, y0, y0 + wy) + tuple(z_of[inc.in_layer]))
             xb += [x0, x0 + wx]; yb += [y0, y0 + wy]; xr += [x0, x0 + wx]; yr += [y0, y0 + wy]
+            wall = inc.in_layer == "semi" and inc.role == "dielectric"
+            xh += [hw if wall else s.mesh_min_nm] * 2
+            yh += [hw if wall else s.mesh_min_nm] * 2
         zb = [0.0] + [L[4] for L in stack]
         zr = [stack[k][3] for k in range(1, len(stack))
               if stack[k - 1][2] == "semiconductor" and stack[k][2] == "dielectric"][-1:]
-        ax = [_graded_axis(b, r, s.mesh_min_nm, s.mesh_max_nm) for b, r in ((xb, xr), (yb, yr), (zb, zr))]
+        if hw == float(s.mesh_min_nm):                          # no DG, or a DG mesh fine enough as given
+            ax = [_graded_axis(b, r, s.mesh_min_nm, s.mesh_max_nm) for b, r in ((xb, xr), (yb, yr), (zb, zr))]
+        else:                                                   # (a single semiconductor: zr is its gate wall)
+            xh = ([s.mesh_min_nm] * (len(xr) - len(xh))) + xh   # patch edges first, then the inclusions
+            yh = ([s.mesh_min_nm] * (len(yr) - len(yh))) + yh
+            ax = [_graded_axis(b, r, s.mesh_min_nm, s.mesh_max_nm, refine_h_min=h)
+                  for b, r, h in ((xb, xr, xh), (yb, yr, yh), (zb, zr, [hw] * len(zr)))]
         # the region of every box cell, by its centre (an inclusion footprint first, else the layer)
         cx, cy, cz = [0.5 * (a[1:] + a[:-1]) for a in ax]
         names = [L[0] for L in stack] + [inc.name for inc in s.inclusions]
@@ -1509,7 +1790,7 @@ class Devsim3DEquilibrium:
             gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", semi_ox)
             ft = gmsh.model.mesh.field.add("Threshold")
             gmsh.model.mesh.field.setNumber(ft, "InField", fd)
-            gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.mesh_min_nm)
+            gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.wall_mesh_min_nm())   # DG: the wall size
             gmsh.model.mesh.field.setNumber(ft, "SizeMax", s.mesh_max_nm)
             gmsh.model.mesh.field.setNumber(ft, "DistMin", 1.0)
             gmsh.model.mesh.field.setNumber(ft, "DistMax", 6.0)

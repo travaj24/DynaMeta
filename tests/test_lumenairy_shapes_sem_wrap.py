@@ -255,9 +255,17 @@ def test_li_on_analytic_shapes_routes_and_converges_on_tm_metal_lines():
     ref = make_lumenairy_pmm_solver(degree=32, n_orders=21)(lines, None, {}, LAM, 1 + 0j,
                                                               1.5 + 0j).R
     err = {}
+    from dynameta.warning_types import AdvisoryWarning
     for form in ("li", "laurent"):
-        err[form] = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation=form)(
-            lines, None, {}, LAM, 1 + 0j, 1.5 + 0j).R - ref) for n in (8, 16, 32)]
+        with warnings.catch_warnings():
+            # v0.16: an explicit 'laurent' on TM metal lines emits the bridge's AdvisoryWarning
+            # (once per solver); that is the point of comparing it here
+            warnings.simplefilter("ignore", AdvisoryWarning)
+            err[form] = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation=form)(
+                lines, None, {}, LAM, 1 + 0j, 1.5 + 0j).R - ref) for n in (8, 16, 32)]
+    with pytest.warns(AdvisoryWarning, match="formulation='laurent'"):
+        make_lumenairy_rcwa_solver(n_orders=8, formulation="laurent")(
+            lines, None, {}, LAM, 1 + 0j, 1.5 + 0j)
     assert err["li"][0] > err["li"][1] > err["li"][2], err
     assert err["li"][2] < 6.0e-3, err                        # measured 4.86e-3
     assert err["laurent"][2] > 5.0 * err["li"][2], err       # measured 3.04e-2 (6.3x)
@@ -287,13 +295,13 @@ def test_shapes_absorption_keeps_analytic_layers_and_matches_an_area_raster(monk
     disk = (370e-9, 250e-9, 90e-9)
     d = _design([Inclusion(Rectangle(*rect), "hi"), Inclusion(Circle(*disk), "hi")])
     kinds = []
-    real = rcwa_backend.design_to_rcwa_stack
+    real = rcwa_backend._build_rcwa_stack          # v0.16: the solver builds through this
 
     def spy(*a, **k):
         stk, names = real(*a, **k)
         kinds.append([L.kind for L in stk.layers])
         return stk, names
-    monkeypatch.setattr(rcwa_backend, "design_to_rcwa_stack", spy)
+    monkeypatch.setattr(rcwa_backend, "_build_rcwa_stack", spy)
     r = make_lumenairy_rcwa_solver(n_orders=5, absorption=True)(d, None, {}, LAM, 1 + 0j, 1.5 + 0j)
     assert kinds == [["shapes"]]
     assert r.per_region_absorption["g"] == pytest.approx(r.A_independent, abs=1e-15)
@@ -304,7 +312,8 @@ def test_shapes_absorption_keeps_analytic_layers_and_matches_an_area_raster(monk
                        n_orders=5, n_orders_y=5)
     st.add_layer(200e-9, shapes=[
         dict(shape="rectangle", center=rect[:2], size=rect[2:], eps=eh),
-        dict(shape="disk", center=disk[:2], radius=disk[2], eps=eh)], eps_background=eb)
+        dict(shape="disk", center=disk[:2], radius=disk[2], eps=eh)], eps_background=eb,
+        formulation="laurent")
     st.set_source(LAM, theta=np.deg2rad(11.0), phi=0.0)
     raw = float(np.asarray(st.solve(retain_internal=True).layer_absorption(return_raw=True))[1, 0])
     assert abs(raw - r.A_independent) / r.A_independent < 3.0e-3          # measured 1.5e-3
@@ -316,7 +325,9 @@ def test_shapes_absorption_keeps_analytic_layers_and_matches_an_area_raster(monk
     for S in (128, 512):
         st = lum.RCWAStack(P, period_y=P, n_superstrate=1.0 + 0j, n_substrate=1.5 + 0j,
                            n_orders=5, n_orders_y=5)
-        st.add_layer(200e-9, eps_cell=_area_cell(S, inside, eh, eb))
+        # the direct rule NAMED (the oracle's premise): lumenairy 5.51's own default, 'auto', resolves
+        # a 2-D eps_cell to 'li', which made this oracle a different discretization (2.8e-3 off)
+        st.add_layer(200e-9, eps_cell=_area_cell(S, inside, eh, eb), formulation="laurent")
         st.set_source(LAM, theta=np.deg2rad(11.0), phi=0.0)
         # (2, n_layers): row 1 = incident E_y (the bridge's _pol_row for 'y')
         a_ref = float(np.asarray(st.solve(retain_internal=True).layer_absorption())[1, 0])
@@ -359,12 +370,22 @@ def test_default_raster_lattice_does_not_jump_at_high_n_orders():
     def err(n, **kw):
         return abs(make_lumenairy_rcwa_solver(n_orders=n, inclusion_model="raster", **kw)(
             *args).R - ref)
-    new = [err(n) for n in (16, 32, 48)]
-    old = [err(n, cell_samples=128) for n in (16, 32, 48)]
+    # the POINT raster's lattice history (raster_sampling='point' since v0.16, where the
+    # area-weighted node-lattice raster became the default)
+    new = [err(n, raster_sampling="point") for n in (16, 32, 48)]
+    old = [err(n, raster_sampling="point", cell_samples=128) for n in (16, 32, 48)]
     assert new[0] > new[1] > new[2], new                   # measured 4.8e-5 > 1.7e-5 > 8.3e-6
     assert new[2] < 2e-5, new
     assert old[1] > 50.0 * new[1], (old, new)              # the old lattice's jump (4.6e-3)
     assert new[0] == old[0]                                # N <= 16: byte-identical lattices
+    # v0.16 default (area raster, S >= 8192 on a 1-D stack): exact width on ANY lattice, so the
+    # odd lattice no longer jumps either (cell_samples=128 -> S 128 / 129 / 193: 2.0e-4 / 1.1e-4
+    # / 5.0e-5, monotone); the default sits below the point raster at every N (measured 3.5e-5 /
+    # 4.5e-6 / 1.4e-6)
+    area = [err(n) for n in (16, 32, 48)]
+    assert area[0] > area[1] > area[2] and area[2] < 3e-6, area
+    area_odd = [err(n, cell_samples=128) for n in (16, 32, 48)]
+    assert area_odd[0] > area_odd[1] > area_odd[2], area_odd
     # the analytic path (the 'auto' default here) converges monotonically below the raster
     ana = [abs(make_lumenairy_rcwa_solver(n_orders=n)(*args).R - ref) for n in (16, 32, 48)]
     assert ana[0] > ana[1] > ana[2] and ana[2] < 3e-6, ana  # measured 3.5e-5 / 4.5e-6 / 1.3e-6

@@ -305,12 +305,12 @@ def test_tetrahedron_pieces_partition_every_tet():
     assert np.any(sg < 0) and np.min((us * L).sum(axis=1) / 3.0 / V) >= 1.0 - 1e-12
     corner = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]], float)
     sg, us, L = G.tetrahedron_dual_pieces(corner)
-    assert (sg * L).sum() / 3.0 == pytest.approx(1.0 / 6.0, rel=1e-14)
-    assert (us * L).sum() / 3.0 == pytest.approx(2.0 / 6.0, rel=1e-14)
+    assert (sg * L).sum() / 3.0 == pytest.approx(1.0 / 6.0, rel=1e-14, abs=0)
+    assert (us * L).sum() / 3.0 == pytest.approx(2.0 / 6.0, rel=1e-14, abs=0)
     P, T = five_tet_lattice(1)
     sg, us, L = G.tetrahedron_dual_pieces(P[T])
-    assert (sg * L).sum() / 3.0 == pytest.approx(1.0, rel=1e-14)
-    assert (us * L).sum() / 3.0 == pytest.approx(5.0 / 3.0, rel=1e-14)
+    assert (sg * L).sum() / 3.0 == pytest.approx(1.0, rel=1e-14, abs=0)
+    assert (us * L).sum() / 3.0 == pytest.approx(5.0 / 3.0, rel=1e-14, abs=0)
 
 
 def test_interior_duals_are_the_voronoi_cells():
@@ -402,7 +402,7 @@ def test_devsim_volume_defect_and_exact_partition():
         # couples (-0.0295 L^2), the obtuse triangle 1 couple (-0.758 L) and 2 node volumes (MEASURED)
         assert rep.has_negatives == (name in ("gv_corner", "gv_obtuse"))
         assert [x.category for x in w] == ([UnreliableResultWarning] if rep.has_negatives else [])
-        assert rep.devsim_volume_ratio == pytest.approx(dv[0], rel=1e-14) and rep.applied
+        assert rep.devsim_volume_ratio == pytest.approx(dv[0], rel=1e-14, abs=0) and rep.applied
         for x in _volume_identities(name, "r", Vt):
             assert abs(x - 1.0) < 1e-13, (name, x)
         assert G.measure_dual_geometry(name, "r").devsim_volume_ratio == pytest.approx(1.0, abs=1e-13)
@@ -453,7 +453,7 @@ def test_well_centred_meshes_unchanged_to_round_off():
             _drop_all()
         out[tag] = float(np.max(np.abs(res[0][1] - res[1][1])))
         assert out[tag] < 1e-13
-        assert res[0][0][1] == pytest.approx(res[1][0][1], rel=1e-13)
+        assert res[0][0][1] == pytest.approx(res[1][0][1], rel=1e-13, abs=0)
     print("MEASURED well-centred: geometry change / (eps h^k), potential change [V]:", out)
 
 
@@ -620,7 +620,7 @@ def test_negative_policies_raise_warn_clip():
     assert 2.0 * elv("np_c", "r", "ElementNodeVolume").sum() / Vt == pytest.approx(1.0, abs=1e-13)
     neg_ec = exact_ec < -1e-9 * L
     assert rc.clipped_couple_fraction == pytest.approx(np.abs(exact_ec[neg_ec]).sum() / np.abs(exact_ec).sum(),
-                                                       rel=1e-12)
+                                                       rel=1e-12, abs=0)
     assert rc.clipped_volume_fraction == pytest.approx(-exact_nv[exact_nv < 0].sum() / Vt, rel=1e-12)
     assert nvc.sum() / Vt == pytest.approx(1.0 + rc.clipped_volume_fraction, rel=1e-12)
     print("MEASURED random square: {} neg couples (worst {:.3g} L), {} neg volumes (worst {:.3g} h^2); clip "
@@ -651,7 +651,7 @@ def test_refusals_and_one_d():
     nv0 = nv("rf_1", "r")
     rep = G.apply_exact_geometry("rf_1", "r")
     assert rep.dimension == 1 and rep.applied and np.array_equal(nv("rf_1", "r"), nv0)
-    assert rep.true_volume == pytest.approx(1.0, rel=1e-14)
+    assert rep.true_volume == pytest.approx(1.0, rel=1e-14, abs=0)
 
 
 def test_element_field_and_element_volume_consumers():
@@ -761,4 +761,4 @@ def test_correct_device_geometry_policies():
     assert len(w) == 1 and "region 'b'" in str(w[0].message)
     assert set(reps) == set(R) and all(rp.written for rp in reps.values())
     for r, T in R.items():
-        assert nv("cd_r", r).sum() == pytest.approx(_true_volume(P, T).sum(), rel=1e-13)
+        assert nv("cd_r", r).sum() == pytest.approx(_true_volume(P, T).sum(), rel=1e-13, abs=0)

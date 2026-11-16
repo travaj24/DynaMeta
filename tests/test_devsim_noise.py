@@ -89,7 +89,7 @@ def test_johnson_unipolar_3d():
     r, G = _johnson(V.unipolar_3d_resistor, 4e14)
     assert np.max(np.abs(r - 1)) < 1e-9
     sigma = 1.602176634e-19 * 4e26 * 0.004                     # q n mu of the bar (n_bg, mobility)
-    assert G == pytest.approx(sigma * (80e-9 * 80e-9) / 200e-9, rel=1e-9)     # MEASURED -2.2e-16
+    assert G == pytest.approx(sigma * (80e-9 * 80e-9) / 200e-9, rel=1e-9, abs=0)     # MEASURED -2.2e-16
 
 
 # =====================================================================================================
@@ -256,10 +256,16 @@ def test_fdt_layered_metasurface_2d():
     |S/4kTReY - 1| <= 1.3e-11 at Vg = 0 (flat band: uniform n, g cancels) and <= 3.7e-5 at Vg = +2 V
     (degenerate accumulation: the FD g-factor SG edge flux is Nyquist-consistent only to O(h^2) -- the
     documented approximation of the degenerate diffusion source)."""
-    r0, ReY, byr = V.gate_g_layered(0.0)
+    # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
+    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg,
+    # so building it warns once
+    from dynameta.warning_types import AdvisoryWarning
+    with pytest.warns(AdvisoryWarning, match="density-dependent"):
+        r0, ReY, byr = V.gate_g_layered(0.0)
     assert np.max(np.abs(r0 - 1)) < 1e-9
     assert ReY.max() / ReY.min() > 1e5 and set(byr) == {"ito"}
-    r2, _, _ = V.gate_g_layered(2.0)
+    with pytest.warns(AdvisoryWarning, match="density-dependent"):
+        r2, _, _ = V.gate_g_layered(2.0)
     assert np.max(np.abs(r2 - 1)) < 1e-3
 
 

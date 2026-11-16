@@ -53,6 +53,23 @@ import numpy as np
 
 from dynameta.constants import SOLVER_TIME_CONVENTION
 
+# EpsField.voxel_bounds_u: largest relative spread (max - min) / mean of an axis's spacings still taken as
+# uniform. A linspace axis, also after the bridge's affine remap and a unit change, sits ~1e-12 or below.
+AXIS_UNIFORM_RTOL = 1e-9
+
+
+def axis_spacing_spread(axis) -> float:
+    """(max - min) / |mean| of the spacings of a 1-D axis; 0.0 for fewer than three points (a one- or
+    two-point axis is uniform by definition) and inf for a zero mean spacing."""
+    a = np.asarray(axis, dtype=np.float64).ravel()
+    if a.size < 3:
+        return 0.0
+    d = np.diff(a)
+    m = abs(float(np.mean(d)))
+    if m == 0.0:
+        return float("inf")
+    return float((np.max(d) - np.min(d)) / m)
+
 
 @dataclass
 class EpsField:
@@ -77,9 +94,27 @@ class EpsField:
 
     def voxel_bounds_u(self) -> Tuple[Tuple[float, float, float],
                                         Tuple[float, float, float]]:
-        """(start, end) in (x, y, z) target units for a VoxelCoefficient."""
+        """(start, end) in (x, y, z) target units for a VoxelCoefficient.
+
+        A VoxelCoefficient is given only these two corners and places the values on UNIFORM axes between
+        them, so a non-uniform axis would be misread silently (a native-z carrier grid, solve(grid_n_z=None),
+        graded to 0.0125 nm at an interface, would be stretched evenly over the layer). Every axis with three
+        or more points must therefore be uniform: a relative spread of its spacings,
+        (max - min) / mean, above AXIS_UNIFORM_RTOL raises ValueError."""
         if self.is_uniform:
             raise ValueError("uniform EpsField has no voxel bounds")
+        for label, ax in (("x", self.x_axis_u), ("y", self.y_axis_u), ("z", self.z_axis_u)):
+            spread = axis_spacing_spread(ax)
+            if spread > AXIS_UNIFORM_RTOL:
+                raise ValueError(
+                    "EpsField.voxel_bounds_u: the {} axis is NON-UNIFORM (relative spacing spread {:.3g} > "
+                    "{:.0e}; {} points). A voxel grid (the NGSolve VoxelCoefficient of the FEM optics) "
+                    "takes only its two end points and would place the values on a uniform axis, "
+                    "misplacing them silently. A non-uniform carrier z axis comes from "
+                    "LayeredDevsimBuilder.solve(grid_n_z=None) (native mesh lines, for the layered "
+                    "optics): for this region pass an integer grid_n_z (e.g. run_pipeline(..., "
+                    "carrier_solve_kwargs={{'grid_n_z': 32}})), or resample the field onto a uniform "
+                    "axis.".format(label, spread, AXIS_UNIFORM_RTOL, len(np.asarray(ax))))
         start = (float(self.x_axis_u[0]),  float(self.y_axis_u[0]),  float(self.z_axis_u[0]))
         end   = (float(self.x_axis_u[-1]), float(self.y_axis_u[-1]), float(self.z_axis_u[-1]))
         return start, end

@@ -80,7 +80,7 @@ def test_ingaas_lm_gap_matches_the_values_the_paper_quotes():
 
 def test_binary_rows_match_retyped_tables():
     for name, row in (("GaAs", GAAS), ("InAs", INAS), ("InP", INP)):
-        assert tm.VARSHNI_PARAMS[name] == pytest.approx(row, rel=1e-15)
+        assert tm.VARSHNI_PARAMS[name] == pytest.approx(row, rel=1e-15, abs=0)
         for T in (0.0, 77.0, 300.0, 400.0):
             assert abs(tm.varshni_eg_ev(T, name) - _varshni(T, *row)) < TOL_EV
     assert "InGaAs_LM" not in tm.VARSHNI_PARAMS          # an alloy has no Varshni row

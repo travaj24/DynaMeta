@@ -581,7 +581,7 @@ def test_nonmarkovian_lineshape():
     Lan = nonmarkovian_lineshape(f, g1, g2, w1)
     sel = np.abs(f) < 4 * g2
     assert np.max(np.abs(M.real[sel] - Lan[sel])) / Lan.max() < 1e-3      # Wiener-Khinchin
-    assert np.allclose(nonmarkovian_lineshape(f, g1, g2, 1.0), lorentzian_area(f, g1))  # Markovian
+    assert np.allclose(nonmarkovian_lineshape(f, g1, g2, 1.0), lorentzian_area(f, g1), atol=0)  # Markovian
     # model gain reduces to gain_per_m_slices (GS) at w1=1
     m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
     st = m.init_slices(4, 40e-3)
@@ -1003,10 +1003,10 @@ def test_detector_spont_spont_matches_olsson():
     S, B, Bo, R = 1.4e-16, 2.0e10, 1.0e12, 0.9
     v = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=2)
     olsson = 4.0 * R ** 2 * S ** 2 * (Bo - B / 2.0) * B
-    assert v["spont_spont"] == pytest.approx(olsson, rel=1e-12)
+    assert v["spont_spont"] == pytest.approx(olsson, rel=1e-12, abs=0)
     # single-pol: exactly half the two-pol variance
     v1 = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=1)
-    assert v1["spont_spont"] == pytest.approx(0.5 * olsson, rel=1e-12)
+    assert v1["spont_spont"] == pytest.approx(0.5 * olsson, rel=1e-12, abs=0)
 
 
 def test_langevin_exact_emit_telescopes_to_analytic_ase():
@@ -1029,8 +1029,8 @@ def test_langevin_exact_emit_telescopes_to_analytic_ase():
     assert abs(accumulated_over_analytic(3.0, 5, False) - 0.731) < 5e-3
     # factor limits: ->1 smoothly at a=0; matches expm1(x)/x
     assert float(_exact_emit_factor(0.0)) == 1.0
-    assert float(_exact_emit_factor(0.5)) == pytest.approx(np.expm1(0.5) / 0.5, rel=1e-14)
-    assert float(_exact_emit_factor(-0.3)) == pytest.approx(np.expm1(-0.3) / -0.3, rel=1e-14)
+    assert float(_exact_emit_factor(0.5)) == pytest.approx(np.expm1(0.5) / 0.5, rel=1e-14, abs=0)
+    assert float(_exact_emit_factor(-0.3)) == pytest.approx(np.expm1(-0.3) / -0.3, rel=1e-14, abs=0)
 
 
 def test_eh_split_excitonic_accessors_raise():

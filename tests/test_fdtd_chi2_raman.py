@@ -105,7 +105,7 @@ def test_cavity_design_formulas_worked_point():
     kappa, dw = Q_E ** 2 / M_E, 2.0 * np.pi * 2.0e13
     assert R == pytest.approx(0.56582, rel=1e-4)
     tau_p = cavity_photon_lifetime_s(L, n_c, R, R)
-    assert tau_p == pytest.approx(87.8e-15, rel=2e-3)
+    assert tau_p == pytest.approx(87.8e-15, rel=2e-3, abs=0)
     dN_th = threshold_inversion_m3(kappa, n_c, dw, L, R, R)
     assert dN_th == pytest.approx(8.994e23, rel=2e-3)
     s = FourLevelSystem(tau_32_s=1e-14, tau_21_s=5e-12, tau_10_s=5e-15, N_total_m3=1e25)

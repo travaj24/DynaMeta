@@ -105,7 +105,9 @@ def test_v17_v10_intersubband_gain_clamp_is_flagged_as_an_unreliable_result():
     p1, p2 = p1 / np.sqrt(np.sum(p1 ** 2) * h), p2 / np.sqrt(np.sum(p2 ** 2) * h)
     res = SubbandResult(energies_J=np.array([0.0, 0.95 * 1.602e-19]), psi=np.stack([p1, p2], 1),
                         z_m=z, sheet_density_m2=np.array([1e17, 5e17]))      # INVERTED
-    m = IntersubbandEffect(4.25, 0.225 * M_E, 1.1e14, 1.0e13)
+    # v0.16: a synthetic 2-state well is an incomplete set, so the f-sum advisory is silenced
+    # here; the gate is about the gain clamp's warning class.
+    m = IntersubbandEffect(4.25, 0.225 * M_E, 1.1e14, 1.0e13, fsum_check="off")
     with pytest.warns(UnreliableResultWarning, match="inverted population"):
         m.eps({"subband": res}, 1300e-9)
 

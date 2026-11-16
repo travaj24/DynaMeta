@@ -75,7 +75,7 @@ def test_quantum_potential_matches_a_quadratic_exactly_at_every_node():
         u = 1.0 + a * z + c * z ** 2
         lam = quantum_potential_V(z, u ** 2, MSTAR)
         b = HBAR ** 2 / (6.0 * MSTAR * Q)
-        assert np.allclose(lam, b * 2.0 * c / u, rtol=1e-8)
+        assert np.allclose(lam, b * 2.0 * c / u, rtol=1e-8, atol=0.0)
 
 
 def test_quantum_potential_rejects_a_non_monotonic_grid():
@@ -92,11 +92,11 @@ def test_c8_degeneracy_factor_shortens_l_q_and_defaults_to_the_boltzmann_limit()
     derivation. degeneracy_g=1 is the byte-identical off-switch."""
     from dynameta.carriers.einstein import g_einstein
     lq_b = dg_length_m(MSTAR)
-    assert lq_b == pytest.approx(1.184731e-9, rel=1e-6)               # the Boltzmann value
+    assert lq_b == pytest.approx(1.184731e-9, rel=1e-6, abs=0)               # the Boltzmann value
     assert dg_length_m(MSTAR, degeneracy_g=1.0) == lq_b               # explicit off-switch
-    assert dg_length_m(MSTAR, degeneracy_g=13.4) == pytest.approx(3.236438e-10, rel=1e-6)
+    assert dg_length_m(MSTAR, degeneracy_g=13.4) == pytest.approx(3.236438e-10, rel=1e-6, abs=0)
     for g in (6.8, 13.4):                                             # eta ~ 10 and ~ 20
-        assert lq_b / dg_length_m(MSTAR, degeneracy_g=g) == pytest.approx(np.sqrt(g), rel=1e-12)
+        assert lq_b / dg_length_m(MSTAR, degeneracy_g=g) == pytest.approx(np.sqrt(g), rel=1e-12, abs=0)
     assert 2.6 < lq_b / dg_length_m(MSTAR, degeneracy_g=6.8) < 3.7    # the reported 2.6-3.7x band
     # the factor is the repo's own g(n/N_c), not a magic constant
     assert dg_length_m(MSTAR, degeneracy_g=float(g_einstein(30.0))) < 0.5 * lq_b
@@ -132,7 +132,7 @@ def test_gamma_wall_is_the_exact_free_gas_wall_gamma():
     i_quad = quad(lambda t: (1.0 - t * t) / np.sqrt(t * t * np.log(t * t) - t * t + 1.0), 0.0, 1.0,
                   epsabs=1e-13, epsrel=1e-13, limit=400)[0]   # tighter -> quad's roundoff warning
     assert i_quad == pytest.approx(1.187207, abs=5e-7)                  # the doc's I = 1.187207
-    assert GAMMA_WALL == pytest.approx((3.0 * np.pi / 4.0) / i_quad ** 2, rel=1e-12)
+    assert GAMMA_WALL == pytest.approx((3.0 * np.pi / 4.0) / i_quad ** 2, rel=1e-12, abs=0)
     assert round(GAMMA_WALL, 4) == 1.6717                                 # the doc's quoted value
     exact = np.sqrt(np.pi) / (2.0 * np.sqrt(2.0))                         # 0.626657 c hbar/sqrt(m kT)
     c = 1e24
@@ -168,7 +168,7 @@ def test_dg_b_coefficient_and_guards():
     pytest.importorskip("devsim")
     from dynameta.carriers.physics_density_gradient import dg_b_coefficient, set_dg_gamma
     b = dg_b_coefficient(MSTAR, 1.0)
-    assert b == pytest.approx(HBAR ** 2 / (6.0 * MSTAR * Q), rel=1e-14)
+    assert b == pytest.approx(HBAR ** 2 / (6.0 * MSTAR * Q), rel=1e-14, abs=0)
     assert dg_b_coefficient(MSTAR, 0.0) == 0.0
     with pytest.raises(ValueError):
         dg_b_coefficient(-1.0)
@@ -463,13 +463,13 @@ def test_set_dg_gamma_legacy_pin_branch_still_co_ramps_and_refuses_a_bad_pin():
         setup_dg_insulator_wall(dev, "wall")
         b_full = dg_b_coefficient(_WB_MSTAR, 1.0)
         set_dg_gamma(dev, reg, 0.25)
-        assert ds.get_parameter(device=dev, region=reg, name="b_dg") == pytest.approx(0.25 * b_full)
+        assert ds.get_parameter(device=dev, region=reg, name="b_dg") == pytest.approx(0.25 * b_full, rel=1e-15, abs=0)
         assert "wall_lambda_pin" not in ds.get_parameter_list(device=dev)
         LW.install_legacy_hard_wall(dev, "wall", lambda_pin_factor=8.0)     # an old script's rows
         for frac in (0.05, 0.5, 1.0):
             set_dg_gamma(dev, reg, frac)
             assert ds.get_parameter(device=dev, name="wall_lambda_pin") == pytest.approx(
-                frac * 8.0 * V_T, rel=1e-12)
+                frac * 8.0 * V_T, rel=1e-12, abs=0)
         ds.set_parameter(device=dev, name="wall_lambda_pin_full", value="not-a-number")
         with pytest.raises(ValueError):
             set_dg_gamma(dev, reg, 0.5)
@@ -650,3 +650,156 @@ def test_seed_dg_from_solution_without_walls_is_the_old_seed():
             ds.delete_mesh(mesh=mesh)
         except Exception:
             pass
+
+
+# ---- v0.16: hard_wall="both" and the thin-film guard of the frozen-potential closure ---------------------------
+
+def _flat_both(gamma, n_lq=100.0, nodes=4001, c=1e24):
+    import warnings
+    lq = dg_length_m(MSTAR, gamma=gamma)
+    z = np.linspace(0.0, n_lq * lq, nodes)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                 # a 100 L_q flat profile must NOT warn
+        n = dg_correct_density_1d(z, np.full_like(z, c), MSTAR, gamma=gamma, hard_wall="both")
+    return z, n, lq
+
+
+def test_hard_wall_both_flat_profile_is_mirror_symmetric_and_each_half_is_the_one_wall_dark_space():
+    """hard_wall='both' (v0.16; v0.15.1 raises ValueError "hard_wall must be 'left' or 'right'"): u = 0 at
+    both ends. On a flat 100 L_q profile the solution must be mirror-symmetric (MEASURED 9.1e-15 of c, bar
+    1e-10) and each half must carry the one-wall closed-form dark space: deficit = I c L_q with
+    I = int_0^1 (1 - t^2)/sqrt(t^2 ln t^2 - t^2 + 1) dt = 1.1872069 (scipy quadrature here), i.e. at
+    GAMMA_WALL the exact free-gas deficit sqrt(pi)/(2 sqrt 2) c hbar/sqrt(m kT) -- the existing one-wall
+    gate's tolerance (1e-8). MEASURED: half deficit / (c L_q) = 1.1872068906 at both gammas."""
+    from scipy.integrate import quad
+    from dynameta.carriers.density_gradient import GAMMA_WALL
+    from dynameta.core.numerics import trapz
+    i_quad = quad(lambda t: (1.0 - t * t) / np.sqrt(t * t * np.log(t * t) - t * t + 1.0), 0.0, 1.0,
+                  epsabs=1e-13, epsrel=1e-13, limit=400)[0]
+    c = 1e24
+    exact = np.sqrt(np.pi) / (2.0 * np.sqrt(2.0)) * c * HBAR / np.sqrt(MSTAR * KB * T_REF)
+    for g in (1.0, GAMMA_WALL):
+        z, n, lq = _flat_both(g, c=c)
+        assert np.max(np.abs(n - n[::-1])) / c < 1e-10
+        assert n[0] < 1e-9 * c and n[-1] < 1e-9 * c
+        half = z.size // 2
+        d_half = float(trapz(c - n[:half + 1], z[:half + 1]))
+        assert d_half / (c * lq) == pytest.approx(i_quad, rel=1e-8)
+        if g == GAMMA_WALL:
+            assert d_half / exact == pytest.approx(1.0, abs=1e-8)
+        # the centre is wall-free bulk (50 L_q from either wall)
+        assert abs(n[half] / c - 1.0) < 1e-6
+
+
+def test_hard_wall_left_right_are_bit_identical_to_v0151():
+    """Bit-identical restore paths: 'left' / 'right' (and conserve_charge) give np.array_equal results to the FROZEN v0.15.1
+    function (tests/_dg_frozen_v0151.py, the v0.15.1 body verbatim) on a graded accumulation profile and a
+    flat one -- the only code change on those paths is where the far-end value is computed. Warnings are
+    silenced (the new guard is the only behaviour difference and it does not touch the array)."""
+    import warnings
+    from _dg_frozen_v0151 import dg_correct_density_1d_v0151
+    z = np.linspace(0.0, 20e-9, 801)
+    profiles = (3e26 + 9e26 * np.exp(-z / 0.7e-9), np.full_like(z, 2e26),
+                1e25 + 3e25 * np.exp(-(20e-9 - z) / 1.5e-9))
+    for n in profiles:
+        for wall in ("left", "right"):
+            for cc in (False, True):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    new = dg_correct_density_1d(z, n, MSTAR, hard_wall=wall, conserve_charge=cc)
+                old = dg_correct_density_1d_v0151(z, n, MSTAR, hard_wall=wall, conserve_charge=cc)
+                assert np.array_equal(new, old)
+
+
+def test_thin_film_guard_flags_a_thin_accumulation_profile():
+    """The classical +5 V profile of the generic 6 nm degenerate film (tests/_gated_film_fixture.py, the explicit
+    fine mesh, 189 nodes; top gate +5 V, bottom 0 V) corrected with the gate face as the wall, with the film's mass
+    (0.30 m_e). MEASURED 2026-11-15: classical peak 9.8591e26 AT the gate face, centre 3.08e26, sheet 2.2593e18
+    m^-2; gamma = 1 deletes the peak (peak 3.00e26 at the FAR face, sheet 1.4422e18); conserve_charge raises the
+    centre to 4.60e26 (+49 %). The span is 6 nm = 4.7 L_q and the deficit 36.2 % of the sheet:
+    UnreliableResultWarning in every case, and conserve_charge (rescale 1.567) adds the AdvisoryWarning. On v0.15.1
+    nothing warned (the gate fails there: no warning recorded)."""
+    import sys
+    import warnings
+    pytest.importorskip("devsim")
+    sys.path.insert(0, __import__("os").path.dirname(__file__))
+    import _gated_film_fixture as F
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.core.numerics import trapz
+    from dynameta.sweep import BiasPoint
+    from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
+    m_film = 0.30 * M_E                                          # the fixture film's mass
+    b = LayeredDevsimBuilder(F.film_design(**F.FINE), device_name="thin_guard", mesh_name="thin_guard_m")
+    try:
+        b.solve(BiasPoint({"top": 5.0}, "p"), abs_tol=1e-14)
+        y, n = F.column(b.device, 20e-9)
+    finally:
+        b.teardown()
+    z = y - y[0]
+    assert n.max() == pytest.approx(9.8591e26, rel=1e-3) and float(trapz(n, z)) == pytest.approx(2.2593e18,
+                                                                                                   rel=1e-3)
+    for cc in (False, True):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            nd = dg_correct_density_1d(z, n, m_film, gamma=1.0, hard_wall="right", conserve_charge=cc)
+        cats = [w.category for w in rec]
+        assert UnreliableResultWarning in cats
+        assert (AdvisoryWarning in cats) == cc
+        assert int(np.argmax(nd)) == 0                         # the peak moved to the FAR face (the defect)
+    # the guard also fires with the second wall represented (still no Poisson feedback)
+    with pytest.warns(UnreliableResultWarning, match="outside its range"):
+        dg_correct_density_1d(z, n, m_film, gamma=1.0, hard_wall="both")
+
+
+def test_thin_film_guard_thresholds():
+    """Each trigger on its own (wall at z = 0, gamma = 1, L_q = 1.185 nm), and the rescale advisory:
+      span only    : 9 L_q, profile accumulated at the PINNED end (n_bg + 30 n_bg exp(-(L - z)/L_q)): deficit
+                     small against that sheet, span 9 < 10 -> warns;
+      deficit only : 20 L_q, accumulated AT the wall (n_bg + 30 n_bg exp(-z/L_q)): span fine, the dead layer
+                     eats far more than 10 % of the sheet -> warns;
+      neither      : 12 L_q flat: deficit 1.187/12 = 9.9 % -> silent;
+    conserve_charge on the silent case rescales by 1.11 -> the AdvisoryWarning alone."""
+    import warnings
+    from dynameta.core.numerics import trapz
+    from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
+    lq = dg_length_m(MSTAR)
+    c = 1e25
+
+    def run(z, n, **kw):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            nd = dg_correct_density_1d(z, n, MSTAR, hard_wall="left", **kw)
+        return nd, [w.category for w in rec]
+
+    z = np.linspace(0.0, 9.0 * lq, 1201)
+    n = c + 30.0 * c * np.exp(-(z[-1] - z) / lq)
+    nd, cats = run(z, n)
+    assert (trapz(n, z) - trapz(nd, z)) / trapz(n, z) < 0.10 and cats == [UnreliableResultWarning]
+    z = np.linspace(0.0, 20.0 * lq, 1201)
+    n = c + 30.0 * c * np.exp(-z / lq)
+    nd, cats = run(z, n)
+    assert (trapz(n, z) - trapz(nd, z)) / trapz(n, z) > 0.10 and cats == [UnreliableResultWarning]
+    z = np.linspace(0.0, 12.0 * lq, 1201)
+    assert run(z, np.full_like(z, c))[1] == []
+    assert run(z, np.full_like(z, c), conserve_charge=True)[1] == [AdvisoryWarning]
+
+
+def test_hard_wall_guard_message_names_both():
+    z = np.linspace(0.0, 10e-9, 301)
+    with pytest.raises(ValueError, match="'both'"):
+        dg_correct_density_1d(z, np.full_like(z, 1e26), MSTAR, hard_wall="middle")
+
+
+def test_guard_opt_out_is_silent_and_changes_nothing():
+    """guard=False (for fixed-point checks of an in-Newton DG solution, whose potential is already self-consistent):
+    no warning on a thin accumulated profile, and the array is identical to the guarded call's."""
+    import warnings
+    z = np.linspace(0.0, 5e-9, 201)
+    n = 4.2e26 + 9.5e26 * np.exp(-(5e-9 - z) / 0.7e-9)
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("ignore")
+        ref = dg_correct_density_1d(z, n, MSTAR, hard_wall="right", conserve_charge=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = dg_correct_density_1d(z, n, MSTAR, hard_wall="right", conserve_charge=True, guard=False)
+    assert np.array_equal(got, ref)

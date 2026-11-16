@@ -17,6 +17,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.core.eps_field import require_solver_time_convention
+from dynameta.core.lateral import is_laterally_uniform
 
 
 @dataclass
@@ -173,15 +174,20 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
         raise ValueError("slice_eps_field: z_axis_u must be strictly monotonic.")
     if z_m.size >= 2 and z_m[0] > z_m[-1]:
         z_m, v = z_m[::-1], v[::-1]
-    # tight tolerance (rtol=1e-12, atol=0): allclose(v, mean) collapses iff the relative lateral spread
-    # <= rtol, so this keeps a grating as structured unless its modulation is essentially at the
-    # round-off floor (~1e-16). np.allclose DEFAULTS (rtol=1e-5) would average any grating with relative
-    # modulation <= ~1e-5 to a scalar slab, silently dropping lateral structure the RCWA/PMM bridges
-    # keep; 1e-12 narrows that drop-window to (~1e-12, 1e-5]. The bridge _y_invariant checks (rcwa/
-    # berreman/pmm, rtol=1e-12) compare to the FIRST lateral sample whereas this compares to the lateral
-    # MEAN, so at the exact boundary it is ~2x more permissive -- same order, not identical. Err toward
-    # preserving structure.
-    laterally_uniform = bool(np.allclose(v, v.mean(axis=(1, 2), keepdims=True), rtol=1e-12, atol=0.0))
+    # tight tolerance (1e-12): a z-slice collapses to a scalar iff every lateral sample is within 1e-12 of
+    # its FIRST lateral sample, relative to the slice's largest |eps|, so a grating stays structured unless
+    # its modulation is essentially at the round-off floor (~1e-16). np.allclose DEFAULTS (rtol=1e-5) would
+    # average any grating with relative modulation <= ~1e-5 to a scalar slab, silently dropping lateral
+    # structure the RCWA/PMM bridges keep. v0.16: the reference used to be the lateral MEAN, which is not
+    # exact for identical samples -- over the default 256 x 256 grid of the non-contiguous values_zyx the
+    # bridge builds, numpy's mean carries ~1.75e-12 of summation round-off (MEASURED), so a perfectly uniform
+    # gated film was called structured and the layered TMM refused it. The first sample is exact (identical
+    # samples give 0), as in the bridges' _y_invariant checks; the scale is the slice's max |eps| rather than
+    # each sample's own |eps|, so solver round-off near a zero of eps (|eps| ~ 0.27 inside an accumulation
+    # layer) is not amplified into "structure".
+    # The rule above is core.lateral.is_laterally_uniform, the ONE lateral-uniformity test every optical
+    # route uses (the bridges and the 2-D FEM call the same function).
+    laterally_uniform = is_laterally_uniform(v)
     if is_tensor:
         # one eps_tensor_cell (Ny,Nx,3,3)->(Nx,Ny,3,3) per native z-slice; uniform -> a 1x1x3x3 cell.
         slabs = []
@@ -199,6 +205,74 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     for dz, avg in _z_slab_samples(v, z_m, n_slices):
         cell = np.transpose(avg, (1, 0))                             # (Nx, Ny) -- explicit, never bare T
         slabs.append(LayeredSlab(dz, eps_cell=cell))
+    return slabs
+
+
+def _thickness_mismatch_hint(ratio: float, metres_per_unit: float) -> str:
+    """Likely cause of a slab-total / layer-thickness mismatch, from their ratio."""
+    if not (ratio > 0.0 and np.isfinite(ratio)):
+        return "the field's z axis has no usable extent"
+    lr = float(np.log10(ratio))
+    if abs(lr + 9.0) < 1.0:
+        return ("the z axis looks like it is in METRES, but it is read in units of {:g} m "
+                "(e.g. nm); convert the axes to those units".format(metres_per_unit))
+    if abs(lr - 9.0) < 1.0:
+        return ("the z axis looks like it is in nm, but it is read in units of {:g} m; "
+                "convert the axes to those units".format(metres_per_unit))
+    return ("the field's z span does not cover the layer (a different length unit, or a "
+            "field built for another layer); regrid it onto [0, thickness] in units of "
+            "{:g} m".format(metres_per_unit))
+
+
+def slice_layer_eps_field(eps_field, layer, metres_per_unit: float, *,
+                          n_slices: Optional[int] = None, rtol: float = 1e-6
+                          ) -> List[LayeredSlab]:
+    """slice_eps_field + a check that the slab thicknesses sum to layer.thickness_m.
+
+    The single slab-thickness guard every layered optical extractor uses when it slices a
+    gridded EpsField for one design layer. slice_eps_field scales the field's z axis by
+    `metres_per_unit` and has no notion of the layer it fills, so a field whose axes are in
+    the wrong unit (metres where nm are expected gives slabs 1e9 times too thin) or whose
+    z span does not match the layer silently changes the optical stack (the layer all but
+    vanishes, or grows). This wrapper slices exactly as slice_eps_field does (the returned
+    slabs are the same objects, ASCENDING z) and then raises ValueError when
+
+      * the field has fewer than two z samples (a single z sample has no thickness; a
+        laterally structured field with one z sample used to slice to ZERO slabs, removing
+        the layer from the stack), or
+      * the slab list is empty, or
+      * abs(sum(slab thicknesses) - layer.thickness_m) > rtol * layer.thickness_m.
+
+    The message names the layer, both thicknesses, their ratio and the likely cause.
+
+    Args:
+      eps_field       : a gridded EpsField (values_zyx + axes in solver units).
+      layer           : the design Layer the field fills (uses `.name` and `.thickness_m`).
+      metres_per_unit : metres per axis unit (1e-9 for nm axes), as for slice_eps_field.
+      n_slices        : forwarded to slice_eps_field (a uniform staircase spans the same
+                        [z0, z1], so the total is unchanged).
+      rtol            : relative tolerance on the total thickness.
+    """
+    name = getattr(layer, "name", "?")
+    L = float(layer.thickness_m)
+    if not eps_field.is_uniform:
+        z = np.asarray(eps_field.z_axis_u if eps_field.z_axis_u is not None else [],
+                       dtype=np.float64).ravel()
+        if z.size < 2:
+            raise ValueError(
+                "slice_layer_eps_field: layer {!r} (thickness {:.6g} m) carries a gridded "
+                "EpsField with {} z sample(s); a single z sample has no thickness, so the "
+                "layer would be dropped from the stack. Sample the field at >= 2 z points "
+                "spanning the layer (or pass a uniform EpsField).".format(name, L, z.size))
+    slabs = slice_eps_field(eps_field, metres_per_unit, n_slices=n_slices)
+    total = float(sum(s.thickness_m for s in slabs))
+    if not slabs or abs(total - L) > float(rtol) * L:
+        ratio = total / L if L > 0.0 else float("nan")
+        raise ValueError(
+            "slice_layer_eps_field: layer {!r} is {:.6g} m thick but its gridded EpsField "
+            "slices to {} slab(s) totalling {:.6g} m (ratio {:.6g}, rtol {:g}); likely "
+            "cause: {}.".format(name, L, len(slabs), total, ratio, float(rtol),
+                                 _thickness_mismatch_hint(ratio, float(metres_per_unit))))
     return slabs
 
 

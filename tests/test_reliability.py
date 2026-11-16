@@ -59,7 +59,7 @@ def test_bti_zero_time_zero_drift_and_monotone():
 def test_bti_inversion_round_trip():
     p = dict(A_V=2e-3, n_exp=1 / 6, gamma=0.35, Ea_eV=0.12)
     t = time_to_dvth(0.05, 5 * MV, 398.0, **p)
-    assert float(dvth_power_law(t, 5 * MV, 398.0, **p)) == pytest.approx(0.05, rel=1e-12)
+    assert float(dvth_power_law(t, 5 * MV, 398.0, **p)) == pytest.approx(0.05, rel=1e-12, abs=0)
 
 
 def test_bti_guards():
@@ -89,7 +89,7 @@ def test_enz_wavelength_matches_exact_crossing():
     d = DrudeOptical(eps_inf=eps_inf, m_opt_kg=m0, gamma_rad_s=gam)
     wp2 = n * Q_E ** 2 / (EPS0 * m0)
     lam_exact = 2 * np.pi * C_LIGHT / np.sqrt(wp2 / eps_inf - gam ** 2)
-    assert enz_wavelength_m(d, n) == pytest.approx(lam_exact, rel=1e-9)
+    assert enz_wavelength_m(d, n) == pytest.approx(lam_exact, rel=1e-9, abs=0)
     with pytest.raises(ValueError):                               # no crossing in a narrow window
         enz_wavelength_m(d, n, lam_lo_m=600e-9, lam_hi_m=700e-9)
 
@@ -98,7 +98,7 @@ def test_enz_wavelength_matches_exact_crossing():
 
 def test_arrhenius_af_parenthesization_and_direction():
     af = arrhenius_af(0.5, 358.0, 398.0)
-    assert af == pytest.approx(np.exp((0.5 / 8.617333262e-5) * (1 / 358.0 - 1 / 398.0)), rel=1e-13)
+    assert af == pytest.approx(np.exp((0.5 / 8.617333262e-5) * (1 / 358.0 - 1 / 398.0)), rel=1e-13, abs=0)
     assert 1.0 < af < 100.0                                       # O(5), NOT an overflow
     assert arrhenius_af(0.5, 398.0, 358.0) < 1.0                  # use hotter than stress -> shorter
 
@@ -128,5 +128,5 @@ def test_arrhenius_signed_ea_matches_hci(  ):
     from dynameta.reliability.mttf import KB_EV_K, arrhenius_af
     af = arrhenius_af(-0.1, 350.0, 250.0)
     an = float(np.exp((-0.1 / KB_EV_K) * (1.0 / 350.0 - 1.0 / 250.0)))
-    assert af == pytest.approx(an, rel=1e-14) and af > 1.0        # hot use lives LONGER for Ea<0
+    assert af == pytest.approx(an, rel=1e-14, abs=0) and af > 1.0        # hot use lives LONGER for Ea<0
     assert arrhenius_af(-0.1, 250.0, 350.0) < 1.0                 # cold use ages faster

@@ -162,9 +162,17 @@ def main(argv=None) -> int:
     lam0 = lams_nm[0] * 1e-9
     ef0 = {"ito": EpsField(scalar=complex(
         design.materials.get("ITO").eps(lam0, n_m3=ITO_N_BG)))}
-    r_rcwa = make_lumenairy_rcwa_solver(n_orders=24)(design, None, ef0, lam0,
+    # v0.16: the RCWA default resolves this TM metal grating to Li's rule, which converges from
+    # below as an algebraic power of n_orders; Laurent's (the v0.15.1 default) is erratic here.
+    # MEASURED against the 2-D TM FEM (optics.fem_2d_tm, R 0.811302, order 4 -> 6: 1.2e-6):
+    #   n_orders            24       48       96
+    #   'li' (default)    7.7e-3   6.7e-3   2.3e-3
+    #   Laurent           1.7e-3   1.6e-3   1.5e-2    (its n_orders-24 pass was a coincidence)
+    # and the PMM referee: degree 14 / 24 / 32 / 48 1.2e-3 / 3.7e-4 / 2.0e-4 / 8.0e-5 from the FEM.
+    # Hence n_orders 96 and degree 32 here (v0.15.1: 24 and 14).
+    r_rcwa = make_lumenairy_rcwa_solver(n_orders=96)(design, None, ef0, lam0,
                                                      1.0 + 0j, np.sqrt(12.0) + 0j)
-    r_pmm = make_lumenairy_pmm_solver(degree=14, n_orders=15)(design, None, ef0, lam0,
+    r_pmm = make_lumenairy_pmm_solver(degree=32, n_orders=15)(design, None, ef0, lam0,
                                                               1.0 + 0j, np.sqrt(12.0) + 0j)
     d_ref = abs(r_rcwa.R - r_pmm.R)
     g_b = bool(d_ref < 5e-3)
