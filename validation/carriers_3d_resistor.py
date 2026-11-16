@@ -21,7 +21,7 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E
 
 LX, LY, LZ = 200.0, 80.0, 80.0     # nm
-N_BG, MU, EPS = 4e26, 0.004, 9.5   # ITO-like: m^-3, m^2/Vs, eps_r
+N_BG, MU, EPS = 3e26, 0.004, 9.0   # ITO-like: m^-3, m^2/Vs, eps_r
 Q = 1.602176634e-19
 V_APPLIED = 0.02                    # small -> ohmic
 
@@ -71,7 +71,7 @@ def main():
     legacy = "--gmsh" in sys.argv
     dev = build_bar() if legacy else build_bar_tensor()
     DD.setup_semiconductor_region_dd(dev, "semi", n_bg_m3=N_BG, eps_static=EPS,
-                                      dos_mass_kg=0.35 * M_E, mobility_m2Vs=MU)
+                                      dos_mass_kg=0.30 * M_E, mobility_m2Vs=MU)
     for c in ("left", "right"):
         DD.setup_contact_ohmic_dd(dev, c)
     abs_tol = max(1e10, N_BG * 1e-12)

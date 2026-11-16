@@ -78,7 +78,7 @@ def main():
     # ---- GATE B: lumenairy-born dispersive stack -> design -> bridge == direct ----
     def eps_disp(wl):
         w = 2.0 * np.pi * 2.99792458e8 / wl
-        return 3.9 - (2.9e15) ** 2 / (w ** 2 + 1j * w * 1.8e14)
+        return 4.0 - (2.9e15) ** 2 / (w ** 2 + 1j * w * 1.8e14)
 
     def n_sub_disp(wl):                                   # dispersive INDEX region medium
         return 1.5 + 0.02 * (wl / LAM - 1.0)
@@ -101,13 +101,13 @@ def main():
               worstB, "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: materials mapping (Drude with explicit density) ----
-    drude = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * 9.1093837015e-31,
+    drude = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * 9.1093837015e-31,
                          gamma_rad_s=1.8e14)
-    fn = optical_model_to_lumenairy_eps(drude, n_m3=4.0e26)
+    fn = optical_model_to_lumenairy_eps(drude, n_m3=3.0e26)
     wl = 1.31e-6
     w = 2.0 * np.pi * 2.99792458e8 / wl
-    wp2 = 4.0e26 * (1.602176634e-19) ** 2 / (8.8541878128e-12 * 0.35 * 9.1093837015e-31)
-    eps_hand = 3.9 - wp2 / (w ** 2 + 1j * w * 1.8e14)
+    wp2 = 3.0e26 * (1.602176634e-19) ** 2 / (8.8541878128e-12 * 0.30 * 9.1093837015e-31)
+    eps_hand = 4.0 - wp2 / (w ** 2 + 1j * w * 1.8e14)
     dC = abs(fn(wl) - eps_hand) / abs(eps_hand)
     g_c = bool(dC < 1e-12)
     ok = ok and g_c

@@ -23,10 +23,10 @@ equilibrium builder put every region at psi = 0 in its own frame, i.e. zero buil
           continuous-quasi-Fermi model must MISS it (the discriminating gate).
   GATE D  charge neutrality + the discrete Gauss law across the interface (no interface charge).
   GATE E  continuous vs thermionic converge as the barrier vanishes (zero offset, A* -> large).
-  GATE F  (--3d, heavy: the 3-D equilibrium build is ~9 min) a gated ITO / AZO-like 3-D heterostack as
-          equilibrium vs drift-diffusion (thermionic and continuous): no DC path, so DD must reproduce the
-          equilibrium profile. MEASURED 2026-11-03: TE vs continuous 1.5e-9, DD vs equilibrium 2.8e-3
-          (the FD g fit vs the Aymerich-Humet closure).
+  GATE F  (--3d; the three 3-D builds take < 1 s each on the tensor mesh) a gated degenerate film / AZO-like
+          3-D heterostack as equilibrium vs drift-diffusion (thermionic and continuous): no DC path, so DD must
+          reproduce the equilibrium profile. MEASURED (0 / +0.5 V): TE vs continuous 3.1e-16 / 1.6e-16, DD vs
+          equilibrium 6.6e-4 / 6.6e-4 (the FD g fit vs the Aymerich-Humet closure).
 
   TEMPERATURE (v0.15 plan P3 item 3, H2; docs/audit/2026-11-06-v0.15-band-temperature.md) -- the band-
           temperature gates of tests/test_devsim_band_temperature.py, slow ones included: Varshni values,
@@ -191,12 +191,13 @@ def current_density(builder, cf, contact="cathode"):
 
 # ---- GATE F (3-D, heavy): drift-diffusion heterostack == equilibrium heterostack at zero current ----
 def spec_3d(physics: str, heterointerface: str = "auto"):
-    """A gated ITO / AZO-like degenerate heterostack (the library's 3-D use case): primary 'semi'
-    4e26 m^-3 (chi 4.50 eV, m* 0.35), gate-ward 'xs' 1e26 m^-3 (chi 4.62 eV, m* 0.25), 4 nm HfO2."""
+    """A gated degenerate-film / AZO-like heterostack (the library's 3-D use case): primary 'semi'
+    3e26 m^-3 (eps 9.0, chi 4.50 eV, m* 0.30), gate-ward 'xs' 1e26 m^-3 (chi 4.62 eV, m* 0.25), 4 nm oxide
+    (eps 20)."""
     from dynameta.carriers.devsim_3d import Stacked3DSpec
-    return Stacked3DSpec(semi_material="ITO", oxide_material="HfO2", lateral_m=4e-9, semi_thk_m=6e-9,
-                         oxide_thk_m=4e-9, n_bg_m3=4e26, eps_semi=9.5, eps_oxide=18.0,
-                         dos_mass_kg=0.35 * M_E, grid_n=(3, 3, 9), mesh_min_nm=1.0, mesh_max_nm=3.0,
+    return Stacked3DSpec(semi_material="ITO", oxide_material="oxB", lateral_m=4e-9, semi_thk_m=6e-9,
+                         oxide_thk_m=4e-9, n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0,
+                         dos_mass_kg=0.30 * M_E, grid_n=(3, 3, 9), mesh_min_nm=1.0, mesh_max_nm=3.0,
                          physics=physics, heterointerface=heterointerface, chi_semi_eV=4.50,
                          extra_semiconductors=[("xs", "AZO", 6e-9, 9.0, 1e26, 4.62, 0.25 * M_E)])
 

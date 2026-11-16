@@ -41,10 +41,10 @@ class _StubCarrier:
         reg = CarrierRegion(name="semi", role="semiconductor", material="mat",
                             nodes_m=np.zeros((1, 3)), node_fields={},
                             grid_axes_m={"x": x, "y": y, "z": z},
-                            grid_fields={ELECTRON_DENSITY: np.full((nx, ny, nz), 4e26)})
+                            grid_fields={ELECTRON_DENSITY: np.full((nx, ny, nz), 3e26)})
         return CarrierField(bias_label=bp.label, voltages=dict(bp.voltages), ndim=3,
                             temperature_K=300.0, regions={"semi": reg},
-                            n_bg_by_region={"semi": 4e26}, unit_cell_m=(PERIOD, PERIOD))
+                            n_bg_by_region={"semi": 3e26}, unit_cell_m=(PERIOD, PERIOD))
 
 
 class _StubGeo:

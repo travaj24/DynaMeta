@@ -4,7 +4,7 @@ fresh interpreter, so no DEVSIM device left live by another test of the worker t
 WHY. A DC solve iterates every live DEVSIM device in one Newton (dc_solve.solve_dc docstring): a leftover
 device both affects a later solve's convergence and is itself moved by it. A BITWISE comparison of two
 separate solves is meaningful only with no unrelated device live. MEASURED (scipy OpenBLAS): with a
-converged ITO gate (4e26) and a 1e22 slab left live, test_devsim_tunneling.py::test_w1's off / on
+converged degenerate ITO gate and a 1e22 slab left live, test_devsim_tunneling.py::test_w1's off / on
 potentials differed by 1.1e-16 V on one run and agreed on the next; in a clean process they are
 bitwise equal. Which run differs is a round-off accident (one leftover did not make two light-slab solves
 differ in three tries), so this file gates the deterministic part: the leftover is MOVED by an unrelated
@@ -28,7 +28,7 @@ LEFTOVER = "iso_leftover"
 
 @pytest.fixture(scope="module")
 def leftover():
-    """A converged 4e26 ITO gate at 1 V kept live for the module, as a module-scoped fixture of another
+    """A converged 3e26 ITO gate at 1 V kept live for the module, as a module-scoped fixture of another
     file is under xdist."""
     from dynameta.carriers import dc_solve as DC
     steps, _ = F.ito_gate(LEFTOVER)
@@ -61,11 +61,19 @@ def test_leftover_device_is_live_and_is_moved_by_a_later_solve(leftover):
     """The premise, in-process: the leftover is live, and a solve of an UNRELATED device iterates it
     too (its node values change -- by round-off -- although nothing about it was touched)."""
     assert LEFTOVER in devsim.get_device_list()
-    before = np.asarray(devsim.get_node_model_values(device=LEFTOVER, region="ito", name="Electrons"))
+
+    def state():
+        return {v: np.asarray(devsim.get_node_model_values(device=LEFTOVER, region="ito", name=v))
+                for v in ("Electrons", "Potential")}
+    before = state()
     _two_solves_bitwise()
-    after = np.asarray(devsim.get_node_model_values(device=LEFTOVER, region="ito", name="Electrons"))
-    assert not np.array_equal(before, after)                 # moved by a solve it took no part in
-    assert np.max(np.abs(after / before - 1.0)) < 1e-12      # ... by round-off only
+    after = state()
+    # moved by a solve it took no part in: the leftover's solution (Electrons and Potential) is not the same.
+    # MEASURED, 3 repeats each: the potential moves on 3-13 nodes every time, by <= 2.2e-16 of its max; the
+    # electrons move on 0-1 nodes (a round-off update below half an ulp of the density leaves a node as is)
+    assert any(not np.array_equal(before[v], after[v]) for v in before)
+    assert np.max(np.abs(after["Electrons"] / before["Electrons"] - 1.0)) < 1e-12     # ... by round-off only
+    assert np.max(np.abs(after["Potential"] - before["Potential"])) < 1e-12 * np.max(np.abs(before["Potential"]))
 
 
 @pytest.mark.devsim_isolated("asserts it runs with no leftover device and in the child")

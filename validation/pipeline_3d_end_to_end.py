@@ -1,6 +1,6 @@
 """Full 3D pipeline end-to-end (#35): native 3D DEVSIM carriers -> bridge (ndim=3) ->
 NGSolve optics, proving the chain COMPOSES and the optical response tracks the gate
-bias. A laterally-uniform ITO|HfO2 stack at a matched 60 nm cell (carrier MOS-cap and
+bias. A laterally-uniform film|oxide stack at a matched 60 nm cell (carrier MOS-cap and
 optics cell share the lateral extent -- the missing link a general Design->gmsh builder
 would automate). VACUUM exit medium so the optics is in the tmm-validated regime; the
 ITO accumulation layer (gate +1V) lowers Re(eps) toward ENZ and modulates R/T.
@@ -27,18 +27,20 @@ from dynameta.core.lift import IdentityLift
 CELL = 60e-9
 SEMI = 12e-9
 OX = 8e-9
-LAM = 1300e-9
+LAM = 1200e-9
+FILM3D = dict(semi_material="ITO", oxide_material="oxB", n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0,
+              dos_mass_kg=0.30 * M_E)
 
 
 def build_optics():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    # carrier solver (devsim_3d) names its semiconductor "ITO" -> the n->eps map must
+    # the carrier spec names its semiconductor "ITO" (FILM3D) -> the n->eps map must
     # know that exact name; use it for the optics ITO layer too so the bridge resolves.
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
-    reg.add(Material("hfo2", ConstantOptical(complex(4.0, 0.0)), eps_static_dc=18.0))
+    reg.add(Material("ITO", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
+    reg.add(Material("oxB", ConstantOptical(complex(4.0, 0.0)), eps_static_dc=20.0))
     d = Design(name="stk3d", unit_cell=UnitCell.square(CELL),
-               stack=Stack(layers=[Layer("ito", SEMI, "ITO"), Layer("hfo2", OX, "hfo2")],
+               stack=Stack(layers=[Layer("ito", SEMI, "ITO"), Layer("gate_ox", OX, "oxB")],
                             superstrate_material="air", substrate_material="air"),
                electrodes=[], materials=reg,
                mesh_3d=Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=1400e-9,
@@ -52,7 +54,7 @@ def build_optics():
 def alignment_for(geo):
     # map the carrier "semi" region onto the optics "ito" layer; everything else fixed
     ra = RegionAlignment("ito", "semi", (0.0, CELL, 0.0, CELL, 0.0, SEMI), stack_axis="z")
-    fixed = {"pml_bot": "air", "substrate": "air", "hfo2": "hfo2",
+    fixed = {"pml_bot": "air", "substrate": "air", "gate_ox": "oxB",
              "superstrate": "air", "pml_top": "air"}
     return GeometryAlignment(unit_scale=NM, region_alignments=[ra], fixed_eps_regions=fixed)
 
@@ -67,7 +69,7 @@ def main():
     out = {}
     eps_gate = {}
     for label, vg in [("0V", 0.0), ("+1V", 1.0)]:
-        spec = Stacked3DSpec(lateral_m=CELL, semi_thk_m=SEMI, oxide_thk_m=OX)
+        spec = Stacked3DSpec(lateral_m=CELL, semi_thk_m=SEMI, oxide_thk_m=OX, **FILM3D)
         solver = Devsim3DEquilibrium(spec)
         cf = solver.solve(BiasPoint({"gate": vg, "body": 0.0}, label))
         eps_by_region = assemble_eps(cf, align, n_to_eps, IdentityLift(), LAM,
@@ -88,7 +90,7 @@ def main():
     # The end-to-end claim: the NATIVE 3D carrier field propagates through the bridge
     # into the optics solve, and the gate bias modulates the optical eps the solver
     # consumes. A measurable R modulation needs a RESONANT/cavity geometry -- a bare
-    # 12 nm ITO layer in air is optically negligible at 1300 nm (R~1e-5), so the ENZ
+    # 12 nm ITO layer in air is optically negligible at 1200 nm (R~1e-5), so the ENZ
     # shift cannot move R here (geometry artifact, not a pipeline failure).
     ran = all(np.isfinite([out[k].R for k in out]))
     d_eps = abs(eps_gate["+1V"] - eps_gate["0V"])
@@ -97,7 +99,7 @@ def main():
     print("[t] gate-side Re(eps): 0V={:+.3f} +1V={:+.3f}  d_eps={:.3f}  (optical dR={:.6f})".format(
         eps_gate["0V"], eps_gate["+1V"], d_eps, dR), flush=True)
     print("[t] NOTE: R modulation ~0 here -- bare 12nm ITO in air is optically negligible at "
-          "1300nm; a resonant patch/cavity (reference) converts the ENZ shift to dR.", flush=True)
+          "1200nm; a resonant patch/cavity converts the ENZ shift to dR.", flush=True)
     print("[t] *** 3D PIPELINE END-TO-END: chain_runs={} bias_modulates_eps={} -> {} ***".format(
         "OK" if ran else "FAIL", "OK" if eps_modulated else "NULL",
         "PASS" if (ran and eps_modulated) else "CHECK"), flush=True)

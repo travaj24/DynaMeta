@@ -1,8 +1,9 @@
 """v0.16 carrier wiring in the 3-D builder (devsim_3d): the DOS-mass-at-n_bg guard at
 Stacked3DSpec.from_design's two call sites, and the equilibrium charge primitives -- gate work function, fixed
-sheet charge, dielectric bulk charge and equilibrium-film interface traps -- on the library's default gated
-capacitor (the Stacked3DSpec() defaults: a 12 nm equilibrium semiconductor over a body contact, one 8 nm oxide,
-a full gate; tensor Kuhn mesh). The oracles read the oxide and semiconductor parameters from the spec.
+sheet charge, dielectric bulk charge and equilibrium-film interface traps -- on a generic gated
+capacitor (the Stacked3DSpec geometry defaults: a 12 nm equilibrium semiconductor over a body contact, one 8 nm
+oxide, a full gate; tensor Kuhn mesh; the film and oxide parameters of tests/_wiring_fixture.py: n_bg 3e26 m^-3,
+eps_s 9.0, DOS mass 0.30 m_e, oxide eps 20). The oracles read the oxide and semiconductor parameters from the spec.
 
 ORACLES (as in tests/test_layered_charges.py, closed forms re-derived here): the oxide holds no charge of its
 own, so its potential is linear and C_ox = eps_ox eps0 / t_ox exactly; a sheet Q at the semiconductor/oxide
@@ -36,7 +37,15 @@ from dynameta.warning_types import AdvisoryWarning                       # noqa:
 
 import _wiring_fixture as W                                              # noqa: E402
 
-_DEFAULT = Stacked3DSpec()
+FILM3D = dict(n_bg_m3=W.N_BG, eps_semi=W.EPS_S, eps_oxide=W.TOP_STACK[0][1], dos_mass_kg=W.M_DOS_REL * M_E)
+
+
+def _spec(**kw):
+    """The generic gated capacitor (FILM3D on the Stacked3DSpec geometry defaults) with `kw` on top."""
+    return Stacked3DSpec(**FILM3D, **kw)
+
+
+_DEFAULT = _spec()
 C_OX = _DEFAULT.eps_oxide * EPS0 / _DEFAULT.oxide_thk_m
 
 
@@ -99,18 +108,18 @@ def test_from_design_dos_mass_guard():
 def test_sheet_charge_shifts_the_gate_by_minus_q_over_cox(q):
     """MEASURED 4.4e-16 relative in n, 2.8e-17 V (bar 1e-9 / 1e-12 V: the 3-D equilibrium solve stops at a
     relative update of 1e-5, after which Newton is quadratic)."""
-    a = _run(Stacked3DSpec(), 1.0)
-    b = _run(Stacked3DSpec(fixed_charge={("semi", "oxide"): q}), 1.0 - q / C_OX)
+    a = _run(_spec(), 1.0)
+    b = _run(_spec(fixed_charge={("semi", "oxide"): q}), 1.0 - q / C_OX)
     assert np.max(np.abs(b["Electrons"] / a["Electrons"] - 1.0)) < 1e-9
     assert np.max(np.abs(b["Potential"] - a["Potential"])) < 1e-12
 
 
 def test_bulk_oxide_charge_shifts_the_gate_by_the_centroid_formula():
-    """rho = 4e5 C/m^3 in the default 8 nm oxide: gate shift -rho t^2/(2 eps eps0) = -0.0803 V (MEASURED 4.4e-16)."""
+    """rho = 4e5 C/m^3 in the default 8 nm oxide: gate shift -rho t^2/(2 eps eps0) = -0.0723 V (MEASURED 4.4e-16)."""
     rho = 4.0e5
     dv = -rho * _DEFAULT.oxide_thk_m ** 2 / (2.0 * _DEFAULT.eps_oxide * EPS0)
-    a = _run(Stacked3DSpec(), 1.0)
-    b = _run(Stacked3DSpec(bulk_charge={"oxide": rho}), 1.0 + dv)
+    a = _run(_spec(), 1.0)
+    b = _run(_spec(bulk_charge={"oxide": rho}), 1.0 + dv)
     assert np.max(np.abs(b["Electrons"] / a["Electrons"] - 1.0)) < 1e-9
     assert np.max(np.abs(b["Potential"] - a["Potential"])) < 1e-12
 
@@ -118,12 +127,12 @@ def test_bulk_oxide_charge_shifts_the_gate_by_the_centroid_formula():
 @pytest.mark.devsim_isolated("bitwise comparison of two DEVSIM solves")
 def test_gate_work_function_is_a_bias_shift_bit_for_bit():
     """gate_work_function_eV = 4.7 eV at V_g = 0.5 V: node arrays bit-identical to the spec without it at
-    V_g + offset, offset = -(phi_m - chi - Phi_c0) with Phi_c0 the body's (MEASURED offset -0.7651 V)."""
+    V_g + offset, offset = -(phi_m - chi - Phi_c0) with Phi_c0 the body's (MEASURED offset -0.7442 V)."""
     phi_m, chi, vg = 4.7, W.CHI_EV, 0.5
-    w = _run(Stacked3DSpec(chi_semi_eV=chi, gate_work_function_eV=phi_m), vg)
-    phi_c0 = Stacked3DSpec().band_alignment()["semi"][0]
+    w = _run(_spec(chi_semi_eV=chi, gate_work_function_eV=phi_m), vg)
+    phi_c0 = _spec().band_alignment()["semi"][0]
     assert w["offset"] == -(phi_m - (chi + phi_c0))
-    w0 = _run(Stacked3DSpec(), vg + w["offset"])
+    w0 = _run(_spec(), vg + w["offset"])
     assert w0["offset"] is None
     for nm in ("Electrons", "Potential", "oxide_potential"):
         assert np.array_equal(w[nm], w0[nm]), nm
@@ -143,11 +152,11 @@ def test_work_function_and_charge_inputs_through_from_design():
     with pytest.raises(ValueError, match="not meshed"):
         Stacked3DSpec.from_design(W.film_design(), fixed_charge={("film", "up_oxb"): 1e-3})
     with pytest.raises(NotImplementedError, match="LayeredDevsimBuilder"):
-        Stacked3DSpec(physics="drift_diffusion", chi_semi_eV=4.5, gate_work_function_eV=4.6)
+        _spec(physics="drift_diffusion", chi_semi_eV=4.5, gate_work_function_eV=4.6)
     with pytest.raises(ValueError, match="chi_semi_eV"):
-        Stacked3DSpec(gate_work_function_eV=4.6)
+        _spec(gate_work_function_eV=4.6)
     with pytest.raises(ValueError, match="matches no interface"):
-        _run(Stacked3DSpec(fixed_charge={("semi", "nope"): 1e-3}), 0.0)
+        _run(_spec(fixed_charge={("semi", "nope"): 1e-3}), 0.0)
 
 
 def _traps():
@@ -158,17 +167,17 @@ def _traps():
 
 def test_film_traps_on_an_equilibrium_spec_gate_efficiency():
     """FilmInterfaceTraps on the equilibrium capacitor: d psi_s/dV_g at flat band = C_ox/(C_ox + C_s + C_it)
-    (MEASURED 2.2e-12 at dV = 1e-4 V; 0.1361 -> 0.1290 with the traps). On drift-diffusion they are
+    (MEASURED 1.3e-12 at dV = 1e-4 V; 0.1705 -> 0.1606 with the traps). On drift-diffusion they are
     refused."""
     dv = 1e-4
 
     def eff(spec):
         return (_psi_s(_run(spec, dv)) - _psi_s(_run(spec, -dv))) / (2.0 * dv)
-    e0 = eff(Stacked3DSpec())
+    e0 = eff(_spec())
     c_s = C_OX * (1.0 / e0 - 1.0)
     c_it = Q_E * 5e16 * (2.0 / (1.0 + math.exp(-0.6 / V_T)) - 1.0)
-    got = eff(Stacked3DSpec(interface_traps=_traps()))
+    got = eff(_spec(interface_traps=_traps()))
     assert abs(got / (C_OX / (C_OX + c_s + c_it)) - 1.0) < 1e-8
     assert got < 0.97 * e0
     with pytest.raises(ValueError, match="physics='equilibrium'"):
-        Stacked3DSpec(physics="drift_diffusion", interface_traps=_traps())
+        _spec(physics="drift_diffusion", interface_traps=_traps())

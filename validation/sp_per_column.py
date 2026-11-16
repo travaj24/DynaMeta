@@ -1,5 +1,5 @@
 """Validate the PER-COLUMN Schrodinger-Poisson CarrierSolver for a laterally-VARYING
-device: a central patch (surface potential +0.4V) over an otherwise ungated ITO layer
+device: a central patch (surface potential +0.4V) over an otherwise ungated film
 (0V in the gap). A 1D SP solve runs per lateral column (cached by psi_s value, so a
 ~equipotential patch costs only ~2 solves), giving a laterally-varying quantum profile:
 accumulation (sub-ENZ) UNDER the patch, flat bulk in the gap. Confirms the CarrierField
@@ -17,7 +17,7 @@ from dynameta.core import NM, MaterialEpsMap, assemble_eps
 from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.core.lift import IdentityLift
 
-N_BG = 4e26
+N_BG = 3e26
 LATERAL = 200e-9
 T_SEMI = 12e-9
 
@@ -28,7 +28,8 @@ def main():
         in_patch = abs(x - LATERAL / 2) < LATERAL / 4 and abs(y - LATERAL / 2) < LATERAL / 4
         return vg if in_patch else 0.0
 
-    solver = SchrodingerPoissonCarrier(semi_thk_m=T_SEMI, n_bg_m3=N_BG, lateral_m=LATERAL,
+    solver = SchrodingerPoissonCarrier(semi_thk_m=T_SEMI, n_bg_m3=N_BG, m_eff_kg=0.30 * M_E, eps_static=9.0,
+                                        lateral_m=LATERAL,
                                         n_lateral=8, surface_potential_xy=psi_xy)
     cf = solver.solve(BiasPoint({"gate": 0.4, "body": 0.0}, "+0.4V"))
     v = cf.regions["semi"].grid_fields[ELECTRON_DENSITY]   # (nx, ny, nz)
@@ -43,10 +44,10 @@ def main():
 
     # bridge -> eps (ITO Drude); compare min Re(eps) under the patch vs in the gap
     reg = MaterialRegistry()
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+    reg.add(Material("film", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
     align = GeometryAlignment(unit_scale=NM, fixed_eps_regions={},
         region_alignments=[RegionAlignment("semi", "semi", (0.0, LATERAL, 0.0, LATERAL, 0.0, T_SEMI), "z")])
-    ef = assemble_eps(cf, align, MaterialEpsMap(reg), IdentityLift(), 1300e-9, mesh_regions=["semi"])["semi"]
+    ef = assemble_eps(cf, align, MaterialEpsMap(reg), IdentityLift(), 1200e-9, mesh_regions=["semi"])["semi"]
     re = np.real(ef.values_zyx)                            # (nz, ny, nx)
     re_patch = float(re[:, nx // 2, nx // 2].min())        # under patch, over z
     re_gap = float(re[:, 0, 0].min())

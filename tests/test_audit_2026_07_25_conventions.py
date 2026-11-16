@@ -107,9 +107,9 @@ def test_v17_v10_intersubband_gain_clamp_is_flagged_as_an_unreliable_result():
                         z_m=z, sheet_density_m2=np.array([1e17, 5e17]))      # INVERTED
     # v0.16: a synthetic 2-state well is an incomplete set, so the f-sum advisory is silenced
     # here; the gate is about the gain clamp's warning class.
-    m = IntersubbandEffect(4.25, 0.225 * M_E, 1.1e14, 1.0e13, fsum_check="off")
+    m = IntersubbandEffect(4.0, 0.30 * M_E, 1.2e14, 1.0e13, fsum_check="off")
     with pytest.warns(UnreliableResultWarning, match="inverted population"):
-        m.eps({"subband": res}, 1300e-9)
+        m.eps({"subband": res}, 1200e-9)
 
 
 def test_v10_policy_is_written_down_once():
@@ -280,11 +280,11 @@ def test_x12_gate_tuned_reflection_closes_and_tracks_the_fermi_level():
 
 def test_x12_x14_unit_scale_conversion_api_is_live_and_exact():
     from dynameta.core.units import NM, NM_PER_M, SI
-    x = np.array([0.0, 1.5e-7, 3.7e-7, 1.0e-6])
+    x = np.array([0.0, 1.5e-7, 4.0e-7, 1.0e-6])
     assert np.array_equal(NM.to_units(x), x / 1e-9)               # the bridge's exact operation
     assert np.array_equal(SI.to_units(x), x)
     assert np.allclose(NM.to_metres(NM.to_units(x)), x, rtol=1e-15, atol=0.0)
-    assert NM.to_metres(370.0) == 370.0 * 1e-9
+    assert NM.to_metres(400.0) == 400.0 * 1e-9
     # the documented reason NM_PER_M stays a literal: the two spellings differ in the last bit
     assert 1.0 / NM.metres_per_unit != NM_PER_M
     src = (PKG / "core" / "bridge.py").read_text(encoding="utf-8")
@@ -298,16 +298,16 @@ def test_x12_semiconductor_layers_selects_by_role():
     from dynameta.materials.transport_model import TransportModel
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("HfO2", ConstantOptical(4.0 + 0j), eps_static_dc=18.0))
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
-                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.0,
-                                              dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
-    stack = Stack(layers=[Layer("ox", 10e-9, "HfO2"), Layer("ito", 20e-9, "ITO"),
+    reg.add(Material("oxB", ConstantOptical(4.0 + 0j), eps_static_dc=20.0))
+    reg.add(Material("TCO", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14),
+                     transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
+                                              dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E)))
+    stack = Stack(layers=[Layer("ox", 10e-9, "oxB"), Layer("film", 20e-9, "TCO"),
                           Layer("gap", 30e-9, "air")],
                   superstrate_material="air", substrate_material="air")
-    d = Design(name="x12", unit_cell=UnitCell.square(370e-9), stack=stack, electrodes=[],
+    d = Design(name="x12", unit_cell=UnitCell.square(400e-9), stack=stack, electrodes=[],
                materials=reg)
-    assert [L.name for L in d.semiconductor_layers()] == ["ito"]
+    assert [L.name for L in d.semiconductor_layers()] == ["film"]
 
 
 def test_x12_bti_time_to_inverts_the_drift_law():

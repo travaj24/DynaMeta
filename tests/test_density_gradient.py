@@ -190,7 +190,7 @@ def test_dg_contact_guard():
 # node was a carrier SINK and the solve converged to a spurious wide-depletion branch (the deficit was
 # pinned here as a CHARACTERIZATION, 3-1000 n0 L_q). It is now a deprecated shim onto the conserving
 # insulator wall; the old rows survive only as the fixture tests/_dg_legacy_wall.py, which these gates use
-# for their "fails on the old code" halves. Fixture: a uniform unipolar bar (m* = 0.35 m0, mu 0.004),
+# for their "fails on the old code" halves. Fixture: a uniform unipolar bar (m* = 0.30 m0, mu 0.004),
 # the wall contact carries the DG wall rows only, the right contact is bulk-ohmic; psi FROZEN flat
 # (PotentialEquation deleted), so the DG closes in closed form (D2d audit doc, GATE B):
 #     z(t) = L_q int_0^t ds/sqrt(F(s)),  F(t) = t^2 ln t^2 - t^2 + 1,  deficit = I n0 L_q,  I = 1.187207.
@@ -201,7 +201,7 @@ def test_dg_contact_guard():
 # spacing 40, so halving h0 doubles N and NESTS the meshes (DEVSIM's graded 1-D lines gave orders 1.2-1.5
 # from their segment joints; measured 2026-11-06).
 
-_WB_MSTAR, _WB_MU = 0.35 * M_E, 0.004
+_WB_MSTAR, _WB_MU = 0.30 * M_E, 0.004
 
 
 def _wall_bar(tag, *, n0, ps_wall=0.05e-9, gamma=1.0, wall="insulator", u_floor_rel=1e-6,
@@ -245,7 +245,7 @@ def _wall_bar(tag, *, n0, ps_wall=0.05e-9, gamma=1.0, wall="insulator", u_floor_
 
     def _solve():
         # abs criterion off (1e30): the RELATIVE update test binds; REL 1e-8 is attainable in double on
-        # the Boltzmann-regime bars, the degenerate 4e26 bar needs the extended Newton (D2d sec. 1.6)
+        # the Boltzmann-regime bars, the degenerate 3e26 bar needs the extended Newton (D2d sec. 1.6)
         with _quiet():
             info = (XP.solve if ext else ds.solve)(type="dc", absolute_error=1e30, relative_error=rel,
                                                    maximum_iterations=60, info=True)
@@ -273,13 +273,13 @@ def _wall_bar(tag, *, n0, ps_wall=0.05e-9, gamma=1.0, wall="insulator", u_floor_
             if ext:
                 XP.enable(dev)
             if not bipolar:
-                setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.5,
+                setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.0,
                                               dos_mass_kg=_WB_MSTAR, mobility_m2Vs=_WB_MU)
                 setup_contact_ohmic_dd(dev, "back")
             else:
                 nc = _nc_model()                         # = the unipolar region's N_c (same mass, T)
                 ds.node_model(device=dev, region=reg, name="NetDoping", equation="{:.17e}".format(n0))
-                BP.setup_bipolar_region(dev, reg, eps_static=9.5, n_dos_m3=nc, n_i_m3=1e10,
+                BP.setup_bipolar_region(dev, reg, eps_static=9.0, n_dos_m3=nc, n_i_m3=1e10,
                                         mobility_n_m2Vs=_WB_MU, mobility_p_m2Vs=_WB_MU, tau_n_s=1e-7,
                                         tau_p_s=1e-7, fd_enhancement=True, n_dos_p_m3=nc)
                 BP.setup_equilibrium_seed_models(dev, reg)
@@ -457,7 +457,7 @@ def test_set_dg_gamma_legacy_pin_branch_still_co_ramps_and_refuses_a_bad_pin():
         ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="wall", tag2="back")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        setup_semiconductor_region_dd(dev, reg, n_bg_m3=4e26, eps_static=9.5, dos_mass_kg=_WB_MSTAR,
+        setup_semiconductor_region_dd(dev, reg, n_bg_m3=3e26, eps_static=9.0, dos_mass_kg=_WB_MSTAR,
                                       mobility_m2Vs=_WB_MU)
         setup_dg_quantum_correction(dev, reg, m_eff_kg=_WB_MSTAR, gamma=1.0)
         setup_dg_insulator_wall(dev, "wall")
@@ -484,17 +484,17 @@ def test_set_dg_gamma_legacy_pin_branch_still_co_ramps_and_refuses_a_bad_pin():
 
 def test_insulator_wall_reproduces_the_closed_form_dark_space_and_conserves():
     """G2-1 + G2-5 (plan P4 sec. 2.5), the load-bearing gates of 4.4.4. Bar n0 = 1e21 m^-3 (n0/N_c =
-    1.9e-4: Boltzmann holds to the 2.4e-5 FD residue), h0 = 0.05 nm (L_q = 1.18 nm), gamma = 1.
+    2.4e-4: Boltzmann holds to the 3.0e-5 FD residue), h0 = 0.05 nm (L_q = 1.28 nm), gamma = 1.
       * deficit/(n0 L_q) vs the closed form I (scipy quadrature here): rel <= 2e-4 -- the plan's budget
-        (bipolar GATE B measured 3e-6..2e-4 at similar h/L_q, plus the FD residue). MEASURED 1.7e-5.
-      * profile: max |z_node - z(t_node)|/L_q <= 1e-3 for 0.05 < t < 0.95 (MEASURED 2.8e-4).
+        (bipolar GATE B measured 3e-6..2e-4 at similar h/L_q, plus the FD residue). MEASURED 1.3e-5.
+      * profile: max |z_node - z(t_node)|/L_q <= 1e-3 for 0.05 < t < 0.95 (MEASURED 2.7e-4).
       * conservation: max |ElectronCurrentDG| over every edge and the back-contact current <= 1e-12 of
-        q mu n0 V_t/L_q, the size of one diffusion term (MEASURED 3e-15 / 1e-17: round-off of the
+        q mu n0 V_t/L_q, the size of one diffusion term (MEASURED 2.7e-15 / 1.5e-17: round-off of the
         zero-current balance).
     FAILS on the old code (the retired rows, tests/_dg_legacy_wall.py, run on the same bar): deficit
-    22.85 n0 L_q -- the wide-depletion branch, inside the 3-1000 band the old characterization pinned --
-    and the wall node a SINK, edge and terminal current 6.25e-3 of the scale (measured).
-    Refutation: b_dg x 1.001 (L_q x 1.0005) moves the deficit by 5e-4 and must break the 2e-4 gate."""
+    20.52 n0 L_q -- the wide-depletion branch, inside the 3-1000 band the old characterization pinned --
+    and the wall node a SINK, edge and terminal current 6.53e-3 of the scale (measured).
+    Refutation: b_dg x 1.001 (L_q x 1.0005) moves the deficit by 5.1e-4 and must break the 2e-4 gate."""
     pytest.importorskip("devsim")
     n0 = 1e21
     ii = _closed_form_I()
@@ -522,10 +522,10 @@ def test_insulator_wall_reproduces_the_closed_form_dark_space_and_conserves():
 def test_insulator_wall_dark_space_converges_at_second_order_to_the_fd_first_integral():
     """G2-1's refinement leg: on nested meshes h0 = 0.1 / 0.05 / 0.025 nm the deficit converges to the
     EXACT continuum value of the model -- the FD first integral (_fd_first_integral_deficit; the closed
-    form I itself is not the limit: the unipolar g-factor puts the limit 2.4e-5 below it, MEASURED
-    1.1871784 vs 1.1872069) -- at observed order >= 1.7 (box method O(h^2); MEASURED 2.12 / 2.16). The
-    oracle reproduces I at w = 0 (Boltzmann) to 1e-9. On the old rows the deficit does not converge to
-    it at all (22.85, the test above)."""
+    form I itself is not the limit: the unipolar g-factor puts the limit 3.0e-5 below it, MEASURED
+    1.1871710 vs 1.1872069) -- at observed order >= 1.7 (box method O(h^2); MEASURED 2.09 / 2.14). The
+    oracle reproduces I at w = 0 (Boltzmann) to 1e-9 (MEASURED 3.5e-14). On the old rows the deficit does
+    not converge to it at all (20.52, the test above)."""
     pytest.importorskip("devsim")
     n0 = 1e21
     assert _fd_first_integral_deficit(0.0) == pytest.approx(_closed_form_I(), rel=1e-9)
@@ -538,10 +538,10 @@ def test_insulator_wall_dark_space_converges_at_second_order_to_the_fd_first_int
 
 def test_dark_space_scales_as_sqrt_gamma_and_ignores_the_floor():
     """G2-2: the deficit (in m^-2, not per L_q) scales as L_q ~ sqrt(gamma): deficit(1)/deficit(1/4)
-    = 2 +- 1e-3 (MEASURED 2.00016; the residue is the O(h^2/L_q^2) mesh error at the halved L_q).
+    = 2 +- 1e-3 (MEASURED 2.00013; the residue is the O(h^2/L_q^2) mesh error at the halved L_q).
     G2-6: u_floor_rel 1e-6 -> 1e-4 moves it by <= 1e-4 relative -- the floor shifts the effective wall
     by ~u_floor L_q, so |dD|/D <~ u_floor (MEASURED 8.3e-5, as the bipolar wall). Old code: the pinned
-    rows give 22.85 at gamma = 1 (a wide branch with no sqrt(gamma) law)."""
+    rows give 20.52 at gamma = 1 (a wide branch with no sqrt(gamma) law)."""
     pytest.importorskip("devsim")
     from dynameta.core.numerics import trapz
     n0 = 1e21
@@ -561,8 +561,8 @@ def test_unipolar_wall_equals_the_bipolar_dg_on_the_same_bar():
     only, n-type, n_i = 1e10 so holes are ~1e-3 m^-3) with the SAME insulator wall on the SAME frozen-psi
     bar are one discrete system (one kernel, one SG flux): <= 1e-10 relative in Electrons / QSqrtN and
     in QLambda (to its max). Extended Newton to REL 1e-12 (double cannot reach 1e-10 here: the Lambda
-    tail's relative criterion, D2d sec. 1.6). MEASURED: densities bit-identical, QLambda 9e-19. So the
-    bipolar GATE C Schrodinger-Poisson validation covers the unipolar wall too."""
+    tail's relative criterion, D2d sec. 1.6). MEASURED: densities 6.6e-15 / 3.1e-15 (Electrons / QSqrtN),
+    QLambda 8.7e-19. So the bipolar GATE C Schrodinger-Poisson validation covers the unipolar wall too."""
     pytest.importorskip("devsim")
     n0 = 1e23
     ru = _wall_bar("ub_u", n0=n0, ext=True, rel=1e-12)
@@ -573,20 +573,20 @@ def test_unipolar_wall_equals_the_bipolar_dg_on_the_same_bar():
 
 
 def test_degenerate_ito_bar_converges_to_the_fd_first_integral():
-    """G2-7, the old fixture (4e26 m^-3 ITO, n0/N_c = 77, g = 13): no closed form, so the reference is
-    the FD first integral above (0.350170 n0 L_q). FINDING (2026-11-06): the plan's band "deficit in
-    [0.7, 1.5] n0 L_q" does NOT hold -- the g-factor shortens the dark space ~sqrt(g) (audit C-8), and
-    the model's exact answer is 0.350; the band was written without it. Gated instead: nested meshes
-    h0 = 0.1 / 0.05 / 0.025 nm converge to the first integral at observed order >= 1.8 (MEASURED 1.94 /
-    1.98; errors 3.6e-3 / 9.5e-4 / 2.4e-4), and the Richardson extrapolation of the last two lies
+    """G2-7, the degenerate fixture (3e26 m^-3 film, m* 0.30 m_e, n0/N_c = 73, g = 14): no closed form, so the
+    reference is the FD first integral above (0.356762 n0 L_q). FINDING (2026-11-06): the plan's band "deficit
+    in [0.7, 1.5] n0 L_q" does NOT hold -- the g-factor shortens the dark space ~sqrt(g) (audit C-8), and
+    the model's exact answer is ~0.36; the band was written without it. Gated instead: nested meshes
+    h0 = 0.1 / 0.05 / 0.025 nm converge to the first integral at observed order >= 1.8 (MEASURED 1.98 /
+    1.98; errors 1.6e-3 / 4.1e-4 / 1.0e-4), and the Richardson extrapolation of the last two lies
     within 2e-5 of it (budget: the next-order term, ~ the observed error ratio's departure from 4 times
-    the finest error; MEASURED 1.1e-6 with the 0.0125 nm mesh). Extended Newton (REL 1e-10 is not
-    attainable in double at 4e26: measured 60-iteration stalls). On the old rows the same bar sits at
-    28.0 n0 L_q (measured on the old test's 0.2 nm mesh)."""
+    the finest error; MEASURED 1.8e-6, and 1.0e-6 with the 0.0125 nm mesh). Extended Newton (REL 1e-10 is
+    not attainable in double at this density: measured 60-iteration stalls). On the old rows the same bar
+    sits at 25.45 n0 L_q (measured on the old test's 0.2 nm mesh)."""
     pytest.importorskip("devsim")
-    n0 = 4e26
+    n0 = 3e26
     exact = _fd_first_integral_deficit(n0 / _nc_model())
-    assert exact == pytest.approx(0.35017, abs=1e-5)
+    assert exact == pytest.approx(0.356762, abs=1e-5)          # the scipy quadrature above, w = 72.76
     d = [_deficit(_wall_bar("ito%d" % k, n0=n0, ps_wall=h, ext=True, rel=1e-10), n0)
          for k, h in enumerate((0.1e-9, 0.05e-9, 0.025e-9))]
     e = [abs(x / exact - 1.0) for x in d]
@@ -599,7 +599,8 @@ def test_degenerate_ito_bar_converges_to_the_fd_first_integral():
 def test_the_pinned_carrier_row_alone_is_the_sink():
     """G2-7's negative control: the old rows MINUS only the pinned carrier row (u and Lambda still
     pinned, the carrier row natural) conserve and give the closed-form dark space (deficit within 2e-4
-    of I, MEASURED 3.5e-5 vs the FD integral; wall current <= 1e-12 of the scale) -- so the carrier row,
+    of I, MEASURED 7.3e-6 vs I and 3.8e-5 vs the FD integral; wall current <= 1e-12 of the scale, MEASURED
+    1.9e-15) -- so the carrier row,
     not the Lambda pin, was the wide-branch cause. (Adding that row to setup_dg_insulator_wall instead is
     impossible: its Lambda row is the same tie c - u^2, a singular matrix -- measured, UMFPACK fails.)"""
     pytest.importorskip("devsim")
@@ -630,11 +631,11 @@ def test_seed_dg_from_solution_without_walls_is_the_old_seed():
         ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="l", tag2="r")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        setup_semiconductor_region_dd(dev, reg, n_bg_m3=4e26, eps_static=9.5, dos_mass_kg=_WB_MSTAR,
+        setup_semiconductor_region_dd(dev, reg, n_bg_m3=3e26, eps_static=9.0, dos_mass_kg=_WB_MSTAR,
                                       mobility_m2Vs=_WB_MU)
         setup_dg_quantum_correction(dev, reg, m_eff_kg=_WB_MSTAR)
         nn = len(ds.get_node_model_values(device=dev, region=reg, name="x"))
-        n = np.geomspace(3e25, 4e26, nn) * (1.0 + 0.1 * np.sin(np.arange(nn)))
+        n = np.geomspace(3e25, 3e26, nn) * (1.0 + 0.1 * np.sin(np.arange(nn)))
         ds.set_node_values(device=dev, region=reg, name="Electrons", values=list(n))
         seed_dg_from_solution(dev, reg)
         u = np.asarray(ds.get_node_model_values(device=dev, region=reg, name="QSqrtN"))

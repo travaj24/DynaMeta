@@ -12,24 +12,25 @@ Gates (the self-consistent physics -- NOT the old post-hoc "DOS-enhanced peak"):
     (ratio in 0.7-1.1) -- the heavier DOS + lower E_F redistribute the accumulation rather than
     naively multiplying it (the post-hoc fill's >1 enhancement was at a FIXED parabolic potential +
     E_F, which is not the self-consistent answer).
-Measured v0.16 (model E_F): E_F 0.5646 / 0.4991 eV, peak ratio 1.013. v0.15.1 used the T = 0 3D Kane
-inversion (0.5656 / 0.4599 eV), whose flat-band fill was 0.873 n_bg at alpha 0.5 and was
-restored by spurious band bending; its peak ratio was 0.982 ("slightly below").
+Measured (model E_F; m0 0.25 m_e, alpha 0.4/eV, n_bg 3e26 m^-3): E_F 0.6528 / 0.5818 eV, peak ratio 1.014.
 Run: python -m validation.sp_carrier_nonparabolic
 """
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.carriers.sp_carrier import SchrodingerPoissonCarrier
-from dynameta.carriers.schrodinger_poisson import Q
+from dynameta.carriers.schrodinger_poisson import Q, M_E
 from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.sweep import BiasPoint
 
-N_BG = 4e26
+N_BG = 3e26
+M0 = 0.25 * M_E                 # Kane band-edge mass (both carriers)
+ALPHA = 0.4                     # eV^-1
 
 
 def _carrier(alpha):
-    return SchrodingerPoissonCarrier(semi_thk_m=12e-9, n_bg_m3=N_BG, nz=301, n_states=60,
+    return SchrodingerPoissonCarrier(semi_thk_m=12e-9, n_bg_m3=N_BG, m_eff_kg=M0, eps_static=9.0, nz=301,
+                                     n_states=60,
                                      alpha_np_per_eV=alpha)
 
 
@@ -41,12 +42,12 @@ def _gate_density(c):
 
 
 def main():
-    c_par, c_np = _carrier(0.0), _carrier(0.5)
+    c_par, c_np = _carrier(0.0), _carrier(ALPHA)
     ef_par, ef_np = c_par.E_F_J / Q, c_np.E_F_J / Q
     n_par, n_np = _gate_density(c_par), _gate_density(c_np)
     finite = bool(np.isfinite(n_np).all() and np.all(n_np >= 0.0))
     ratio = float(n_np.max()) / max(float(n_par.max()), 1.0)
-    print("[t] SP carrier nonparabolicity (alpha=0.5/eV vs parabolic), Vg=+0.5V:", flush=True)
+    print("[t] SP carrier nonparabolicity (alpha={}/eV vs parabolic), Vg=+0.5V:".format(ALPHA), flush=True)
     print("[t]   bulk E_F: parabolic={:.4f} eV  nonparabolic={:.4f} eV (lower for heavier DOS)".format(
         ef_par, ef_np), flush=True)
     print("[t]   peak n: parabolic={:.3e}  nonparabolic={:.3e}  ratio={:.3f}".format(

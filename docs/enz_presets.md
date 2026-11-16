@@ -75,10 +75,10 @@ derived here), are in `tco_presets.PARAMETER_TABLES` and in the module docstring
 
 | Quantity | AZO / GZO | In:CdO | ITO |
 |---|---|---|---|
-| `eps_inf` | 3.6 (film fits 2.9-3.9) | 5.5 at 1.1e19 cm^-3, falling to 5.1 at 4.1e20 | 4.0 (3.9-4.4) |
+| `eps_inf` | 3.6 (film fits 2.9-3.9) | 5.5 at 1.1e19 cm^-3, falling to 5.1 at 4.1e20 (measured 5.1-5.3) | 4.0 (films 3.5-4.3; bulk In2O3 4.05-4.08) |
 | band-edge mass `m0` | 0.24 m_e (0.24-0.28) | 0.10 m_e (0.10-0.16) | 0.21 m_e (0.18-0.30) |
 | nonparabolicity `alpha` | 0.33 /eV (0.27-0.33) | 0.735 /eV (0.5-0.74) | 0.52 /eV (0.18-0.52) |
-| optical mobility | 38 cm^2/Vs (34-44 good films; ALD 10-33) | 298-365 cm^2/Vs (measured table) | 30 cm^2/Vs (16-40) |
+| optical mobility | 38 cm^2/Vs (34-44 good films; ALD 10-33) | 298-365 cm^2/Vs (measured table) | 30 cm^2/Vs (near-IR fits 15-36; Hall 7-43) |
 | DC mobility | Masetti law, 54 / 35 / 18 at 1e20 / 5e20 / 1e21 | = optical | = optical |
 | static permittivity | 8.7 (along the c axis; 7.8-8.9) | 21.9 | 9.0 (8.9-10.55) |
 | band gap | 3.37 eV | 0.9 eV indirect (2.16 eV direct) | 2.8 eV |
@@ -87,9 +87,11 @@ derived here), are in `tco_presets.PARAMETER_TABLES` and in the module docstring
 Main sources: ZnO -- Romanyuk et al. 2016, Kim et al. 2008, Ruske et al. 2009 (band); Ball et al. 2023,
 Kinsey et al. 2015, Knoops et al. 2015, Kim et al. 2013 (optical); Ellmer & Mientus 2008 (mobility laws,
 grain barriers); Ashkenov et al. 2003, Pellicer-Porres et al. 2011 (permittivities). CdO -- Nolen et al.
-2020, Liu et al. 2016, Mendelsberg et al. 2012 (band, background), Cleri et al. 2021 (mobility, optical
-gap), Jefferson et al. 2008 (direct gap). ITO -- Markwitz et al. 2024, Feneberg et al. 2016, Stokey et al.
-2021, Huang et al. 2016.
+2020, Liu et al. 2016, Mendelsberg et al. 2012 (band, background), Schrecengost et al. 2024 (background),
+Cleri et al. 2021 (mobility, optical gap), Jefferson et al. 2008 (direct gap). ITO -- Markwitz et al. 2024,
+Feneberg et al. 2016, Fujiwara & Kondo 2005, Liu et al. 2014 (band); Stokey et al. 2021, Hamberg & Granqvist
+1986, Blair et al. 2023, Naik et al. 2013 (background, damping); Losego et al. 2009, Korneluk et al. 2023
+(Hall mobility, density range).
 
 **Note on the "C" of the TCO literature.** Papers write `m* = m0 sqrt(1 + 2 C hbar^2 (3 pi^2 N)^(2/3) / m0)`;
 that `C` is the `alpha` above. Nolen et al. (2020) print this formula, but their fitted `C = 1.47 /eV`
@@ -124,9 +126,15 @@ wrong band (for example a parabolic one) fails them.
   at optical frequencies than at DC (near-IR mobility ~30 % above the DC one in doped ZnO), so for mid-IR or
   THz work set the damping from data in that window. The In:CdO background is evaluated below the
   (renormalized) direct gap only -- wavelengths above about 0.7 um -- and raises otherwise.
-- **In:CdO background fall.** Nolen et al. 2020 give `eps_inf` 5.5 -> 5.1 in their abstract and 5.5 -> 4.9 in
-  their text. The default follows the abstract; it gives 4.87 at 1e21 cm^-3, close to Liu et al.'s ~4.9.
-  `edge_amplitude=` sets the size of the fall.
+- **In:CdO background fall.** Nolen et al. 2020 state that `eps_inf` falls "from 5.6 to 5.1" (abstract) or
+  "from 5.5 to 5.1" (text) over their films (1.1e19-4.1e20 cm^-3). Read off their figure, the lowest value
+  (5.1) belongs to the ~3.5e20 film; the 4.1e20 film is ~5.2. Liu et al. 2016 tabulate 5.0 at 1e21 cm^-3
+  (text: "~5.5 to 4.9" over 1e20-1.2e21, all dopants), and Schrecengost et al. 2024 fit 5.3 at 2.5-4.7e20.
+  The default (`edge_amplitude` 7.81) takes Nolen's stated end points: 5.1 at 4.1e20 and 4.87 at 1e21, 0.1-0.2
+  below the measured films above ~3e20. It is kept because, with the preset's band, it reproduces the
+  measured screened plasma wavelengths best. `edge_amplitude=6.2` matches the measured `eps_inf` (5.18 at
+  4.1e20, 5.00 at 1e21) and makes the ENZ wavelengths above 5e20 1-1.6 % longer. Film-to-film scatter is
+  about +/-0.1.
 - **FDTD.** The single-pole FDTD Drude cannot carry a density-dependent background: build In:CdO with
   `background=None` for that route.
 
@@ -289,13 +297,19 @@ Both presets use a two-band Kane conduction band built from the gap and the Kane
   shifts the ENZ wavelength by about 2.4 % at 1.5e18 cm^-3 and by less than 0.5 % above 1e19 cm^-3.
 - An `InterbandOnsetGuard` refuses photon energies at or above the interband onset Eg + E_F(n), where a Drude
   model stops being valid. The onset is about 1.7 um at 1e19 cm^-3 and about 0.93 um at 1e20 cm^-3.
-- Damping comes from the fitted values of Wei et al. 2017. The DC mobility follows the Hilsum-form law of
-  Petrovic et al. 2024.
+- Damping comes from the fitted values of Wei et al. 2017: 1.4e13 and 1.9e13 rad/s at a nominal 1.25e19 and
+  7.35e19 cm^-3 (74 and 101 cm^-1). The higher value sits mid-range of the 0.9-2.9e13 rad/s measured on Si:InAs
+  films at 4-5.5e19 cm^-3 (Wei et al. 2020). The lower one is about twice the DC rate implied by the Hall law,
+  so it errs on the lossy side. Expect roughly 0.6-1.6e13 rad/s at 1.25e19 and 0.9-3e13 at 7.35e19 between
+  films. The DC mobility follows the Hilsum-form law of Petrovic et al. 2024. It gives 1200-1500 cm^2/Vs at
+  4-5.5e19 cm^-3, against the 1040-1265 cm^2/Vs Hall data of Wei et al. 2020.
 - Published screened plasma wavelengths at equal nominal density disagree by 7-25 %, mostly from how each
   paper calibrates density. The preset lies inside that spread.
 
 **InAsSb** (`inassb()`, x ~ 0.09):
-- Uses the alloy gap 0.288 eV with the InAs P^2, and InAs's damping table and DC mobility law.
+- Uses the alloy gap 0.288 eV with the InAs P^2, and InAs's damping table and DC mobility law. For the alloy the
+  InAs damping is an upper-loss estimate: the one fitted InAsSb:Si value found is 5.9e12 rad/s at 1.4e19
+  cm^-3 (Moreau et al., preprint), and no measured rate at 3-7e19 cm^-3 was found.
 - Reproduces Taliercio et al. 2015 within 4 % at 3.4e19 cm^-3: 0.097 m_e (they report 0.1) and 6.12 um
   (they report 6.25).
 - The alloy's phonons are not sourced, so there is no lattice term.

@@ -737,6 +737,46 @@ def test_f12_solve_fem_and_shg_build_the_background_from_the_SAME_helper(monkeyp
     assert abs(E[0]) > 0.1 and E[1] == 0j                    # x-polarized, as solve_fem builds it
 
 
+def test_background_substrate_kz_of_a_lossless_metal_decays_whatever_the_sign_of_zero(monkeypatch):
+    """solve_fem and the SHG reconstruction build the substrate 0-order kz of the background field
+    from (n_sub k0)^2 - k_par^2. For a lossless metal substrate written as n_sub = (-0.0, +sqrt 40)
+    -- Im n > 0, the passive index tmm_reference._passive_sqrt returns for eps = -40 - 0j -- that
+    argument carries Im = -0.0 (checked), whose bare principal root is the GROWING wave. Both entry
+    points must hand _layered_background the decaying kz of n_sub = (+0.0, +sqrt 40), bit for bit.
+    The spy stops each call there (no solve)."""
+    import math
+    import struct
+    pytest.importorskip("ngsolve")
+    from dynameta.optics import shg_fem
+    from dynameta.optics import solver as S
+    geo, eps_cf, opt = _fem_cell(pol="x")
+    y = math.sqrt(40.0)
+    n_pos, n_neg = complex(0.0, y), complex(-0.0, y)
+    k0 = 2.0 * math.pi / (1200e-9 * S.S)                          # nm^-1, as the solver forms it
+    arg = (n_neg * k0) ** 2
+    assert arg.imag == 0.0 and math.copysign(1.0, arg.imag) < 0.0
+
+    class _Stop(Exception):
+        pass
+    seen = []
+
+    def spy(*a, **k):
+        seen.append(complex(a[6]))                               # kz_sub
+        raise _Stop
+
+    monkeypatch.setattr(S, "_layered_background", spy)
+    for n_sub in (n_pos, n_neg):
+        with pytest.raises(_Stop):
+            S.solve_fem(geo, 1200e-9, eps_cf, opt, order=1, n_sub=n_sub)
+        with pytest.raises(_Stop):
+            shg_fem._reconstruct_fundamental_field(geo, None, 1200e-9, opt, eps_cf, 1,
+                                                   1.0 + 0j, n_sub, 0.0, "x")
+    bits = [struct.pack("<dd", z.real, z.imag) for z in seen]
+    assert len(bits) == 4 and len(set(bits)) == 1, seen
+    # normal incidence: kz_sub = +i y k0, up to the rounding of (n k0)^2 and its root (a few ulp)
+    assert seen[0].imag > 0.0 and abs(seen[0] - 1j * y * k0) <= 1e-15 * y * k0, seen[0]
+
+
 def test_f12_conical_incidence_is_refused_by_the_shg_reconstruction():
     """AUDIT F-12 (the other half of the drift): the private copy had no ky, so a conical azimuth
     was silently dropped rather than refused."""

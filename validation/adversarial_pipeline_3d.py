@@ -1,6 +1,6 @@
 """ADVERSARIAL: I claimed the from_design 3D builder is 'run_pipeline-compatible, no
 hand-alignment' -- but I only checked the region NAME matched the optics alignment. I
-never actually RAN run_pipeline with the 3D carrier. This does: build a gated-ITO Design,
+never actually RAN run_pipeline with the 3D carrier. This does: build a gated-film Design,
 make the 3D carrier via Stacked3DSpec.from_design, and run the FULL pipeline (carriers ->
 bridge -> optics) at two biases with NO hand-built alignment. Pass = it completes and
 produces finite R that responds to the gate bias. Run: python -m validation.adversarial_pipeline_3d
@@ -24,18 +24,18 @@ PERIOD = 80e-9      # small cell so the 3D gate-patch mesh solves quickly (this 
 def build_design():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("HfO2", ConstantOptical(4.0 + 0j), eps_static_dc=18.0))
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
-                      transport=TransportModel(n_bg_m3=4e26, eps_static=9.5,
-                                                dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
+    reg.add(Material("oxB", ConstantOptical(2.00 ** 2 + 0j), eps_static_dc=20.0))
+    reg.add(Material("ITO", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14),
+                      transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
+                                                dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E)))
     cell = UnitCell.square(PERIOD)
-    layers = [Layer("ito", 10e-9, "ITO"), Layer("hfo2", 8e-9, "HfO2")]
+    layers = [Layer("ito", 10e-9, "ITO"), Layer("gate_ox", 8e-9, "oxB")]
     stack = Stack(layers=layers, superstrate_material="air", substrate_material="air")  # vacuum exit
-    electrodes = [Electrode("gate", "hfo2", centered_square(cell, 44e-9), role="biased"),  # ~0.55 frac
+    electrodes = [Electrode("gate", "gate_ox", centered_square(cell, 44e-9), role="biased"),  # ~0.55 frac
                   Electrode("gnd", "ito", "x_lo", role="ground", fixed_voltage_V=0.0)]
     m3 = Mesh3DSpec(pml_thk_m=400e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
                      maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=20e-9)
-    return Design(name="gated_ito_3d", unit_cell=cell, stack=stack, electrodes=electrodes,
+    return Design(name="gated_film_3d", unit_cell=cell, stack=stack, electrodes=electrodes,
                    materials=reg, mesh_3d=m3, optical=OpticalSpec(polarization="x", linear_solver="umfpack"))
 
 
@@ -47,7 +47,7 @@ def main():
     carrier = Devsim3DEquilibrium(spec)
     sweep = Sweep(bias_points=[BiasPoint({"gate": 0.0, "body": 0.0}, "0V"),
                                 BiasPoint({"gate": 1.0, "body": 0.0}, "+1V")],
-                   wavelengths_nm=[1300.0])
+                   wavelengths_nm=[1200.0])
     try:
         rows = run_pipeline(d, sweep, carrier_solver=carrier,
                              optical_builder=LayeredOpticalBuilder(d), verbose=True)

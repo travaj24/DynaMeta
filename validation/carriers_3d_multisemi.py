@@ -17,10 +17,10 @@ GATE B (from_design heterostack extraction, NO solve): a Design with TWO stacked
         (user decision 2026-11-04) TransportModel.chi_eV defaults to None: this ITO/ITO stack carries
         None through (same material -> zero offset by identity), it no longer reads a 4.5 default.
 GATE C (built-in potential, SOLVER; audit S1-9, wave-7 2026-11-02): an n+/n ITO homojunction
-        (4e26 | 4e25 m^-3, 12 nm each) with the gate held at the n side's flat band. Equilibrium = flat
+        (3e26 | 3e25 m^-3, 12 nm each) with the gate held at the n side's flat band. Equilibrium = flat
         Fermi level, so each bulk must sit at its OWN neutral potential: psi(semi bulk) = 0 and
-        psi(xs bulk) = band_alignment()['xs'] = -0.448 V (the FD work-function difference; Boltzmann
-        would say V_t ln 10 = 0.060 V -- ITO is degenerate). Before S1-9 every region was calibrated
+        psi(xs bulk) = band_alignment()['xs'] = -0.432 V (the FD work-function difference; Boltzmann
+        would say V_t ln 10 = 0.060 V -- the film is degenerate). Before S1-9 every region was calibrated
         neutral at psi = 0 (an implicit conduction-band step that cancels the built-in potential), so
         the junction carried NO drop and the n side bulk sat near 0 V.
 
@@ -41,11 +41,13 @@ from dynameta.geometry.specs import OpticalSpec, Mesh3DSpec
 from dynameta.carriers.devsim_3d import Stacked3DSpec, Devsim3DEquilibrium
 from dynameta.sweep import BiasPoint
 
-N_BG = 4.0e26
+N_BG = 3.0e26
+EPS_S = 9.0
+M_DOS = 0.30 * M_E
 VG = 2.0
 TSEMI = 16e-9
-COMMON = dict(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, oxide_thk_m=8e-9,
-              n_bg_m3=N_BG, eps_semi=9.5, eps_oxide=18.0, dos_mass_kg=0.35 * M_E,
+COMMON = dict(semi_material="ITO", oxide_material="oxB", lateral_m=12e-9, oxide_thk_m=8e-9,
+              n_bg_m3=N_BG, eps_semi=EPS_S, eps_oxide=20.0, dos_mass_kg=M_DOS,
               grid_n=(6, 6, 33), mesh_min_nm=0.4, mesh_max_nm=3.0, physics="equilibrium")
 
 
@@ -76,7 +78,7 @@ def _gate_a():
     s1.teardown()
     # split: 8 nm primary + 8 nm extra semiconductor, identical material/n_bg/eps
     s2 = Devsim3DEquilibrium(
-        Stacked3DSpec(semi_thk_m=8e-9, extra_semiconductors=[("xs", "ITO", 8e-9, 9.5, N_BG)], **COMMON),
+        Stacked3DSpec(semi_thk_m=8e-9, extra_semiconductors=[("xs", "ITO", 8e-9, EPS_S, N_BG)], **COMMON),
         device_name="split", mesh_name="split_m")
     s2.solve(BiasPoint({"gate": VG, "body": 0.0}, "split"))
     za, na = _zprofile("split", "semi", zg)
@@ -92,17 +94,22 @@ def _gate_a():
 
 
 def _design(layer_specs):
+    """A generic gated-film cell over `layer_specs` [(name, thickness, material)]: materials air, glass,
+    oxA (eps_dc 9), oxB (eps_dc 20), mirror_metal and the film "ITO" (n_bg N_BG, eps_s EPS_S, DOS mass M_DOS);
+    400 nm square cell, glass substrate, a 300 nm patch gate on the layer 'patch', a full back contact on
+    'mirror'."""
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("Si", ConstantOptical(12.0 + 0j)))
-    reg.add(Material("HfO2", ConstantOptical(4.0 + 0j), eps_static_dc=18.0))
-    reg.add(Material("Al-Nd", ConstantOptical(-180 + 30j), is_metal=True))
-    reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
-                     transport=TransportModel(n_bg_m3=N_BG, eps_static=9.5,
-                                              dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
-    cell = UnitCell.square(370e-9)
+    reg.add(Material("glass", ConstantOptical(1.45 ** 2 + 0j)))
+    reg.add(Material("oxA", ConstantOptical(1.70 ** 2 + 0j), eps_static_dc=9.0))
+    reg.add(Material("oxB", ConstantOptical(2.00 ** 2 + 0j), eps_static_dc=20.0))
+    reg.add(Material("mirror_metal", ConstantOptical(-120.0 + 20.0j), is_metal=True))
+    reg.add(Material("ITO", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14),
+                     transport=TransportModel(n_bg_m3=N_BG, eps_static=EPS_S,
+                                              dos_mass_kg_of_n_m3=lambda n: M_DOS)))
+    cell = UnitCell.square(400e-9)
     layers = [Layer(nm, thk, mat) for (nm, thk, mat) in layer_specs]
-    stack = Stack(layers=layers, superstrate_material="air", substrate_material="Si")
+    stack = Stack(layers=layers, superstrate_material="air", substrate_material="glass")
     # the gate is a PATCH (CrossSection footprint) so from_design's gate-detection picks it (the
     # metasurface gate IS a patch); the body/back contact on the mirror is a full-plane electrode.
     electrodes = [Electrode("bot", "mirror", "full", role="biased"),
@@ -112,34 +119,35 @@ def _design(layer_specs):
 
 
 def _gate_b():
-    # contiguous heterostack: mirror / lower_hfo2 / ito_bot / ito_top / upper_hfo2 / patch(gate)
-    d = _design([("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"),
-                 ("ito_bot", 6e-9, "ITO"), ("ito_top", 5e-9, "ITO"),
-                 ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")])
+    # contiguous heterostack: mirror / lower_oxb / ito_bot / ito_top / upper_oxb / patch(gate)
+    d = _design([("mirror", 80e-9, "mirror_metal"), ("lower_oxb", 6e-9, "oxB"),
+                 ("ito_bot", 8e-9, "ITO"), ("ito_top", 6e-9, "ITO"),
+                 ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")])
     spec = Stacked3DSpec.from_design(d)
     ok_h = (spec.field_region_name == "ito_top"                      # gate-adjacent emitted
-            and spec.semi_material == "ITO" and abs(spec.semi_thk_m - 6e-9) < 1e-12   # body-most primary
+            and spec.semi_material == "ITO" and abs(spec.semi_thk_m - 8e-9) < 1e-12   # body-most primary
             and len(spec.extra_semiconductors) == 1
             and spec.extra_semiconductors[0][0] == "ito_top"
-            and abs(spec.extra_semiconductors[0][2] - 5e-9) < 1e-12
-            and spec.oxide_material == "HfO2" and abs(spec.oxide_thk_m - 7e-9) < 1e-12
+            and abs(spec.extra_semiconductors[0][2] - 6e-9) < 1e-12
+            and spec.oxide_material == "oxB" and abs(spec.oxide_thk_m - 6e-9) < 1e-12
+            and spec.n_bg_m3 == N_BG and spec.eps_semi == EPS_S and spec.eps_oxide == 20.0
             # audit S1-9: the affinity + DOS mass ride along (v0.14: chi_eV defaults to None, carried
             # through as None; same material -> band_alignment's zero offset)
             and len(spec.extra_semiconductors[0]) == 7
             and spec.extra_semiconductors[0][5] is None and spec.chi_semi_eV is None
             and spec.band_alignment()["ito_top"][0] == spec.band_alignment()["semi"][0]
-            and abs(spec.extra_semiconductors[0][6] - 0.35 * M_E) < 1e-40)
+            and abs(spec.extra_semiconductors[0][6] - M_DOS) < 1e-40)
     print("[ms] B from_design heterostack: primary='semi'({:.0f}nm) extra={} field='{}' oxide={}({:.0f}nm)"
           " -> {}".format(spec.semi_thk_m * 1e9,
                           [(e[0], "{:.0f}nm".format(e[2] * 1e9)) for e in spec.extra_semiconductors],
                           spec.field_region_name, spec.oxide_material, spec.oxide_thk_m * 1e9,
                           "OK" if ok_h else "FAIL"), flush=True)
-    # non-contiguous: ito / hfo2 / ito separated -> ambiguous -> raise
+    # non-contiguous: ito / oxB / ito separated -> ambiguous -> raise
     raised = False
     try:
         Stacked3DSpec.from_design(_design(
-            [("mirror", 70e-9, "Al-Nd"), ("ito_a", 5e-9, "ITO"), ("mid_hfo2", 4e-9, "HfO2"),
-             ("ito_b", 5e-9, "ITO"), ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]))
+            [("mirror", 80e-9, "mirror_metal"), ("ito_a", 6e-9, "ITO"), ("mid_oxb", 4e-9, "oxB"),
+             ("ito_b", 6e-9, "ITO"), ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")]))
     except ValueError as e:
         raised = "contiguous" in str(e).lower()
     print("[ms] B non-contiguous semiconductors raise: {} -> {}".format(raised, "OK" if raised else "FAIL"),
@@ -149,8 +157,8 @@ def _gate_b():
 
 def _gate_c():
     ds = import_devsim()
-    n_lo = 4.0e25
-    spec = Stacked3DSpec(semi_thk_m=12e-9, extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, n_lo)],
+    n_lo = 3.0e25
+    spec = Stacked3DSpec(semi_thk_m=12e-9, extra_semiconductors=[("xs", "ITO", 12e-9, EPS_S, n_lo)],
                          **{**COMMON, "lateral_m": 4e-9, "oxide_thk_m": 4e-9, "grid_n": (3, 3, 17),
                             "mesh_min_nm": 0.5, "mesh_max_nm": 2.0})
     psi_x = spec.band_alignment()["xs"][1]

@@ -23,11 +23,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, Q, HBAR, M_E
 
-N_BG = 4e26
-M = 0.35 * M_E
+N_BG = 3e26
+M = 0.30 * M_E
 GS, GV = 2, 1
 PSI_S = 0.5            # gate-side surface potential
-EPS_R = 9.5
+EPS_R = 9.0
 
 
 def _solve(sp, nz, neu, psi_s):

@@ -47,10 +47,10 @@ only, S = secondary, quoted by another paper, D = derived here from cited inputs
            6.07/5.28/5.17e20 cm^-3, cross-over 1560/1700/1710 nm, eps_inf 3.5/3.7/3.7, eps'' 0.31/0.41/0.31 (P)
   [Kin15]  N. Kinsey et al., Optica 2, 616 (2015), 10.1364/OPTICA.2.000616 -- PLD AZO 9.8e20 cm^-3,
            eps(1.3 um) = 0.22 + 0.26i (P, arXiv:1503.07832)
-  [Nai12]  G. V. Naik et al., PNAS 109, 8834 (2012), 10.1073/pnas.1121517109 -- PLD AZO ~4.3e20 cm^-3,
-           metallic beyond 1.84 um (P)
-  [KimX13] J. Kim et al., Phys. Rev. X 3, 041037 (2013), 10.1103/PhysRevX.3.041037 -- PLD GZO Drude +
-           Gaussians, hbar gamma 0.092 / 0.159 eV (P)
+  [Nai12]  G. V. Naik et al., PNAS 109, 8834 (2012), 10.1073/pnas.1121517109 -- PLD AZO ~4.3e20 cm^-3
+           (estimated from their Drude fit, no Hall data), metallic beyond 1.84 um (P)
+  [KimX13] J. Kim et al., Phys. Rev. X 3, 041037 (2013), 10.1103/PhysRevX.3.041037 -- PLD GZO (6 / 3 wt%)
+           Drude + 2 Gaussians, Table II: hbar gamma 0.092 / 0.159 eV, eps_inf 2.44 / 2.56 (P)
   [Kno15]  H. C. M. Knoops et al., J. Vac. Sci. Technol. A 33, 021509 (2015), 10.1116/1.4905086 -- PECVD
            AZO 7.5e20 cm^-3: Hall 30, FTIR 29, SE extended-Drude 28, SE plain-Drude 38 cm^2/(V s), all with
            m* = 0.4 m_e; the authors prefer the extended (frequency-dependent damping) Drude fit (P)
@@ -60,7 +60,8 @@ only, S = secondary, quoted by another paper, D = derived here from cited inputs
            6.0e20 cm^-3, Hall ~46 cm^2/(V s) (A)
   [Cla13]  B. Claflin, K. Leedy, D. Look, Opt. Eng. 52, 053801 (2013), 10.1117/1.OE.52.5.053801 -- PLD GZO
            8.05e20 cm^-3, Hall 32.1 cm^2/(V s) (P)
-  [Gab14]  M. Gabas et al., APL Mater. 2, 012112 (2014), 10.1063/1.4863595 -- optical gap 3.63 eV at 5e20 (P)
+  [Gab14]  M. Gabas et al., APL Mater. 2, 012112 (2014), 10.1063/1.4863595 -- sputtered 1 at.% GZO: optical
+           gap 3.63 eV at 5e20 (P; first reported in Gabas et al., J. Appl. Phys. 113, 163709 (2013), S)
   [Kle10]  A. Klein et al., Materials 3, 4892 (2010), 10.3390/ma3114892 -- AZO work function 3.1-4.5 eV,
            In2O3/ITO ionization potentials and gap (P)
   [Tek23]  M. Tekin et al., J. Appl. Phys. 134, 084503 (2023), 10.1063/5.0157726 -- sputtered ZnOx
@@ -72,16 +73,26 @@ only, S = secondary, quoted by another paper, D = derived here from cited inputs
   CdO and In:CdO
   [Nol20]  K. Nolen et al., Phys. Rev. Materials 4, 025202 (2020), 10.1103/PhysRevMaterials.4.025202 --
            HiPIMS In:CdO 1.1e19-4.1e20: m0* 0.10, C 1.47 (convention: see above), Hall 426 / 389 / 312 at
-           6.6e19 / 1.4e20 / 4.1e20 (P); eps_inf 5.5 -> 5.1 in the abstract, 5.5 -> 4.9 in the text (Fig. 2c);
-           ENZ 3.87 / 2.72 / 1.92 um = 1e4 / (their screened plasma wavenumbers 2584 / 3680 / 5215 cm^-1) (D)
+           6.6e19 / 1.4e20 / 4.1e20 (P); eps_inf per film (x-intercept of eps1 vs 1/(E^2 + gamma^2)) "from 5.6
+           to 5.1" (abstract), "from 5.5 to 5.1" (text), plotted in Fig. 2 (the eps_inf panel is (b) in the
+           accepted manuscript, the caption calls it (c)): ~5.6 at 1.1e19, lowest ~5.1 at ~3.5e20, ~5.2 at
+           4.1e20 (read off the figure, D); ENZ 3.87 / 2.72 / 1.92 um = 1e4 / (their screened plasma
+           wavenumbers 2584 / 3680 / 5215 cm^-1) (D)
   [Liu16]  C. P. Liu et al., Phys. Rev. Applied 6, 064018 (2016), 10.1103/PhysRevApplied.6.064018 --
-           sputtered (In,Ga):CdO: m0* 0.13, C 0.5; eps_inf ~5.5 -> 4.9 over 0-1e21; band-gap renormalization
-           0.25-0.45 eV over 1e20-1.2e21 (Fig. 10); screened plasma wavelength 1.70 / 1.58 / 1.43 / 1.29 um at
-           5.4 / 6.6 / 8.9 / 11e20; electron affinity 5.8 eV; eps_0 21.9 (P)
+           sputtered polycrystalline CdO doped with In, Ga, V or Ti: m0* 0.13, C 0.5; eps_inf (same
+           x-intercept method) 5.4 at N = 0 and 5.0 at 1e21 (Table II), "~5.5 to 4.9" (Sec. 4.4) / "5.5 to 4.8"
+           (abstract) over 1e20-1.2e21 for all dopants; the In-doped films lie at 5.0-5.3 (Fig. 6b);
+           band-gap renormalization from Jain's model (Eq. 13), 0.25-0.45 eV over 1e20-1.2e21 (Fig. 10);
+           screened plasma wavelength 1.70 / 1.58 / 1.43 / 1.29 um at 5.4 / 6.6 / 8.9 / 11e20; electron
+           affinity 5.8 eV; eps_0 21.9 (P, accepted manuscript)
+  [Sch24]  J. R. Schrecengost et al., Adv. Opt. Mater. 12, 2400803 (2024), 10.1002/adom.202400803 -- HiPIMS
+           (Gd,In):CdO on sapphire, ellipsometry Drude fits (Table 1): eps_inf 5.55 / 5.5 / 5.5 / 5.4 / 5.3 at
+           0.08 / 0.26 / 0.65 / 0.9 / 2.55-4.65e20 cm^-3 (P)
   [Men12]  R. J. Mendelsberg, Y. Zhu, A. Anders, J. Phys. D 45, 425302 (2012), 10.1088/0022-3727/45/42/425302
            -- arc In:CdO: m0* 0.16 +/- 0.05, C 0.5 +/- 0.2 (P)
   [Jef08]  P. H. Jefferson et al., Appl. Phys. Lett. 92, 022101 (2008), 10.1063/1.2833269 -- direct gap
-           2.16 eV, band-edge mass 0.21 (k.p), non-dispersive valence band; eps_inf 5.3 (S) (P)
+           2.16 eV, band-edge mass 0.21 (k.p), non-dispersive valence band; eps_inf 5.3 assumed for all films
+           (Finkenrath, Landolt-Boernstein, S) (P)
   [Cle21]  A. Cleri et al., Phys. Rev. Materials 5, 035202 (2021), 10.1103/PhysRevMaterials.5.035202 --
            HiPIMS In:CdO Hall mobility and optical gap vs density, Table I (P)
   [Yan17]  Y. Yang et al., Nat. Photonics 11, 390 (2017), 10.1038/nphoton.2017.64 -- In:CdO 2.8e20 cm^-3,
@@ -92,19 +103,36 @@ only, S = secondary, quoted by another paper, D = derived here from cited inputs
            density 2e13 -> 2e14 cm^-2 (P)
 
   In2O3 and ITO
-  [Mar24]  P. Markwitz et al., Phys. Rev. B 109, 115201 (2024), 10.1103/PhysRevB.109.115201 -- sputtered
+  [Mar24]  M. Markwitz et al., Phys. Rev. B 109, 115201 (2024), 10.1103/PhysRevB.109.115201 -- sputtered
            ITO, density set by nitrogen implantation (compensation): m0* 0.21, C 0.52 eV^-1 (Seebeck + Hall,
-           2.9e20-1.01e21) (A)
+           2.9e20-1.01e21); Hall 42.5-43.1 cm^2/(V s) at 9.5e20-1.01e21 before implantation, 17-39 after;
+           quotes the Kane pairs of [FK05] and [Liu14] (P, accepted manuscript)
   [Fen16]  M. Feneberg et al., Phys. Rev. B 93, 045203 (2016), 10.1103/PhysRevB.93.045203 -- m0* 0.18, C 0.5
            (S, via [Sto21]); eps_inf 4.08 (A)
   [Sto21]  M. Stokey et al., J. Appl. Phys. 129, 225102 (2021), 10.1063/5.0052848 -- eps_inf 4.05, eps_0
            10.55 (LST) for bulk In2O3 (P)
-  [Hua16]  Y.-W. Huang et al., Nano Lett. 16, 5319 (2016), 10.1021/acs.nanolett.6b00555 -- sputtered ITO
-           eps_inf 4.14-4.42, Hall 16-40 cm^2/(V s), 1.9-3.9e20 cm^-3 (P, SI Table S1)
+  [FK05]   H. Fujiwara and M. Kondo, Phys. Rev. B 71, 075109 (2005), 10.1103/PhysRevB.71.075109 --
+           ellipsometry of ITO films 1e19-1e21: eps_inf falls and m* rises with the Hall density; optical and
+           Hall mobilities differ in polycrystalline films (A); Kane pair 0.297 m_e / 0.18 eV^-1 (S, via [Mar24])
+  [Liu14]  X. Liu et al., Appl. Phys. Lett. 105, 181117 (2014), 10.1063/1.4900936 -- optical mass 0.35 ->
+           0.53 m_e and optical mobility ~20 -> 9 cm^2/(V s) over 6.2e19-1.4e21 (A); Kane pair 0.263 m_e /
+           0.42 eV^-1 (S, via [Mar24])
+  [Los09]  M. D. Losego et al., J. Appl. Phys. 106, 024903 (2009), 10.1063/1.3174440 -- sputtered ITO
+           1e20-1e21 cm^-3, Hall 7-40 cm^2/(V s); a free-electron model from n and mobility alone reproduces
+           the IR reflectivity (A)
+  [Bla23]  S. F. J. Blair et al., Nanomaterials 13, 1990 (2023), 10.3390/nano13131990 -- DC-sputtered ITO
+           vs oxygen flow: conductive film 2.77e20 cm^-3, eps_inf 4.31, Hall 28.4 cm^2/(V s), Gamma 147 THz in
+           eps_inf - wp^2/(w^2 + i Gamma w) (1.47e14 s^-1, 0.097 eV); resistive films (<= 1.3e19) 5.3-5.4 (P)
+  [Kor23]  Korneluk, Szymczak, Stefaniuk, Sci. Rep. 13, 18520 (2023), 10.1038/s41598-023-45651-w --
+           e-beam ITO up to 1.2e21 cm^-3, Hall 10-15 cm^2/(V s) (P)
+  [Nai13]  G. V. Naik, V. M. Shalaev, A. Boltasseva, Adv. Mater. 25, 3264 (2013), 10.1002/adma.201205076 --
+           ITO (10 wt%) Drude-Lorentz fit, Table 2: eps_b 3.528, E_p 1.78 eV, damping 0.155 eV (P, author copy)
+  (also [Sch24] above: commercial ITO 1.02e21 cm^-3, eps_inf 3.6, m* 0.34 m_e, optical mobility 15 (P))
   [Wal08]  A. Walsh et al., Phys. Rev. Lett. 100, 167402 (2008), 10.1103/PhysRevLett.100.167402 --
            fundamental gap <= 2.9 eV (P)
   [HG86]   I. Hamberg and C. G. Granqvist, J. Appl. Phys. 60, R123 (1986), 10.1063/1.337534 -- eps_0 8.9-9.5,
-           eps_inf ~4 (S, via [Sto21])
+           eps_inf ~4 (S, via [Sto21]); e-beam ITO, Hall ~30 cm^2/(V s) at ~2e-4 Ohm cm, frequency-dependent
+           damping needed in the IR (A)
 """
 
 from __future__ import annotations
@@ -165,7 +193,8 @@ _ZNO_RANGE = (1.0e20 * _CM3, 1.0e21 * _CM3)
 
 _ZNO_TABLE = (
     TCOParameter("eps_inf (single background, films)", "3.6", "2.9-3.9 film fits ([Rom16] 3.88->2.92 over "
-                 "0.9-4e20 IR; [Bal23] 3.5-3.7; [KimX13] effective 3.3-3.5); host 3.70/3.78 perp/par [Ash03], "
+                 "0.9-4e20 IR; [Bal23] 3.5-3.7; [KimX13] 2.44-2.56 plus two UV Gaussians, ~3.2-3.5 in the "
+                 "near-IR (D)); host 3.70/3.78 perp/par [Ash03], "
                  "3.85 [Ser88]", "[Bal23], [Ash03], [Ser88], [Rom16]", "P / S"),
     TCOParameter("band-edge mass m0*", "0.24 m_e", "0.24-0.28 (bare 0.23-0.28; polaron 0.29-0.32)",
                  "[Rom16], [Kim08], [Rus09]", "P / A"),
@@ -216,18 +245,23 @@ CDO_HIPIMS_HALL_MOBILITY = TabulatedMobility(
 
 _CDO_M0 = 0.10                    # [Nol20] as plotted (P)
 _CDO_ALPHA = 0.735                # [Nol20] C = 1.47 without the factor 2 -> standard alpha (D, see module doc)
-_CDO_EPS_INF = 5.5                # at the anchor density 1.1e19 cm^-3 ([Nol20] lowest-density film); [Yan17] 5.5
+_CDO_EPS_INF = 5.5                # at the anchor density 1.1e19 cm^-3: [Nol20] 5.5 (text) / 5.6 (abstract, figure),
+                                  # [Sch24] 5.5-5.55 below 7e19, [Liu16] 5.4 at N = 0; [Yan17] 5.5
 _CDO_N_REF = 1.1e19 * _CM3
 _CDO_EPS_STATIC = 21.9            # Finkenrath and Uhle (1967) via [Liu16], [W15] (S)
 _CDO_GAP_DIRECT = 2.16            # [Jef08] (P)
 _CDO_GAP_INDIRECT = 0.9           # DFT 0.89 eV via [W15]; ~0.9 eV (XAS, Demchenko 2011, A)
 _CDO_CHI = 5.8                    # [Liu16] (P); [Nol20] Fermi stabilization 4.9 eV below vacuum, ~1 eV above
                                   # the CBM (S) -> ~5.9 (D)
-_CDO_BGR = 4.8e-10                # eV m: [Liu16] Fig. 10, 0.25 eV at 1e20 and 0.45 eV at 1.2e21 cm^-3 read off
-                                  # the figure -> 5.4e-10 / 4.2e-10; mean (D)
-_CDO_EDGE_AMPLITUDE = 7.81        # D: fitted so that eps_b(4.1e20) - eps_b(1.1e19) = -0.40 at 2 um ([Nol20]
-                                  # abstract, 5.5 -> 5.1); it gives 4.87 at 1e21 ([Liu16] ~4.9). [Nol20]'s text
-                                  # (5.5 -> 4.9 over its films) would need a larger amplitude
+_CDO_BGR = 4.8e-10                # eV m: [Liu16] Fig. 10 (Jain's model, not an n^(1/3) law), 0.25 eV at 1e20 and
+                                  # 0.45 eV at 1.2e21 cm^-3 read off the figure -> 5.4e-10 / 4.2e-10; mean (D)
+_CDO_EDGE_AMPLITUDE = 7.81        # D: fitted so that eps_b falls 5.5 -> 5.1 at 2 um between 1.1e19 and 4.1e20
+                                  # (the end points [Nol20] state; their lowest film, 5.1, is the ~3.5e20 one and
+                                  # the 4.1e20 film reads ~5.2); 4.87 at 1e21 ([Liu16] Table II 5.0, text ~4.9).
+                                  # 0.1-0.2 below the measured eps_inf above ~3e20 ([Nol20], [Sch24], [Liu16]);
+                                  # kept because, with this band, it reproduces the measured screened plasma
+                                  # wavelengths: 6.2 (5.18 / 5.00 at 4.1e20 / 1e21) puts [Liu16]'s 1.1e21 point
+                                  # 3 % long against 1.4 % here
 _CDO_RANGE = (1.0e19 * _CM3, 1.2e21 * _CM3)
 
 
@@ -238,13 +272,14 @@ def _cdo_band_filling(band: KaneBand, edge_amplitude: float = _CDO_EDGE_AMPLITUD
 
 #: The CdO density-dependent background of the in_cdo preset (Burstein-Moss band filling + gap
 #: renormalization of the direct Gamma edge; [Jef08] gap and non-dispersive valence band, [Liu16]
-#: renormalization, amplitude fitted to [Nol20]): eps_b(n) = 5.5 + chi(n) - chi(1.1e19 cm^-3).
+#: renormalization, amplitude fitted to the end points of [Nol20]): eps_b(n) = 5.5 + chi(n) - chi(1.1e19 cm^-3).
 CDO_BAND_FILLING = _cdo_band_filling(KaneBand(_CDO_M0 * M_E, _CDO_ALPHA))
 
 _CDO_TABLE = (
     TCOParameter("eps_inf", "5.5 at 1.1e19 cm^-3, falling with density (band filling, below)",
-                 "5.3-5.6 at low density; 5.1 (abstract) or 4.9 (text) at 4.1e20 [Nol20]; ~4.9 at 1e21 [Liu16]",
-                 "[Nol20], [Liu16], [Yan17], [Jef08]", "P / S"),
+                 "5.4-5.6 at low density; 5.1-5.3 at 2.5-4.7e20 [Nol20] (figure, D), [Sch24]; 5.0 at 1e21 "
+                 "[Liu16] Table II (films 4.8-5.3 at 0.6-1.2e21, Fig. 6b); 5.3 assumed constant [Jef08]",
+                 "[Nol20], [Liu16], [Sch24], [Yan17], [Jef08]", "P / D / S"),
     TCOParameter("band-edge mass m0*", "0.10 m_e", "0.10 [Nol20], 0.13 [Liu16], 0.16 +/- 0.05 [Men12]; "
                  "0.21 k.p [Jef08] (inconsistent with ENZ data)", "[Nol20], [Liu16], [Men12], [Jef08]", "P"),
     TCOParameter("Kane nonparabolicity alpha", "0.735 eV^-1", "0.5 +/- 0.2 [Liu16], [Men12]; 1/Eg = 0.46 "
@@ -256,7 +291,8 @@ _CDO_TABLE = (
                  "to ~20 % [Men12], [Liu16]", "[Cle21], [Nol20], [Yan17]", "P"),
     TCOParameter("background: direct gap / BGR / edge amplitude", "2.16 eV / 4.8e-10 eV m / 7.81",
                  "gap 2.16 +/- 0.02 [Jef08]; BGR 4.2-5.4e-10 [Liu16] Fig. 10 (D); amplitude fitted to [Nol20]'s "
-                 "abstract value, consistent with [Liu16] at 1e21 (D)", "[Jef08], [Liu16], [Nol20]", "P / D"),
+                 "5.5 -> 5.1 (D); 6.2 matches [Liu16]'s 5.0 at 1e21 but lengthens the ENZ wavelengths "
+                 "above 5e20 by 1-1.6 % (D)", "[Jef08], [Liu16], [Nol20]", "P / D"),
     TCOParameter("static permittivity eps_0", "21.9", "single source", "[Liu16], [W15] (Finkenrath 1967)", "S"),
     TCOParameter("band gap (fundamental, indirect)", "0.9 eV", "0.84-1.09 (Koffyberg 1976, not verified); 0.89 "
                  "DFT", "[W15]", "S"),
@@ -271,31 +307,37 @@ _CDO_TABLE = (
 # In2O3 / ITO
 # =====================================================================================================
 
-_ITO_EPS_INF = 4.0                # crystals 4.05-4.08 [Sto21], [Fen16]; sputtered films 3.9-4.4 [Hua16]
+_ITO_EPS_INF = 4.0                # crystals 4.05-4.08 [Sto21], [Fen16]; films 3.5-4.3 [Nai13], [Sch24], [Bla23]
 _ITO_M0 = 0.21                    # [Mar24] sputtered ITO (P)
 _ITO_ALPHA = 0.52                 # [Mar24] (P); [Fen16] 0.5 (S)
-_ITO_MU_OPT = 30.0 * _CM2VS       # [Hua16] Hall 16-40 cm^2/(V s) (P); gamma 1.7e14 rad/s at 3e20 cm^-3
+_ITO_MU_OPT = 30.0 * _CM2VS       # optical 15-36 [Bla23], [Nai13], [Sch24] (D), Hall 7-43 [Los09], [Mar24];
+                                  # gamma 1.7e14 rad/s at 3e20 cm^-3
 _ITO_EPS_STATIC = 9.0             # [HG86] 8.9-9.5 (S); DFT 9.05 (S); [Sto21] LST 10.55 (P, bulk crystal)
 _ITO_GAP = 2.8                    # [Kle10] 2.8 +/- 0.2 (P); [Wal08] <= 2.9 (P)
 _ITO_RANGE = (1.0e20 * _CM3, 1.2e21 * _CM3)
 
 _ITO_TABLE = (
-    TCOParameter("eps_inf", "4.0", "4.05-4.08 bulk crystal; 3.9-4.42 sputtered films", "[Sto21], [Fen16], "
-                 "[Hua16]", "P / A"),
+    TCOParameter("eps_inf", "4.0", "4.05-4.08 bulk In2O3 [Sto21], [Fen16]; ~4 [HG86]; 4.31 sputtered film at "
+                 "2.8e20 [Bla23]; 3.6 at 1e21 [Sch24]; 3.53 with an extra near-UV oscillator [Nai13]; falls with "
+                 "density [FK05]", "[Sto21], [Fen16], [HG86], [Bla23], [Sch24], [Nai13], [FK05]", "P / A / S"),
     TCOParameter("band-edge mass m0* / alpha", "0.21 m_e / 0.52 eV^-1", "0.18 / 0.5 crystalline and epitaxial "
-                 "[Fen16]; 0.263 / 0.42 (Liu 2014, S); 0.297 / 0.18 (Fujiwara 2005, S)", "[Mar24], [Fen16]",
-                 "P / S"),
+                 "[Fen16]; 0.263 / 0.42 [Liu14]; 0.297 / 0.18 [FK05] (both via [Mar24])", "[Mar24], [Fen16], "
+                 "[Liu14], [FK05]", "P / S"),
     TCOParameter("optical mass m_opt(n)", "0.280 / 0.380 / 0.451 m_e at 1e20 / 5e20 / 1e21", "+/-15 % at 5e20 "
-                 "between the laws above", "derived", "D"),
-    TCOParameter("optical mobility", "30 cm^2/(V s)", "16-40 sputtered films", "[Hua16]", "P"),
+                 "between the laws above; measured 0.35 -> 0.53 over 6.2e19-1.4e21 [Liu14]; 0.34 at 1e21 [Sch24]",
+                 "derived; [Liu14], [Sch24]", "D / A / P"),
+    TCOParameter("optical mobility", "30 cm^2/(V s)", "near-IR fits 15-36: [Bla23] 0.097 eV -> 36 with this band "
+                 "at 2.8e20 (D), [Nai13] 0.155 eV -> 17-27 for m_opt 0.45-0.28 (D), [Sch24] 15 at 1e21; falls ~20 "
+                 "-> 9 over 6e19-1.4e21 in [Liu14]; Hall 7-43 ([Los09], [Mar24], [Bla23] 28, [HG86] ~30, [Kor23] "
+                 "10-15)", "[Bla23], [Nai13], [Sch24], [Liu14], [Los09], [Mar24], [HG86], [Kor23]", "P / D / A"),
     TCOParameter("static permittivity eps_0", "9.0", "8.9-9.5 films (S); 10.55 bulk LST (P)", "[HG86], [Sto21]",
                  "S / P"),
     TCOParameter("band gap (fundamental)", "2.8 eV", "2.75-2.9; dipole-allowed onset ~3.7-3.8 eV",
                  "[Kle10], [Wal08]", "P"),
     TCOParameter("electron affinity chi", "None (set yours)", "~4.2-5.3 from ionization potentials 7.0-8.1 eV "
-                 "minus the gap (D); 5 eV used as a fit parameter by [Hua16]", "[Kle10], [Hua16]", "D"),
-    TCOParameter("density range", "1e20-1.2e21 cm^-3", "sputtered 1.9-3.9e20 [Hua16], 2.9e20-1.01e21 [Mar24]; "
-                 "e-beam to 1.2e21 (Korneluk 2023)", "[Hua16], [Mar24]", "P"),
+                 "minus the gap (D)", "[Kle10]", "D"),
+    TCOParameter("density range", "1e20-1.2e21 cm^-3", "sputtered 1e20-1e21 [Los09], 2.9e20-1.01e21 [Mar24], "
+                 "6.2e19-1.4e21 [Liu14]; e-beam to 1.2e21 [Kor23]", "[Los09], [Mar24], [Liu14], [Kor23]", "P / A"),
 )
 
 # =====================================================================================================
@@ -502,8 +544,9 @@ def in_cdo(n_bg_m3: float, *, name: str = "ICO", eps_inf: float = _CDO_EPS_INF, 
     CdO-specific physics carried by the preset: a light, strongly nonparabolic band (0.10 m_e, alpha 0.735
     eV^-1: the optical mass rises 2.7x from the band edge to 1e21 cm^-3), a high mobility (~300-400 cm^2/(V s),
     an order of magnitude above doped ZnO and ITO, hence a narrow, low-loss ENZ resonance) and a background
-    that FALLS with density (5.5 -> 5.1 over 1.1e19-4.1e20 cm^-3 [Nol20]: band filling of the direct 2.16 eV
-    edge), which moves the ENZ wavelength by ~4 % and adds to the gate response with the same sign as the
+    that FALLS with density (5.5 at 1.1e19, 5.1 at 4.1e20 and 4.87 at 1e21 cm^-3 at 2 um; measured 5.4-5.6,
+    5.1-5.3 and 4.8-5.1 [Nol20], [Sch24], [Liu16]: band filling of the direct 2.16 eV edge), which moves the
+    ENZ wavelength by ~4 % and adds to the gate response with the same sign as the
     Drude term. The default background (background="band_filling") is CDO_BAND_FILLING with the given
     edge_amplitude; it is evaluated below the renormalized direct gap only (1.78 eV at 5e20 cm^-3: wavelengths
     above ~0.7 um) and raises above it. background=None gives a constant eps_inf (also the route to the FDTD
@@ -521,9 +564,11 @@ def in_cdo(n_bg_m3: float, *, name: str = "ICO", eps_inf: float = _CDO_EPS_INF, 
       optical_mobility_m2Vs: None = CDO_HIPIMS_HALL_MOBILITY (optical = Hall assumed, as [Yan17] does; optical
                              can be up to ~20 % lower [Men12], [Liu16]); a float or callable otherwise
                              (polycrystalline sputtered films: ~65e-4-130e-4 [Liu16]). Also the DC mobility.
-      edge_amplitude       : amplitude of the direct edge in the band-filling background (7.81: eps_inf 5.5 ->
-                             5.1 over 1.1e19-4.1e20 cm^-3 as in [Nol20]'s abstract, and 4.87 at 1e21 as [Liu16]'s
-                             ~4.9; [Nol20]'s text quotes 4.9 already at 4.1e20, which needs a larger amplitude).
+      edge_amplitude       : amplitude of the direct edge in the band-filling background (7.81: 5.5 -> 5.1 over
+                             1.1e19-4.1e20 cm^-3, the end points [Nol20] state, and 4.87 at 1e21; the measured
+                             films sit 0.1-0.2 higher above ~3e20 -- 5.1-5.3 [Nol20], [Sch24], 5.0 at 1e21
+                             [Liu16] Table II -- which edge_amplitude=6.2 matches, at the cost of 1-1.6 % longer
+                             ENZ wavelengths above 5e20 with this band). Film-to-film scatter is ~+/-0.1.
       eps_static 21.9, band_gap_eV 0.9 (indirect, fundamental), chi_eV 5.8.
     Reference points (tests): ENZ 3.87 / 2.72 / 1.92 um at 6.6e19 / 1.4e20 / 4.1e20 cm^-3 ([Nol20]'s screened
     plasma frequencies, D); 2.10 um at
@@ -558,9 +603,11 @@ def ito(n_bg_m3: float, *, name: str = "ITO", eps_inf: float = _ITO_EPS_INF, m0_
         chi_eV: Optional[float] = None, background=None, strict: bool = True) -> Material:
     """Sn-doped In2O3 (ITO) film preset, sputtered films.
 
-    Parameters (SI; PARAMETER_TABLES['ito']): n_bg_m3 1e20-1.2e21 cm^-3; eps_inf 4.0 (films 3.9-4.4); Kane band
-    0.21 m_e / 0.52 eV^-1 ([Mar24], sputtered; pass m0_ratio=0.18, alpha_per_eV=0.5 for crystalline / epitaxial
-    material [Fen16]); optical_mobility_m2Vs 30e-4 (films 16e-4-40e-4; gamma ~1.7e14 rad/s at 3e20 cm^-3);
+    Parameters (SI; PARAMETER_TABLES['ito']): n_bg_m3 1e20-1.2e21 cm^-3; eps_inf 4.0 (bulk In2O3 4.05-4.08, films
+    3.5-4.3); Kane band 0.21 m_e / 0.52 eV^-1 ([Mar24], sputtered; pass m0_ratio=0.18, alpha_per_eV=0.5 for
+    crystalline / epitaxial material [Fen16]); optical_mobility_m2Vs 30e-4 (near-IR fits 15e-4-36e-4, Hall
+    7e-4-43e-4; gamma ~1.7e14 rad/s at 3e20 cm^-3; held constant, while [Liu14] and [Sch24] report optical
+    mobilities of 9e-4-15e-4 near 1e21 cm^-3 -- pass a callable of n for heavily doped films);
     dc_mobility_m2Vs None (= the optical mobility) or a float / callable; grain_boundary None or a
     SetoGrainBarrier; eps_static 9.0 (films; 10.55 bulk crystal [Sto21]); band_gap_eV 2.8 (fundamental; the
     optical onset of degenerate films is ~3.7 eV); chi_eV None (spread ~1 eV; set yours); background None or a

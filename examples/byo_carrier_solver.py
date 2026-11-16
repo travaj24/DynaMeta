@@ -8,7 +8,7 @@ a closed-form Thomas-Fermi-style accumulation model -- but it could equally be a
 ML surrogate, a different TCAD tool, or measured C-V-derived profiles.
 
 The only contract: emit a CarrierField whose region name(s) match the optical
-mesh (here "ito") with a gridded `electron_density_m3` field on a (x, y) grid
+mesh (here "film") with a gridded `electron_density_m3` field on a (x, y) grid
 where "y" is the through-stack axis. The bridge handles the affine z-remap, the
 lift to 3D, and n -> eps.
 
@@ -34,11 +34,11 @@ from validation._reference_device import build_reference_modulator
 
 class AnalyticAccumulationSolver:
     """A CarrierSolver that injects a closed-form accumulation layer at the
-    gate-side ITO interface, with NO drift-diffusion / DEVSIM. n(x, z) =
+    gate-side film interface, with NO drift-diffusion / DEVSIM. n(x, z) =
     n_bg * (1 + delta(V) * exp(-(z_top - z) / lambda_TF)), delta(V) linear in the
-    gate bias. Reads only the ITO geometry + n_bg from the Design."""
+    gate bias. Reads only the film geometry + n_bg from the Design."""
 
-    def __init__(self, design, *, gate="top_contact", region="ito",
+    def __init__(self, design, *, gate="top_contact", region="film",
                   screening_nm=1.0, delta_per_volt=0.18, nx=64, nz=41):
         self.design = design
         self.gate = gate
@@ -87,24 +87,24 @@ class AnalyticAccumulationSolver:
 
 def _self_check(design):
     """Fast, FEM-free proof of the seam: the analytic n(x,z) flows to the right
-    Drude eps -- the accumulation layer pushes the ITO through ENZ (Re(eps)->0)."""
+    Drude eps -- the accumulation layer pushes the film through ENZ (Re(eps)->0)."""
     solver = AnalyticAccumulationSolver(design)
     assert isinstance(solver, CarrierSolver), "must satisfy the CarrierSolver Protocol"
-    ito = design.materials.get("ITO")
-    lam = 1300e-9
-    print("[t] BYO CarrierSolver -- analytic accumulation -> Drude eps @1300nm")
+    film = design.materials.get("TCO")
+    lam = 1200e-9
+    print("[t] BYO CarrierSolver -- analytic accumulation -> Drude eps @1200nm")
     for V in (0.0, +2.0):
         cf = solver.solve(BiasPoint({"top_contact": V}, "V{}".format(V)))
-        n = cf.regions["ito"].grid_fields[ELECTRON_DENSITY]
+        n = cf.regions["film"].grid_fields[ELECTRON_DENSITY]
         n_top = n[:, -1].mean()                       # gate-side interface
-        eps_top = complex(ito.eps(lam, n_m3=n_top))
-        print("[t]   V={:+.1f}V  n_top/n_bg={:.3f}  Re(eps_ITO,top)={:+.3f}  Im={:+.3f}".format(
+        eps_top = complex(film.eps(lam, n_m3=n_top))
+        print("[t]   V={:+.1f}V  n_top/n_bg={:.3f}  Re(eps_film,top)={:+.3f}  Im={:+.3f}".format(
             V, n_top / solver._n_bg, eps_top.real, eps_top.imag), flush=True)
     # at +2V the accumulation should drive Re(eps) lower (toward/through ENZ)
     cf0 = solver.solve(BiasPoint({}, "0"))
     cf2 = solver.solve(BiasPoint({"top_contact": 2.0}, "2"))
-    re0 = complex(ito.eps(lam, n_m3=cf0.regions["ito"].grid_fields[ELECTRON_DENSITY][:, -1].mean())).real
-    re2 = complex(ito.eps(lam, n_m3=cf2.regions["ito"].grid_fields[ELECTRON_DENSITY][:, -1].mean())).real
+    re0 = complex(film.eps(lam, n_m3=cf0.regions["film"].grid_fields[ELECTRON_DENSITY][:, -1].mean())).real
+    re2 = complex(film.eps(lam, n_m3=cf2.regions["film"].grid_fields[ELECTRON_DENSITY][:, -1].mean())).real
     assert re2 < re0, "accumulation must lower Re(eps) toward ENZ"
     print("[t] *** BYO CarrierSolver seam OK (no DEVSIM): accumulation lowers Re(eps) "
           "{:+.3f} -> {:+.3f} ***".format(re0, re2))
@@ -121,7 +121,7 @@ def main(argv=None):
     if args.fem:
         from dynameta.pipeline import run_pipeline
         sweep = Sweep(bias_points=[BiasPoint({"top_contact": +2.0}, "byo+2V")],
-                       wavelengths_nm=[1300.0])
+                       wavelengths_nm=[1200.0])
         # the WHOLE of Stage 1 is replaced by the analytic solver:
         rows = run_pipeline(design, sweep,
                              carrier_solver=AnalyticAccumulationSolver(design))

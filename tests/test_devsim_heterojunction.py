@@ -514,7 +514,7 @@ def test_builder_rejects_unknown_interface_model():
 
 def _defaulted(tm, **kw):
     """`tm` with the given fields put back to the TransportModel DEFAULT (read from the dataclass, so the
-    test exercises whatever the default is: None since v0.14, 4.5 / 3.6 on ee0ad04)."""
+    test exercises whatever the default is: None since v0.14, fixed numbers on ee0ad04)."""
     import dataclasses
     from dynameta.materials import TransportModel
     dflt = {f.name: f.default for f in dataclasses.fields(TransportModel)}
@@ -531,8 +531,8 @@ def _build_or_raise(layers, tag):
 
 
 def test_transport_model_has_no_default_affinity_or_gap():
-    """User decision 2026-11-04: chi_eV and band_gap_eV default to None (they were 4.5 / 3.6 -- a band
-    offset of ZERO by default, not by data). Fails on ee0ad04."""
+    """User decision 2026-11-04: chi_eV and band_gap_eV default to None (they had fixed numeric defaults -- a
+    band offset of ZERO by default, not by data). Fails on ee0ad04."""
     from dynameta.materials import TransportModel
     tm = TransportModel(n_bg_m3=1e23, eps_static=12.9, dos_mass_kg_of_n_m3=lambda n: 0.067 * 9.109e-31)
     assert tm.chi_eV is None and tm.band_gap_eV is None
@@ -541,8 +541,8 @@ def test_transport_model_has_no_default_affinity_or_gap():
 @pytest.mark.parametrize("which", ["one", "both"])
 def test_defaulted_affinity_at_a_heterointerface_refuses(which):
     """A GaAs / AlGaAs drift-diffusion heterointerface with a DEFAULTED affinity must refuse to build,
-    naming the field to set. MEASURED on ee0ad04 (defaults 4.5 / 3.6): both cases build SILENTLY --
-    'both' with a zero offset (the old AdvisoryWarning needed BOTH gaps at the 3.6 default too, and
+    naming the field to set. MEASURED on ee0ad04 (numeric defaults, chi 4.5): both cases build SILENTLY --
+    'both' with a zero offset (the old AdvisoryWarning needed BOTH gaps at the gap default too, and
     these gaps are explicit), 'one' with AlGaAs at chi = 4.5 against GaAs 4.07, i.e. a 0.43 eV
     conduction-band offset of the WRONG sign taken from the default -- "DID NOT RAISE" there."""
     a = transport(GAAS, n_bg=1e23, physics="drift_diffusion")
@@ -555,7 +555,7 @@ def test_defaulted_affinity_at_a_heterointerface_refuses(which):
 
 def test_defaulted_band_gap_at_a_bipolar_heterojunction_refuses():
     """The bipolar heterojunction reads band_gap_eV (its valence offset is checked against it): a
-    defaulted gap refuses, naming band_gap_eV. On ee0ad04 the 3.6 default met the gap check and raised
+    defaulted gap refuses, naming band_gap_eV. On ee0ad04 the numeric gap default met the gap check and raised
     the 'disagrees with its statistics' ValueError instead -- whose message does not say the gap was a
     default; the match below requires the new wording, so it fails there."""
     p = transport(GAAS, n_bg=1e23, physics="bipolar_dd", acceptor=True)
@@ -588,8 +588,8 @@ def test_3d_from_design_refuses_a_defaulted_heterostack_affinity():
     from dynameta.materials import DrudeOptical, Material, TransportModel
     from dynameta.constants import M_E
     from validation.carriers_3d_multisemi import N_BG, _design
-    layers = [("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"), ("ito_bot", 6e-9, "ITO"),
-              ("azo_top", 5e-9, "AZO"), ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]
+    layers = [("mirror", 80e-9, "mirror_metal"), ("lower_oxb", 6e-9, "oxB"), ("ito_bot", 8e-9, "ITO"),
+              ("azo_top", 6e-9, "AZO"), ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")]
     homo_d = _design([(n, t, "ITO" if m == "AZO" else m) for n, t, m in layers])
     homo_d.materials.add(Material("AZO", DrudeOptical(eps_inf=3.8, m_opt_kg=0.3 * M_E, gamma_rad_s=1e14),
                                   transport=TransportModel(n_bg_m3=N_BG / 4, eps_static=9.0,
@@ -607,8 +607,8 @@ def test_3d_from_design_refuses_a_defaulted_heterostack_affinity():
 # ---------------------------------------------------------------- 3-D: drift-diffusion heterostack
 @pytest.fixture(scope="module")
 def gated_3d(tmp_path_factory):
-    """validation.devsim_heterojunction.spec_3d: degenerate ITO (4e26, chi 4.50) | AZO-like (1e26, chi 4.62,
-    m* 0.25) | 4 nm HfO2 | gate, unipolar drift-diffusion with thermionic emission at the ITO/AZO interface.
+    """validation.devsim_heterojunction.spec_3d: degenerate ITO (3e26, chi 4.50, m* 0.30) | AZO-like (1e26,
+    chi 4.62, m* 0.25) | 4 nm oxide (eps 20) | gate, unipolar drift-diffusion with thermionic emission at the ITO/AZO interface.
     The gate draws no DC current, so at ANY gate voltage the electron quasi-Fermi level must be flat at the
     body's (E_F = 0) through BOTH semiconductors and across the heterointerface."""
     pytest.importorskip("gmsh")
@@ -642,7 +642,7 @@ def test_3d_dd_heterostack_wires_thermionic_emission_and_keeps_a_flat_fermi_leve
     assert gated_3d["ifaces"] == {"if_1": "thermionic"}
     band = gated_3d["band"]
     assert band["xs"][0] - band["semi"][0] == pytest.approx(-0.12, abs=1e-12)    # chi_xs larger: E_c lower
-    nc = {"semi": nc_m3(0.35), "xs": nc_m3(0.25)}
+    nc = {"semi": nc_m3(0.30), "xs": nc_m3(0.25)}
     for vg in (0.0, 0.5):
         worst = 0.0
         for r in ("semi", "xs"):

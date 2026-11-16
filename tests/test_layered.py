@@ -262,8 +262,8 @@ def _two_layer_design():
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
     reg.add(Material("hi", ConstantOptical(complex(4.0, 0.0))))
     return Design(name="c", unit_cell=UnitCell.square(300e-9),
-                  stack=Stack(layers=[Layer("ito", 5e-9, "hi"),
-                                      Layer("grating", 50e-9, "air")],
+                  stack=Stack(layers=[Layer("ito", 6e-9, "hi"),
+                                      Layer("grating", 40e-9, "air")],
                               superstrate_material="air", substrate_material="air"),
                   electrodes=[], materials=reg,
                   optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
@@ -278,14 +278,14 @@ def test_collapse_regions_to_layers_mesh_keyed():
     from dynameta.core.layered import collapse_regions_to_layers
     d = _two_layer_design()
     grad = EpsField(values_zyx=np.linspace(2.0, 3.0, 12).reshape(3, 2, 2).astype(complex),
-                    z_axis_u=np.array([0.0, 2.5, 5.0]),
+                    z_axis_u=np.array([0.0, 3.0, 6.0]),
                     x_axis_u=np.array([0.0, 300.0]), y_axis_u=np.array([0.0, 300.0]))
     grad2 = EpsField(values_zyx=grad.values_zyx.copy(), z_axis_u=grad.z_axis_u.copy(),
                      x_axis_u=grad.x_axis_u.copy(), y_axis_u=grad.y_axis_u.copy())
     src = {"ito_inpatch": grad, "ito_outside": grad2,
            "grating": EpsField(scalar=1.0 + 0j),
            "grating__bg1": EpsField(scalar=1.0 + 0j),
-           "grating__incl0": EpsField(scalar=-100.0 + 8j),
+           "grating__incl0": EpsField(scalar=-60.0 + 4j),
            "superstrate": EpsField(scalar=1.0 + 0j),
            "pml_top": EpsField(scalar=1.0 + 0j)}
     out = collapse_regions_to_layers(d, src)

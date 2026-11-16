@@ -12,7 +12,7 @@ a FULL boundary, so the continuity solve is well-posed -- and the recipe that ma
       numerical-precision ~1e-6, so a 1e-10 rel target never converges -- abs is the real gate),
   (3) a staged solve: a potential-only Poisson pre-solve (continuity frozen) then coupled Newton.
 The 2D metasurface uses the SAME ohmic contact promoted to a FULL EDGE -- shipped e864596
-(validation/gated_dd_2d.py) and builder-wired for the reference metasurface in 10d43d1
+(validation/gated_dd_2d.py) and builder-wired for the 2-D gated cell in 10d43d1
 (validation/gated_dd_builder.py); this 1D case is the physics + recipe proof.
 
 Physics check (the rigorous oracle): with no DC current the DD steady state MUST reduce to the
@@ -46,10 +46,10 @@ from dynameta.core.numerics import trapz as _trapz
 from dynameta.constants import M_E, Q_E
 
 T_OX, T_ITO = 10e-9, 12e-9
-EPS_OX, EPS_ITO = 9.0, 9.5
-N_BG = 4e26
-DOS_MASS = 0.35 * M_E
-MU = 30e-4
+EPS_OX, EPS_ITO = 9.0, 9.0
+N_BG = 3e26
+DOS_MASS = 0.30 * M_E
+MU = 40e-4
 BIASES = [0.0, 0.5, 1.0, 1.5, 2.0]
 REL_TOL = 1.0e-5          # relaxed: the trivial-bias rel error floors ~1e-6 (abs is the real gate)
 PROFILE_RTOL = 1.0e-2     # DD vs equilibrium carrier profile

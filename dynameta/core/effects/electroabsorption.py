@@ -17,7 +17,7 @@ from dynameta.constants import C_LIGHT, EPS0, HBAR, M_E, Q_E
 from dynameta.core.backend import is_jax_array
 from dynameta.core.numerics import trapz
 from dynameta.core.effects.base import (_E_vec, _photon_energy_J, kramers_kronig_dn,
-                                        kramers_kronig_dn_rows)
+                                        _kk_kernel_row)
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
@@ -319,7 +319,8 @@ class BursteinMossEdge:
          its absolute offset AND its Eg-dependence, so a DeltaEffect delta no longer inherits it.
 
     Measured against scipy.quad carried to infinity (the oracle the audit prescribes), the absolute
-    dn is now correct to ~1e-5 relative and the DeltaEffect delta to <1e-4 of the dn scale, where
+    dn is now correct to ~1e-5 relative and the DeltaEffect delta to ~1.5e-6 of the dn scale (the
+    absorption edge itself is integrated analytically, see _kk_dn_at), where
     the shipped default was 44-50% low in absolute dn and 14-16x too large in the delta. Because
     the grid no longer moves, alpha_edge is a physical amplitude again rather than a number that
     silently absorbs the grid choice.
@@ -445,6 +446,74 @@ class BursteinMossEdge:
         return (float(self.alpha_edge) / np.pi) * Eg ** (2.0 - p) * float(e_hi) ** (p - 2.0) * (
             1.0 / (2.0 - p) - p * (Eg / float(e_hi)) / (3.0 - p))
 
+    _KK_EDGE_GJ_NODES = 24        # Gauss-Jacobi nodes for the analytic edge window (exact to round-off)
+    _KK_EDGE_WINDOW_H = 16.0      # edge window reaches at least this many grid steps above Eg
+
+    def _kk_dn_at(self, grid: np.ndarray, egs: np.ndarray, e_eval_J: float) -> np.ndarray:
+        """KK dn at the photon energy e_eval_J for every gap in egs, on the fixed grid, with the
+        absorption EDGE integrated analytically.
+
+        The Maclaurin rule (kramers_kronig_dn_rows) is a composite trapezoid with step 2h over the
+        grid nodes of the parity opposite to the evaluation node. Its integrand E' eps2/(E'^2 - E^2)
+        is zero below Eg and starts as (E' - Eg)^p above it (a jump at p = 0), so a trapezoid cell
+        that straddles Eg makes an O(h) error whose size and sign depend on where Eg falls inside
+        the 2h cell -- a different value for every density, alternating with the parity of the
+        gap's node. Here the integral is split at the first opposite-parity node E_c > Eg:
+
+          * [Eg, E_c] (one window of width in (0, 2h]) by Gauss-Jacobi quadrature with the weight
+            (E' - Eg)^p, which integrates the onset EXACTLY (the remaining factor
+            Eg^(2-p)/(E'(E'^2 - E^2)) is smooth there);
+          * [E_c, grid end] by the same Maclaurin sum with E_c as its first node (half weight), where
+            the integrand is smooth: a trapezoid with an O(h^2) error that varies smoothly with Eg.
+
+        The probe must keep its distance from the window: within 2 window widths of it the factor
+        1/(E'^2 - E^2) is not smooth on the window (the probe sits on the edge's own singularity,
+        log-divergent at p = 0), and the plain Maclaurin sum is used for that row. Returns (M,)."""
+        E = np.asarray(grid, dtype=np.float64)
+        egs = np.asarray(egs, dtype=np.float64).ravel()
+        e_eval = float(e_eval_J)
+        if not (E[0] <= e_eval <= E[-1]):
+            raise ValueError("e_eval_J must lie within the KK grid (np.interp would silently clamp)")
+        h = float(E[1] - E[0])
+        p = self._tauc_p()
+        a = float(self.alpha_edge)
+        i0 = int(np.clip(np.searchsorted(E, e_eval, side="right") - 1, 0, E.size - 2))
+        from scipy.special import roots_jacobi
+        x_gj, w_gj = roots_jacobi(int(self._KK_EDGE_GJ_NODES), 0.0, p)   # weight (1 + x)^p on [-1, 1]
+
+        def _dn_node(i):
+            ei = float(E[i])
+            opp, kern = _kk_kernel_row(E, i)                                # the Maclaurin row (base)
+            Eo = E[opp]
+            F = Eo[None, :] * self._eps2(Eo[None, :], egs[:, None]) / (HBAR * C_LIGHT)   # alpha, 0 below Eg
+            out = F @ kern                                                   # plain Maclaurin
+            c0s = np.searchsorted(Eo, egs, side="right")                     # first node > Eg
+            cws = np.searchsorted(Eo, egs + float(self._KK_EDGE_WINDOW_H) * h, side="left")
+            for k in range(egs.size):
+                eg = float(egs[k])
+                c = None
+                for cand in (int(cws[k]), int(c0s[k])):                      # wide window, else minimal
+                    if cand >= Eo.size:
+                        continue
+                    L = float(Eo[cand]) - eg
+                    if ei <= eg - L or ei >= float(Eo[cand]) + L:            # probe clear of the window
+                        c = cand
+                        break
+                if c is None:
+                    continue                                                 # probe on the edge
+                c0 = int(c0s[k])
+                L = float(Eo[c]) - eg
+                out[k] -= F[k, c0:c] @ kern[c0:c] + 0.5 * F[k, c] * kern[c]  # window nodes leave the sum
+                t = 0.5 * L * (1.0 + x_gj)
+                ep = eg + t
+                g = eg ** (2.0 - p) / (ep * (ep * ep - ei * ei))
+                out[k] += (a / np.pi) * (0.5 * L) ** (p + 1.0) * float(np.dot(w_gj, g))
+            return out
+
+        d0, d1 = _dn_node(i0), _dn_node(i0 + 1)
+        f = (e_eval - E[i0]) / (E[i0 + 1] - E[i0])          # np.interp's local-linear weight
+        return d0 + (d1 - d0) * f
+
     def _kk_grid(self) -> np.ndarray:
         """The KK photon-energy grid, built ONCE per configuration and cached on the instance.
 
@@ -543,12 +612,8 @@ class BursteinMossEdge:
         egs = (np.array([Eg_lo]) if Eg_hi - Eg_lo < 1e-30
                else np.linspace(Eg_lo, Eg_hi, int(self._N_EG)))
         per_chunk = max(1, int(self._KK_ROW_CHUNK_BYTES) // (8 * grid.size))
-        dn_tab = np.concatenate([
-            kramers_kronig_dn_rows(
-                grid,
-                grid[None, :] * self._eps2(grid[None, :], egs[k:k + per_chunk, None]) / (HBAR * C_LIGHT),
-                e_eval_J=E_ph)
-            for k in range(0, egs.size, per_chunk)])                 # (_N_EG,) at E_ph
+        dn_tab = np.concatenate([self._kk_dn_at(grid, egs[k:k + per_chunk], E_ph)
+                                 for k in range(0, egs.size, per_chunk)])   # (_N_EG,) at E_ph
         dn_tab = dn_tab + self._kk_tail_dn(egs, e_hi_grid)           # closed-form tail (audit R-2)
         if egs.size == 1:
             dn = np.full(Eg.shape, float(dn_tab[0]))

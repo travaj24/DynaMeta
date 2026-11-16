@@ -8,7 +8,9 @@ import pytest
 from dynameta.carriers.schrodinger_poisson import (
     SchrodingerPoisson1D, HBAR, M_E, Q)
 
-MSTAR = 0.35 * M_E
+MSTAR = 0.30 * M_E
+# the film keywords SchrodingerPoissonCarrier requires (no material defaults): the generic gated film
+SPFILM = dict(n_bg_m3=3e26, m_eff_kg=0.30 * M_E, eps_static=9.0)
 
 
 def test_infinite_square_well():
@@ -91,7 +93,7 @@ def test_degenerate_slab_recovers_bulk():
     # heavily-doped semiconductor; the default bound-state rejection (isolated well)
     # collapses it to ~0. Flat-band square slab, E_F from the bulk degenerate relation.
     from dynameta.carriers.schrodinger_poisson import HBAR
-    n_bg, t = 4e26, 12e-9
+    n_bg, t = 3e26, 12e-9
     z = np.linspace(0.0, t, 401)
     sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
     E_F = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * n_bg) ** (2.0 / 3.0)
@@ -104,11 +106,11 @@ def test_degenerate_slab_recovers_bulk():
 def _open_body_setup():
     import warnings
     warnings.filterwarnings("ignore")          # the SP non-convergence warning is not under test
-    n_bg, t = 4e26, 12e-9
+    n_bg, t = 3e26, 12e-9
     z = np.linspace(0.0, t, 51)
     sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
     E_F = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * n_bg) ** (2.0 / 3.0)   # bulk degenerate
-    kw = dict(eps_r=9.5, doping_m3=np.full(z.size, n_bg), E_F_J=E_F, phi_left_V=0.0, phi_right_V=0.0,
+    kw = dict(eps_r=9.0, doping_m3=np.full(z.size, n_bg), E_F_J=E_F, phi_left_V=0.0, phi_right_V=0.0,
               max_outer=25, tol_V=1e-4, bound_tol=1e9, relax=0.8)
     interior = (z > 5e-9) & (z < 8e-9)
     return sp, z, n_bg, kw, interior
@@ -147,7 +149,7 @@ def test_c18_gate_to_psi_s_keeps_vg_over_256_after_bracket_expansion():
     the old 11 column solves (it was exactly 11: 1 baseline + 2 bracket ends + 8 halvings)."""
     from dynameta.carriers.sp_carrier import SchrodingerPoissonCarrier
     from dynameta.constants import Q_E
-    car = SchrodingerPoissonCarrier(oxide_thk_m=2e-9, nz=21, gate_map="flat_band_excess")
+    car = SchrodingerPoissonCarrier(**SPFILM, oxide_thk_m=2e-9, eps_oxide=20.0, nz=21, gate_map="flat_band_excess")
     t = car.semi_thk_m
     for k in (1.0 / 19.3, 1.0 / 45.7, 0.37, 3.0):
         c = (k - 1.0) * car._C_ox / (Q_E * t)              # uniform excess density per volt of psi_s
@@ -316,7 +318,7 @@ def test_q3_legacy_fermi_level_is_bit_identical():
     from dynameta.carriers.sp_carrier import SchrodingerPoissonCarrier
     from dynameta.constants import HBAR as HB, Q_E
     for alpha, gs, gv, m in ((0.0, 2, 1, 0.30 * M_E), (0.5, 2, 1, 0.25 * M_E), (0.4, 1, 3, 0.2 * M_E)):
-        c = SchrodingerPoissonCarrier(n_bg_m3=3e26, m_eff_kg=m, alpha_np_per_eV=alpha, g_s=gs, g_v=gv,
+        c = SchrodingerPoissonCarrier(n_bg_m3=3e26, m_eff_kg=m, eps_static=9.0, alpha_np_per_eV=alpha, g_s=gs, g_v=gv,
                                       fermi_level="bulk3d_T0")
         gamma_F = (HB ** 2 / (2.0 * float(m))) * (6.0 * np.pi ** 2 * 3e26 / (gs * gv)) ** (2.0 / 3.0)
         if alpha > 0.0:
@@ -326,9 +328,9 @@ def test_q3_legacy_fermi_level_is_bit_identical():
             old = gamma_F
         assert c.E_F_J == old
     with pytest.raises(ValueError):
-        SchrodingerPoissonCarrier(fermi_level="T0")
+        SchrodingerPoissonCarrier(**SPFILM, fermi_level="T0")
     with pytest.raises(ValueError):
-        SchrodingerPoissonCarrier(gate_map="identity")
+        SchrodingerPoissonCarrier(**SPFILM, gate_map="identity")
 
 
 # ---- v0.16: Gauss's law at the oxide face --------------------------------------------------------

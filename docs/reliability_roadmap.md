@@ -101,8 +101,8 @@ the strain exponent 1/c) -- corrected here, with a separate brittle-fracture mod
 
 ## Executive summary
 
-The gated ITO-ENZ modulator (gate metal | ~5-20 nm gate oxide | ~1-10 nm ITO accumulation layer |
-oxide spacer | metal mirror; free-space optics at ~1300-1550 nm) is a multi-stressor reliability
+A gated ENZ-film modulator (gate metal | ~5-20 nm gate oxide | ~1-10 nm conducting-oxide accumulation layer |
+oxide spacer | metal mirror; free-space optics in the near infrared) is a multi-stressor reliability
 problem, and every stressor is ALREADY a field the operating solve produces:
 
 - gate oxide at ~1-10 MV/cm (the ~1 nm accumulation layer concentrates the field) -> TDDB + BTI;

@@ -66,18 +66,18 @@ def test_layers_superstrate_first_order():
 
 def test_gain_eps_raises_instead_of_clamping_to_lossless():
     """AUDIT V-2: a sign-convention slip (Im(eps) < 0 = gain under exp(-i omega t)) used to be
-    CLAMPED, unbounded: eps = -180 - 30j was realized as a strictly real -180+0j -- a collisionless
+    CLAMPED, unbounded: eps = -120 - 20j was realized as a strictly real -120+0j -- a collisionless
     metal, gamma = 0.0, absorption identically zero, with no warning. It must now raise, at the
     helper AND through the Design seam. Byte-identity for VALID inputs is unaffected: the guard
     runs before untouched arithmetic (`ei = max(0.0, eps.imag)` is kept verbatim)."""
     with pytest.raises(ValueError, match="exp\\(-i omega t\\)"):
-        _eps_to_fdtd_layer(100e-9, -180.0 - 30.0j, LAM)
-    d = _design([(-180.0 - 30.0j, 40e-9, [])])
+        _eps_to_fdtd_layer(100e-9, -120.0 - 20.0j, LAM)
+    d = _design([(-120.0 - 20.0j, 40e-9, [])])
     with pytest.raises(ValueError, match="Im\\(eps\\)"):
         design_to_fdtd_layers(d, LAM)
     # the passive counterpart of the same material is unaffected and IS absorbing
-    L = _eps_to_fdtd_layer(100e-9, -180.0 + 30.0j, LAM)
-    assert L.drude_gamma_rad_s > 0.0 and abs(_fdtd_layer_eps(L, LAM) - (-180.0 + 30.0j)) < 1e-6 * 181.0
+    L = _eps_to_fdtd_layer(100e-9, -120.0 + 20.0j, LAM)
+    assert L.drude_gamma_rad_s > 0.0 and abs(_fdtd_layer_eps(L, LAM) - (-120.0 + 20.0j)) < 1e-6 * 120.0
 
 
 def test_inclusions_layer_raises():
@@ -133,11 +133,11 @@ def test_graded_eps_from_carrier_and_layers():
     import numpy as np
     from dynameta.materials import DrudeOptical, M_E
     from dynameta.optics.fdtd_seam import eps_profile_from_carrier, graded_fdtd_layers
-    drude = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
-    n = np.array([4.0e26, 1.0e27])                         # m^-3
+    drude = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+    n = np.array([3.0e26, 1.0e27])                         # m^-3
     eps = eps_profile_from_carrier(n, 1500e-9, drude)
     assert eps.shape == (2,) and np.all(eps.imag > 0)      # passive loss
-    assert abs(eps[0] - complex(drude.eps(1500e-9, n_m3=4.0e26))) < 1e-12
+    assert abs(eps[0] - complex(drude.eps(1500e-9, n_m3=3.0e26))) < 1e-12
     layers = graded_fdtd_layers(400e-9, eps, 1500e-9)
     assert len(layers) == 2 and abs(layers[0].thickness_m - 200e-9) < 1e-15
     w = 2.0 * np.pi * 299792458.0 / 1500e-9
@@ -335,9 +335,9 @@ def test_graded_drude_carrier_region_does_not_crash():
     # was holding the bias eps it had just discarded
     from dynameta.materials import DrudeOptical
     d = _design([(4.0, 120e-9, [])])
-    d.materials.add(Material("ito", DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * 9.109e-31,
+    d.materials.add(Material("film", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * 9.109e-31,
                                                  gamma_rad_s=1.6e14)))
-    d.stack.layers[0].background_material = "ito"
+    d.stack.layers[0].background_material = "film"
     layers = design_to_fdtd_layers(d, LAM, eps_by_region={"s0": _graded_ef()})
     assert len(layers) == 12                                  # sliced from the bias field
 
@@ -774,7 +774,7 @@ def test_finite_eps_path_is_unchanged_by_the_finiteness_guard():
     """The guard runs before untouched arithmetic: every VALID input still gives bit-for-bit the
     same layer, and the scalar/vector twins still agree cell-by-cell."""
     from dynameta.optics.fdtd_seam import effect_eps_to_fdtd_grid
-    good = [4.0 + 0.0j, complex(4.0, -0.0), 4.0 + 1e-8j, 2.25 + 0.0j, -180.0 + 30.0j,
+    good = [4.0 + 0.0j, complex(4.0, -0.0), 4.0 + 1e-8j, 2.25 + 0.0j, -120.0 + 20.0j,
             1.0 + 5.0j, 12.0 + 3.0j, 0.5 + 0.2j]
     grid = np.array(good, dtype=np.complex128).reshape(2, 4)
     einf, wp, gam = effect_eps_to_fdtd_grid(grid, LAM)

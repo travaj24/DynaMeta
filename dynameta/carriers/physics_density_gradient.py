@@ -213,10 +213,10 @@ def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
     contact's edge_current_model to report get_contact_current, so a DG device's terminal current
     was read from the pre-quantum flux on the contact edges while the solve itself (node_model pin,
     unchanged) was right. The two differ by the q mu n grad(Lambda) Bohm term on the contact edge:
-    measured on a 40 nm bar with a 4e26 -> 4e25 m^-3 step 3 nm from the right contact at 10 mV
-    (max |Lambda| 10 mV), the two terminal currents failed to conserve by |I_L + I_R|/|I_L| =
-    2.95e-2 before (the right one read the classical flux; 6.0e-3 with the step 6 nm away) and
-    4.4e-16 after, both now equal to the interior DG edge current to 2e-16. The contact's ElectronContinuityEquation is now
+    measured on a 40 nm bar with a 3e26 -> 3e25 m^-3 step 3 nm from the right contact at 10 mV
+    (max |Lambda| 9.3 mV): with both contacts reading the classical flux the two terminal currents fail
+    to conserve by |I_L + I_R|/|I_L| = 4.4e-2; with the re-point they conserve to round-off, both equal
+    to the interior DG edge current. The contact's ElectronContinuityEquation is now
     re-bound here with edge_current_model='ElectronCurrentDG' (same node_model, so the pinned
     boundary condition -- and every converged solution -- is unchanged). Requires
     setup_dg_quantum_correction on the contact's region FIRST (the documented order); raises if
@@ -297,10 +297,10 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
     by the pinned Lambda jump, and the converged profile was a spurious wide-depletion branch.
     MEASURED on this module's unipolar bar (frozen flat psi, gamma ramp to 1; tests/
     test_density_gradient.py, docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md):
-        n0 = 1e21 m^-3 : old deficit 22.85 n0 L_q, wall current 6.3e-3 q mu n0 V_t/L_q;
-                         insulator wall 1.18723 (closed form 1.187207, +1.7e-5), current 3e-15
-        n0 = 4e26 (ITO): old deficit 28.0 n0 L_q, current 9.6e-2; insulator wall 0.346 (the FD
-                         g-factor shortens the dark space ~sqrt(g); gated against the FD first
+        n0 = 1e21 m^-3 : old deficit 20.52 n0 L_q, wall current 6.5e-3 q mu n0 V_t/L_q;
+                         insulator wall within 1.3e-5 of the closed form 1.187207, current 2.7e-15
+        n0 = 3e26 (degenerate film): old deficit 25.45 n0 L_q (0.2 nm mesh); insulator wall 0.3568 (the
+                         FD g-factor shortens the dark space ~sqrt(g); gated against the FD first
                          integral)
     The old rows survive only as a test fixture (tests/_dg_legacy_wall.py) for the cross-version
     flux gate and the negative controls."""
@@ -321,7 +321,7 @@ def seed_dg_from_solution(device: str, region: str, *, walls=(),
 
     Which to use: walls=() (default) for a wall-free device (ohmic bars, junctions) -- exactly the
     pre-v0.15 seed (same node values, gated); walls=(contact,) whenever the region has an insulator
-    wall: the flat seed against the wall converges too, but slower (measured on the 4e26 ITO bar's
+    wall: the flat seed against the wall converges too, but slower (measured on a degenerate bar's
     first gamma step: 27 Newton iterations flat vs 4-23 seeded, both to the same solution)."""
     _seed_dg(device, region, walls=walls, u_floor_rel=u_floor_rel, who="seed_dg_from_solution")
 

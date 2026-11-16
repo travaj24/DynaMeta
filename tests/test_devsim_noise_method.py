@@ -4,7 +4,7 @@ plan 4.2.5, user decision 35; P2 item 6 gates W1-W8).
 The scenarios run in CHILD processes (tests/_noise_method_child.py, one per process, at most two at a time):
 DEVSIM circuits are process-global and cannot be removed in-process, so a circuit-driven gate would leak
 into every later DEVSIM test of the worker (tests/_bipolar_calllog.py). Fixtures:
-  * the reference gated-ITO modulator (validation/_reference_device, drift-diffusion; 370 nm cell): gate G's
+  * the reference gated-film cell (validation/_reference_device, drift-diffusion; 400 nm cell): gate G's
     device (validation/devsim_noise.py);
   * a gated bipolar n-GaAs / N-Al0.3Ga0.7As heterostack with a THERMIONIC interface (Boltzmann statistics,
     A* x 1e-3, 60 nm cell): the default-mechanism inheritance fixture, where the interface carries 80 % of
@@ -15,12 +15,12 @@ set_ssac_gate, circuit_alter, the library re-settle dc_solve.solve_dc with the b
 noise_analysis.noise_spectrum) -- the same calls, so the gate is bitwise (sha256 of S and every breakdown).
 W2: the fluctuation-dissipation theorem S_I = 4 kT Re Y with Y from ac_analysis.ssac_admittance (a separate
 linear solve), both per cell. At equilibrium the identity is exact in exact arithmetic for both fixtures (the
-flat-band ITO has uniform n, so the FD g-factor cancels -- gate G; the heterostack is Boltzmann, every source
+flat-band film has uniform n, so the FD g-factor cancels -- gate G; the heterostack is Boltzmann, every source
 Nyquist-exact, the thermionic one included), so the residual is the round-off of two independent
-factorizations; 1e-9 is the plan's W2 tolerance (gate G recorded 1.3e-11). MEASURED: <= 7.8e-12 (modulator),
+factorizations; 1e-9 is the plan's W2 tolerance (gate G recorded 1.3e-11). MEASURED: <= 7.8e-12 (reference cell),
 <= 2.5e-12 (heterostack). W5: a fresh builder solved at 1 V (no circuit at all). W3: S_cell = period_y S_2D
 exactly; the independent 3-D check of P2 W3 is NOT run (v0.15 follow-up, audit 2026-11-06-v0.15-followups item
-4: the modulator's 3-D twin is not y-invariant -- a 175 nm square patch in a 370 nm cell -- so S_3D != W S_2D by
+4: the cell's 3-D twin is not y-invariant -- a square patch smaller than the cell -- so S_3D != W S_2D by
 construction, and Devsim3DEquilibrium has no circuit-driven gate) -- the scaling's exactness argument is in the
 method's docstring. W7 (nightly, @slow): the 0 / +1 / 0 sequence on an extended-precision builder.
 
@@ -106,7 +106,7 @@ def test_w1_bitwise_equal_to_the_hand_recipe(runs):
 def test_w2_fdt_through_the_method_per_cell(runs):
     """W2. S_I = 4 kT Re Y per cell (terminal_noise: S_I and Y both scaled by period_y) to 1e-9 on both
     fixtures (module doc). Adversarial: the per-cell S against the per-depth Re Y (a units slip) misses by
-    period - 1 (the factor 3.7e-7)."""
+    period - 1 (the factor 4.0e-7)."""
     for sc in ("wrap_ref", "wrap_te"):
         r = _fdt(runs[sc]["tn"])
         assert np.max(np.abs(r)) < 1e-9, (sc, r)
@@ -123,12 +123,12 @@ def test_w3_per_cell_is_the_period_times_the_per_depth_result(runs):
     every electrode's bias."""
     w, h = runs["wrap_ref"], runs["hand_ref"]
     wc = w["wc"]
-    assert wc["units"] == "A^2/Hz per cell" and wc["depth"] == h["period"] == 370e-9
+    assert wc["units"] == "A^2/Hz per cell" and wc["depth"] == h["period"] == 400e-9
     assert all(a == b * h["period"] for a, b in zip(wc["S"], w["w0"]["S"]))
     assert wc["breakdown_exact"]
     assert np.max(np.abs(np.array(wc["map_sum"]) / np.array(wc["S"]) - 1.0)) < 1e-14
-    assert wc["vg"] == 0.0 and wc["voltages"] == {"bot_contact": 0.0, "top_contact": 0.0, "ito_gnd_left": 0.0,
-                                                  "ito_gnd_right": 0.0}
+    assert wc["vg"] == 0.0 and wc["voltages"] == {"bot_contact": 0.0, "top_contact": 0.0, "film_gnd_left": 0.0,
+                                                  "film_gnd_right": 0.0}
 
 
 def test_w4_sequence_0_1_0_gives_a_bitwise_repeat_and_leaves_the_state(runs):
@@ -163,7 +163,7 @@ def test_w7_extended_precision_sequence_0_1_0_repeats_bitwise():
     same bits: MEASURED). The only warnings are the extended-precision 'noise solve buys nothing' advisory, one
     per frequency per call (P2 W7: the method adds none of its own), and at the build exactly ONE: the
     DOS-mass advisory for its semiconductor film. That advisory is correct for this device: the film's DOS
-    mass (validation/_reference_device) varies by ~78 % over [0.1, 10] n_bg while the electrostatics
+    mass (validation/_reference_device) varies by ~65 % over [0.1, 10] n_bg while the electrostatics
     (extended precision included) uses one DOS mass per region; the recorder's simplefilter("always") overrides
     the child's module-level ignore, so it is asserted here rather than filtered. Sensitivity: the +1 V digest
     differs from the 0 V one, and the device really is extended (both asserted)."""
@@ -208,7 +208,7 @@ def test_w6_refusals(runs):
     still has its PotentialEquation); an unknown `hooge` string raises ValueError. None of them moves the
     device."""
     w = runs["wrap_ref"]
-    assert w["ohmic"].startswith("OhmicContactNoiseError:") and "ito_gnd_left" in w["ohmic"]
+    assert w["ohmic"].startswith("OhmicContactNoiseError:") and "film_gnd_left" in w["ohmic"]
     assert w["second_source"].startswith("ValueError:") and "already circuit-driven" in w["second_source"]
     assert w["name_clash"].startswith("ValueError:") and "already exist" in w["name_clash"]
     assert w["bot_contact_eqs"] == ["PotentialEquation"]

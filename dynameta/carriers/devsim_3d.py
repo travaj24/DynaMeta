@@ -104,8 +104,8 @@ from dynameta.carriers import devsim_geometry as GEO
 from dynameta.carriers import physics_traps as PT
 from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
-# comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
+# (V_T is not imported: the built-in offset comes from BP.ohmic_built_in_offset_V, the single source
+# shared with the contact recipe (C-10))
 from dynameta.geometry.guards import require_supported_geometry
 from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
 from dynameta.carriers.tunneling import btbt_for_material as _btbt_for_material
@@ -131,17 +131,22 @@ class Inclusion3D:
 
 @dataclass
 class Stacked3DSpec:
-    """A simple stacked gated capacitor for the 3D equilibrium solve (all SI)."""
-    semi_material:   str = "ITO"
-    oxide_material:  str = "HfO2"
+    """A simple stacked gated capacitor for the 3D equilibrium solve (all SI).
+
+    The material parameters have no defaults: `n_bg_m3` (background density [m^-3]), `eps_semi` and
+    `eps_oxide` (static relative permittivities of the film and the gate oxide) and `dos_mass_kg` (the
+    film's DOS mass [kg]; omit it when `bands` gives 'semi' a KaneBand, which defines it) are required.
+    `from_design` reads them from the Design's materials."""
+    semi_material:   str = "film"
+    oxide_material:  str = "oxide"
     lateral_m:       float = 12e-9       # square lateral extent (x = y)
     semi_thk_m:      float = 12e-9
     oxide_thk_m:     float = 8e-9
-    n_bg_m3:         float = 4e26
-    eps_semi:        float = 9.5
-    eps_oxide:       float = 18.0
-    dos_mass_kg:     float = 0.35 * M_E
-    mobility_m2Vs:   float = 0.004       # electron mobility (DD only); ITO ~40 cm^2/Vs
+    n_bg_m3:         Optional[float] = None   # required
+    eps_semi:        Optional[float] = None   # required
+    eps_oxide:       Optional[float] = None   # required
+    dos_mass_kg:     Optional[float] = None   # required unless bands['semi'] is given
+    mobility_m2Vs:   float = 0.004       # electron mobility (DD only), 40 cm^2/Vs
     physics:         str = "equilibrium" # "equilibrium" | "drift_diffusion" | "bipolar_dd"
     # --- bipolar drift-diffusion params (physics == "bipolar_dd": Potential+Electrons+Holes+SRH) ---
     n_i_m3:          Optional[float] = None    # intrinsic carrier density (required for bipolar_dd)
@@ -392,10 +397,19 @@ class Stacked3DSpec:
         return out
 
     def __post_init__(self):
-        # Sanity-check the relative permittivities so a bogus/omitted value fails at
-        # construction instead of silently producing wrong gate capacitance. eps_oxide
-        # DEFAULTS to HfO2 (18.0); set it for a different gate dielectric. (Consistency
-        # with the 2D builder, which raises, and from_design, which derives it.)
+        # The material parameters are required (no material-valued defaults); the DOS mass may instead
+        # come from a KaneBand on 'semi' (resolved below). Then sanity-check the relative permittivities
+        # so a bogus value fails at construction instead of silently producing a wrong gate capacitance
+        # (consistent with the 2D builder, which raises, and from_design, which derives them).
+        missing = [nm for nm in ("n_bg_m3", "eps_semi", "eps_oxide") if getattr(self, nm) is None]
+        if self.dos_mass_kg is None and (self.bands or {}).get("semi") is None:
+            missing.append("dos_mass_kg")
+        if missing:
+            raise TypeError("Stacked3DSpec: missing required material parameter(s) {} (no material-valued "
+                            "defaults): pass the film's background density n_bg_m3 [m^-3], the static relative "
+                            "permittivities eps_semi and eps_oxide, and the DOS mass dos_mass_kg [kg] (or a "
+                            "KaneBand in bands={{'semi': ...}}), or build the spec with Stacked3DSpec.from_design"
+                            .format(", ".join(missing)))
         if not (self.eps_oxide >= 1.0):
             raise ValueError("Stacked3DSpec.eps_oxide must be >= 1 (a DC relative "
                               "permittivity); got {}".format(self.eps_oxide))
@@ -555,7 +569,7 @@ class Stacked3DSpec:
             m = float(kb.dos_mass_kg(float(nbg)))
             if given is not None and float(given) not in (m, default):
                 raise ValueError("Stacked3DSpec.bands: {} = {!r} kg disagrees with its KaneBand's DOS mass at n_bg "
-                                 "({!r} kg); the band defines it -- leave the field at its default".format(
+                                 "({!r} kg); the band defines it -- leave the field unset".format(
                                      what, given, m))
             return m
         kb = self.band_of("semi")

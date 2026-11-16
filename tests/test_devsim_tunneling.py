@@ -779,9 +779,10 @@ def test_d1_defaults_off_and_guards():
                        btbt=SILICON_HURKX)
     assert TransportModel(n_bg_m3=1e24, eps_static=11.7, dos_mass_kg_of_n_m3=c(M_E)).btbt is None
     from dynameta.carriers.devsim_3d import Stacked3DSpec
-    assert Stacked3DSpec().btbt is None and Stacked3DSpec().oxide_tunneling is None
+    si = dict(n_bg_m3=1e24, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E)    # n-Si / SiO2 (no defaults)
+    assert Stacked3DSpec(**si).btbt is None and Stacked3DSpec(**si).oxide_tunneling is None
     with pytest.raises(ValueError, match="bipolar_dd"):
-        Stacked3DSpec(btbt=SILICON_HURKX)
+        Stacked3DSpec(btbt=SILICON_HURKX, **si)
     with pytest.raises(ValueError, match="E_F_eV"):
         OxideTunnelingParams(model="tsu_esaki")
     with pytest.raises(ValueError):

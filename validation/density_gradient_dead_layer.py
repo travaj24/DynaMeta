@@ -7,13 +7,13 @@ GATE B (off-switch + bulk limit): gamma = 0 returns n_cl EXACTLY; on a FLAT prof
         solution is sqrt(n_cl) outside the dead layer (|n_dg/n_cl - 1| < 5e-6 beyond 10 L_q, the BVP tol floor)
         with the wall-side suppression following the tanh^2(z/L_q) hard-wall closed form
         (the flat-profile BVP integrates EXACTLY to u = sqrt(n) tanh(z/(sqrt(2) L_q))).
-GATE C (the load-bearing physics oracle, vs Schrodinger-Poisson): on the gated ITO slab the
+GATE C (the load-bearing physics oracle, vs Schrodinger-Poisson): on the gated film slab the
         CLASSICAL (Thomas-Fermi from the SP potential) profile peaks AT the oxide interface;
         the in-house SP solve shows the quantum dead layer (peak displaced ~1 nm). The DG
         correction must move the classical peak INWARD to within a factor 2 of the SP peak
         position, and suppress the interface density by > 10x.
-GATE D (guards): non-positive density, bad hard_wall, mismatched arrays raise; L_q ~ 1.2 nm
-        for ITO at 300 K (the SP dead-layer scale).
+GATE D (guards): non-positive density, bad hard_wall, mismatched arrays raise; L_q = 1.28 nm
+        for the 0.30 m_e film at 300 K (the SP dead-layer scale).
 
 Run: python -m validation.density_gradient_dead_layer
 """
@@ -29,7 +29,8 @@ from dynameta.carriers.density_gradient import (dg_correct_density_1d, dg_length
                                                 quantum_potential_V)
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D
 
-MSTAR = 0.35 * M_E
+MSTAR = 0.30 * M_E                 # degenerate-film (TCO) effective mass
+N_FLAT = 3e26                      # flat-profile density of GATE B [m^-3]
 
 
 def main():
@@ -55,7 +56,7 @@ def main():
 
     # ---- GATE B: off-switch + flat-profile hard-wall closed form ----
     zf = np.linspace(0.0, 20e-9, 1201)
-    nf = np.full_like(zf, 4e26)
+    nf = np.full_like(zf, N_FLAT)
     off = dg_correct_density_1d(zf, nf, MSTAR, gamma=0.0)
     lq = dg_length_m(MSTAR)
     n_dg = dg_correct_density_1d(zf, nf, MSTAR)
@@ -64,9 +65,9 @@ def main():
     # flat n_cl: b u'' = V_t u ln(u^2/n0) has the EXACT kink-free solution
     # u = sqrt(n0) tanh(z/(sqrt(2) Lq))? -- check numerically against the analytic ODE solution
     # via the first-integral; here gate on the SHAPE: u(Lq)/u_inf must sit in the tanh band.
-    u_at_lq = float(np.sqrt(n_dg[np.argmin(np.abs(zf - lq))] / 4e26))
+    u_at_lq = float(np.sqrt(n_dg[np.argmin(np.abs(zf - lq))] / N_FLAT))
     g_b = bool(np.array_equal(off, nf) and bulk_err < 5e-6 and 0.45 < u_at_lq < 0.75
-               and n_dg[0] < 1e-3 * 4e26)        # bulk floor tracks the BVP tol (1e-6 default)
+               and n_dg[0] < 1e-3 * N_FLAT)      # bulk floor tracks the BVP tol (1e-6 default)
     ok = ok and g_b
     print("[dg] GATE B: gamma=0 ARRAY-EQUAL; bulk recovery {:.1e} beyond 10 Lq; u(Lq)/u_inf = "
           "{:.3f} (tanh band); wall suppressed -> {}".format(
@@ -79,13 +80,13 @@ def main():
     Nd = np.full_like(zsp, 1.0e25)
     dphi = 0.5
     phi, n_sp, res = sp.solve_self_consistent(
-        eps_r=9.5, doping_m3=Nd, E_F_J=0.0, phi_left_V=dphi, phi_right_V=0.0,
+        eps_r=9.0, doping_m3=Nd, E_F_J=0.0, phi_left_V=dphi, phi_right_V=0.0,
         max_outer=80, tol_V=1e-5, n_states=40, bound_tol=1e9, verbose=False)
     # classical reference: degenerate Thomas-Fermi from the SAME potential (peaks AT z=0)
     ef_ec = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * 1.0e25) ** (2.0 / 3.0)
     kin = np.maximum(ef_ec + Q * phi, 1e-3 * ef_ec)
     n_cl = (1.0 / (3.0 * np.pi ** 2)) * (2.0 * MSTAR * kin / HBAR ** 2) ** 1.5
-    # v0.16: this accumulation profile loses 36.9 % of its classical carrier sheet to the frozen-
+    # this accumulation profile loses 34.0 % (measured) of its classical carrier sheet to the frozen-
     # potential dead layer, so the thin-film guard must flag it (UnreliableResultWarning); the shape gate
     # below is unchanged
     import warnings

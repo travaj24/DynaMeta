@@ -38,7 +38,7 @@ GATE 8 -- WIDE-SLAB LIMIT (no z Drude term): abs(eps_zz - eps_xx) for 10/20/40 n
         20 -> 40 nm ratio in [1.6, 2.4] (1/L), < 0.017 at 40 nm (1.3x the measured value; MEASURED 0.0509
         / 0.0257 / 0.0133, Leff the wall-to-wall slab thickness).
 
-GATE 3 -- INTERSUBBAND LINE PRESENT, PASSIVE, IN-BAND: a ~1.8 nm well with two occupied sub-bands puts
+GATE 3 -- INTERSUBBAND LINE PRESENT, PASSIVE, IN-BAND: a 2.1 nm well with two occupied sub-bands puts
         a Lorentzian peak in Im(eps_zz) at lambda_12 = 2 pi c / w_12 (assert the swept peak lands within
         2% of it AND in the telecom band, the north-star claim); Im(eps_zz) > 0 at all lambda (exp(-iwt)
         passivity); eps_xx = eps_yy stay the flat intraband Drude with NO peak at w_12.
@@ -61,9 +61,9 @@ from dynameta.carriers.schrodinger_poisson import (SchrodingerPoisson1D, Subband
                                                    sp_bulk_fermi_level_J)
 from dynameta.materials.optical_model import DrudeOptical
 
-EPS_INF = 4.25
-M_OPT = 0.225 * M_E
-GAM_INTRA = 1.1e14
+EPS_INF = 4.0
+M_OPT = 0.30 * M_E
+GAM_INTRA = 1.2e14
 GAM_INTER = 1.0e13
 
 
@@ -112,7 +112,7 @@ def main():
         len(E), fsum, "PASS" if g2 else "FAIL"), flush=True)
 
     # ---- GATE 3: intersubband line present, passive, in telecom band ----
-    Lw3, mw3 = 1.84e-9, 0.35 * M_E
+    Lw3, mw3 = 2.1e-9, 0.30 * M_E
     zg3 = np.linspace(0.0, Lw3, 220)
     sp3 = SchrodingerPoisson1D(zg3, mw3, T_K=300.0)
     E3, psi3, zi3 = sp3.solve_schrodinger(np.zeros(220), n_states=3)

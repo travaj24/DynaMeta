@@ -44,7 +44,7 @@ from dynameta.analysis import sheet_resistance_ohm_sq, lumped_rc_bandwidth
 from dynameta.constants import M_E, EPS0, Q_E
 
 T_OX, T_ITO = 10e-9, 12e-9
-EPS_OX, EPS_ITO, N_BG, DOS_MASS, MU = 9.0, 9.5, 4e26, 0.35 * M_E, 30e-4
+EPS_OX, EPS_ITO, N_BG, DOS_MASS, MU = 9.0, 9.0, 3e26, 0.30 * M_E, 40e-4
 VG = 1.0
 DV = 0.25                                  # +/- bias for the quasi-static dQ/dVg
 FREQS = [1.0e3, 1.0e6, 1.0e9, 1.0e12]
@@ -133,7 +133,7 @@ def main():
     # INFO: the access-RC f_3dB (the real device bottleneck, since C is intrinsically flat)
     rho_s = sheet_resistance_ohm_sq(N_BG, MU, T_ITO)
     R, C_cell, f3db = lumped_rc_bandwidth(c_mean, rho_s, path_length_m=5e-6, pad_width_m=1e-6,
-                                          cell_area_m2=(370e-9) ** 2)
+                                          cell_area_m2=(400e-9) ** 2)
 
     for f, c, g in zip(FREQS, C, G):
         print("[t]   f={:9.1e} Hz  C={:.4e} F/m^2  G={:+.3e} S/m^2".format(f, c, g), flush=True)

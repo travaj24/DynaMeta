@@ -154,11 +154,12 @@ _NAMES = ("node_model", "edge_model", "contact_node_model", "interface_model", "
 # sha256 of the build_device call log (_NAMES, every keyword repr'd, canonical transcendentals:
 # tests/_calllog.recording(True)), (digest, calls), RECORDED with the library before the edge
 # reference and the same recorder, on the fixture of tests/_wiring_fixture.py; refmod_pinned is the shared
-# validation device.
+# validation cell of validation/_reference_device.py, recorded the same way (that library, this recorder and this
+# cell; the library's own edge grounds are pinned).
 PRE_EDGE_LOGS = {
     "film_pinned": ("67e9b141d024355374eeb259c8a8ca55ebabf12d8100f56df47ef61ae1e9ce15", 336),
     "film_no_edge": ("ac8dda7a9eb032498d4fe321b1171cfe8137a0a2f5aa81fd9145aadfc8678225", 331),
-    "refmod_pinned": ("314596e0b28f862257df8de04038c849551ea39b6f5ee1c8910405362e3b34c1", 332),
+    "refmod_pinned": ("b072c37f5f133166ec424c8754015fdc5b2dc415bef5fadd5525d5fc3648d64b", 350),
 }
 
 

@@ -1,12 +1,12 @@
 """Validate the resolved Drude scattering/mass closures (materials/scattering.py, roadmap R2): a Kane
 nonparabolic optical mass m_opt(n) and a Matthiessen damping Gamma(n;T), plugged through the existing
-DrudeOptical callable seam. Independent references: the reference ITO Kane DOS-mass closure, and
+DrudeOptical callable seam. Independent references: the Kane dispersion differentiated numerically, and
 the constant-Drude special case.
 
 GATE BYTEID (off-switch): DrudeOptical with KaneOpticalMass(alpha=0) + MatthiessenGamma(const only)
         reproduces the constant DrudeOptical eps to < 1e-15 over n in [1e26,2e27], lambda in [1200,2000] nm.
-GATE KANE (reduces-to-known-limit): KaneOpticalMass(0.27 m_e, alpha=0.5) == the reference ito_dos_mass
-        closure to < 1e-12.
+GATE KANE (reduces-to-known-limit): KaneOpticalMass(0.25 m_e, alpha=0.4) == the numeric Kane-dispersion
+        mass hbar k_F / v_F to < 1e-8.
 GATE PHYSICS: m_opt(n) increases with n; wp^2 = n q^2/(eps0 m_opt) is SUB-linear (d wp^2/dn decreasing);
         Gamma(T=400) > Gamma(300) > Gamma(200) with a phonon term.
 GATE ENZ-SHIFT: the ENZ wavelength (Re eps = 0) BLUE-shifts as n rises across the accumulation swing,
@@ -31,7 +31,7 @@ LAMS = np.linspace(1200e-9, 2000e-9, 17)
 C = 299792458.0
 
 
-def _reference_mass(n, m_low=0.27 * M_E, alpha=0.5):
+def _reference_mass(n, m_low=0.25 * M_E, alpha=0.4):
     """NON-CIRCULAR reference (audit C7b-1: the old reference re-typed KaneOpticalMass's own
     -- halved -- closed form, so the gate was tautological): m_opt = hbar k_F / v_F computed
     NUMERICALLY from the Kane dispersion E (1 + alpha E) = hbar^2 k^2/(2 m0), v = dE/dk by
@@ -62,9 +62,9 @@ def _lambda_enz(drude, n):
 def main():
     print("[dm] === Drude resolved Matthiessen-Gamma + Kane m_opt(n) ===", flush=True)
 
-    d_const = DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)
-    d_res = DrudeOptical(eps_inf=4.25, m_opt_kg=KaneOpticalMass(m0_kg=0.225 * M_E, alpha_eV=0.0),
-                         gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.1e14))
+    d_const = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+    d_res = DrudeOptical(eps_inf=4.0, m_opt_kg=KaneOpticalMass(m0_kg=0.30 * M_E, alpha_eV=0.0),
+                         gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.2e14))
     dmax = 0.0
     for lam in LAMS:
         dmax = max(dmax, float(np.max(np.abs(d_const.eps(lam, n_m3=NGRID) - d_res.eps(lam, n_m3=NGRID)))))
@@ -72,7 +72,7 @@ def main():
     print("[dm] BYTEID resolved(neutral)==constant Drude: max|d eps|={:.1e} -> {}".format(
         dmax, "OK" if g_id else "FAIL"), flush=True)
 
-    m_kane = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
+    m_kane = KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4)
     dk = float(np.max(np.abs(m_kane(NGRID) - _reference_mass(NGRID)) / _reference_mass(NGRID)))
     g_k = dk < 1e-8            # numeric central-diff reference truncation ~1.5e-10; the
     # pre-audit halved closure misses by ~2.5e-1 -- 7 orders of discrimination retained
@@ -90,9 +90,9 @@ def main():
         "OK" if g_phys else "FAIL"), flush=True)
 
     # ENZ shift: Kane vs constant mass, low vs high density
-    d_kane = DrudeOptical(eps_inf=4.25, m_opt_kg=m_kane, gamma_rad_s=1.1e14)
-    d_cm = DrudeOptical(eps_inf=4.25, m_opt_kg=float(m_kane(4e26)), gamma_rad_s=1.1e14)
-    n_lo, n_hi = 4e26, 1.2e27
+    d_kane = DrudeOptical(eps_inf=4.0, m_opt_kg=m_kane, gamma_rad_s=1.2e14)
+    d_cm = DrudeOptical(eps_inf=4.0, m_opt_kg=float(m_kane(3e26)), gamma_rad_s=1.2e14)
+    n_lo, n_hi = 3e26, 1.2e27
     L_kane = _lambda_enz(d_kane, n_lo) - _lambda_enz(d_kane, n_hi)     # blueshift (lo - hi > 0)
     L_cm = _lambda_enz(d_cm, n_lo) - _lambda_enz(d_cm, n_hi)
     # the R2-specific claim is the SUB-LINEAR wp^2: the Kane (mass-rising) ENZ blueshift is SMALLER than

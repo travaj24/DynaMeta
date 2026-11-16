@@ -1,8 +1,8 @@
 """R19 follow-on oracle: IN-NEWTON density-gradient drift-diffusion (4-variable DEVSIM Newton).
 
-Device: a 1D unipolar n-type bar (400 nm, ITO-like m* = 0.35 m0) with a 10x DOPING STEP at the
-midpoint (4e26 -> 4e25 m^-3) -- chosen so the quantum length L_q = hbar sqrt(1/(6 m kT)) =
-1.18 nm DOMINATES the Debye length on BOTH sides (0.18 / 0.58 nm; the first design's 1e24 low
+Device: a 1D unipolar n-type bar (400 nm, ITO-like m* = 0.30 m0) with a 10x DOPING STEP at the
+midpoint (3e26 -> 3e25 m^-3) -- chosen so the quantum length L_q = hbar sqrt(1/(6 m kT)) =
+1.28 nm DOMINATES the Debye length on BOTH sides (0.21 / 0.65 nm; the first design's 1e24 low
 side carried a 3.7 nm Debye tail that swamped L_q) and the DG smoothing is the leading effect.
 
 GATE A (gamma = 0 reduces to classical): with the DG equations ACTIVE but b_dg = 0, the
@@ -50,10 +50,10 @@ from dynameta.carriers.physics_density_gradient import (dg_b_coefficient, seed_d
 from dynameta.carriers.physics_drift_diffusion import (setup_contact_ohmic_dd,
                                                        setup_semiconductor_region_dd)
 
-MSTAR = 0.35 * M_E
+MSTAR = 0.30 * M_E
 LEN = 400e-9
 X_STEP = 200e-9
-N_HI, N_LO = 4.0e26, 4.0e25
+N_HI, N_LO = 3.0e26, 3.0e25
 # REL 1e-6 / 200 iters: the 4-variable DG Newton's update floors near the density precision
 # limit (the dc_solve note) -- a 1e-7 rel gate ping-pongs there and reports a false
 # 'Convergence failure' for b_dg above ~b(gamma=1)
@@ -86,7 +86,7 @@ def _build(tag):
     ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="left", tag2="right")
     ds.finalize_mesh(mesh=mesh)
     ds.create_device(mesh=mesh, device=dev)
-    setup_semiconductor_region_dd(dev, reg, n_bg_m3=N_HI, eps_static=9.5,
+    setup_semiconductor_region_dd(dev, reg, n_bg_m3=N_HI, eps_static=9.0,
                                   dos_mass_kg=MSTAR, mobility_m2Vs=0.004)
     # doping STEP: smooth tanh over 0.3 nm (<< L_q; just enough for classical convergence)
     # charge + the right contact's pin (the left contact keeps the scalar N_D = N_HI)
@@ -221,7 +221,7 @@ def main():
          "(Potential@n0 + LambdaFrozen@n0 - Potential@n1 - LambdaFrozen@n1)/V_t", ("Potential",))
     # the SAME transport as the coupled device: under the v0.15.0 default statistics ('fermi_dirac') the
     # electron flux carries the FD quasi-field (g_enh = 1 + HJ_Electrons_dDelta, physics_density_gradient);
-    # without it this re-solve is the legacy averaged-g flux and GATE C read rel 3.8e-01 (MEASURED 2026-11-07)
+    # without it this re-solve is the legacy averaged-g flux and GATE C reads rel 3.8e-01 (MEASURED)
     fdq = ""
     if "HJ_Electrons_dDelta" in ds.get_edge_model_list(device=devc, region=regc):
         from dynameta.carriers.physics_heterojunction import fd_quasi_field_expr
@@ -292,7 +292,7 @@ def _wall_device(tag, n0, ps_wall, *, length=100e-9):
         ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="wall", tag2="back")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
-        setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.5, dos_mass_kg=MSTAR,
+        setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.0, dos_mass_kg=MSTAR,
                                       mobility_m2Vs=0.004)
         setup_contact_ohmic_dd(dev, "back")
     _solve(dev)
@@ -313,9 +313,9 @@ def gate_e():
     setup_dg_hard_wall's replacement), potential COUPLED, n0 = 1e23 m^-3: the converged DG density equals
     the post-hoc DG boundary-value problem (density_gradient.dg_correct_density_1d, scipy solve_bvp)
     evaluated on the DG solution's OWN potential, n_cl = n0 exp((psi - psi_b)/V_t), within 2e-3 of the
-    peak (the bipolar GATE D twin measured 2.7e-4; the unipolar region's FD g-factor, g - 1 = 0.7 % at
-    n0/N_c = 0.019, is outside the Boltzmann BVP and is budgeted inside the 2e-3). MEASURED 2026-11-06:
-    1.2e-3 at 1e23; the same comparison at 1e22 / 1e21 (g - 1 = 6.7e-4 / 6.6e-5) gives 2.5e-4 / 1.6e-4
+    peak (the bipolar GATE D twin measured 2.7e-4; the unipolar region's FD g-factor, g - 1 = 0.9 % at
+    n0/N_c = 0.024, is outside the Boltzmann BVP and is budgeted inside the 2e-3). MEASURED:
+    1.4e-3 at 1e23; the same comparison at 1e22 / 1e21 (g - 1 = 8.5e-4 / 8.3e-5) gives 2.7e-4 / 1.4e-4
     -- the residual is the g-factor plus a ~1.5e-4 discretization floor, as budgeted. On the old rows the
     self-consistent leg raised a DEVSIM convergence failure (audit X-6, 2026-07-26). The frozen-psi
     closed-form gates (deficit, order, conservation) are in tests/test_density_gradient.py."""

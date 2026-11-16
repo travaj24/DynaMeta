@@ -6,9 +6,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
 from dynameta.sweep import BiasPoint
 from dynameta.core.carrier_field import ELECTRON_DENSITY
+from dynameta.constants import M_E
 
-N_BG = 4e26
-solver = Devsim3DEquilibrium(Stacked3DSpec(n_bg_m3=N_BG))
+N_BG = 3e26
+solver = Devsim3DEquilibrium(Stacked3DSpec(n_bg_m3=N_BG, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E))
 cf = solver.solve(BiasPoint({"gate": 1.0, "body": 0.0}, "gate+1V"))
 reg = cf.regions["semi"]
 n = reg.grid_fields[ELECTRON_DENSITY]

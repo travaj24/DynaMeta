@@ -29,22 +29,22 @@ from dynameta.materials import ConstantOptical, Material, MaterialRegistry
 from dynameta.pipeline import SweepRow
 from dynameta.results import SweepResults
 
-BIASES = {"off": 4.0e26, "on": 1.2e27}                      # a (label -> carrier-density) modulation
+BIASES = {"off": 3.0e26, "on": 1.2e27}                      # a (label -> carrier-density) modulation
 LAMS_NM = [1400, 1450, 1500, 1550, 1600]
 
 
 def _design():
     reg = MaterialRegistry()
-    for nm, e in [("air", 1.0), ("ito", 3.9)]:
+    for nm, e in [("air", 1.0), ("ito", 4.0)]:
         reg.add(Material(nm, ConstantOptical(complex(e))))
     stack = Stack(layers=[Layer("ito", 60e-9, "ito", inclusions=[])],
                   superstrate_material="air", substrate_material="air")
-    return Design(name="demo", unit_cell=UnitCell.square(370e-9), stack=stack, electrodes=[], materials=reg)
+    return Design(name="demo", unit_cell=UnitCell.square(400e-9), stack=stack, electrodes=[], materials=reg)
 
 
 def _eps_at(n_m3, lam_nm):
     """A toy free-carrier eps(n, lambda) -> a duck-typed eps_by_region for the seam/cache."""
-    eps = 3.9 - (n_m3 / 1e27) * (lam_nm / 1500.0) ** 2      # crude ENZ-ish shift with bias + wavelength
+    eps = 4.0 - (n_m3 / 1e27) * (lam_nm / 1500.0) ** 2      # crude ENZ-ish shift with bias + wavelength
     return {"ito": SimpleNamespace(is_uniform=True, scalar=complex(eps, 0.1))}
 
 

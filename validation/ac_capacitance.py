@@ -144,8 +144,8 @@ def main():
               "lossless={}".format(C_RTOL, c_match, c_spread, FLAT_RTOL, c_flat, lossless),
               flush=True)
 
-    # ---- CHAIN: validated areal C -> intrinsic RC f_3dB (reuses the Stage-4 lumped model) ----
-    cell_area = (370e-9) ** 2                                      # a representative unit-cell area
+    # ---- CHAIN: validated areal C -> intrinsic RC f_3dB (the analysis.lumped_rc_bandwidth model) ----
+    cell_area = (400e-9) ** 2                                      # a representative unit-cell area
     R, C_cell, f3db = lumped_rc_bandwidth(first_C_areal, RHO_SHEET, path_length_m=PATH_M,
                                           pad_width_m=PAD_M, cell_area_m2=cell_area)
     chain_ok = bool(np.isfinite(f3db) and f3db > 0.0 and C_cell > 0.0)

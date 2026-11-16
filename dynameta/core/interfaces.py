@@ -78,7 +78,7 @@ class OpticalResult:
     # scattered reflected field projected onto the axis ORTHOGONAL to the incident polarisation (the
     # layered background reflects no cross-pol).  With r it gives one Jones column: x-pol -> (r_xx,
     # r_yx); y-pol -> (r_xy, r_yy).  None unless requested; exactly 0j on a symmetry-reduced cell,
-    # the only value its mirror symmetry admits (2026-09-25, exp31 chiral coax).
+    # the only value its mirror symmetry admits (measured on a chiral coaxial cell).
     r_cross:       Optional[complex] = None
     # The linear solver that actually produced the field (FEM path): what linear_solver='auto' picked,
     # after any fallback (e.g. 'pardiso' without MKL -> 'umfpack'). None on the other backends.
