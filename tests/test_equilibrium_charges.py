@@ -4,12 +4,12 @@ the DOS-mass-at-n_bg guard and interface traps for EQUILIBRIUM films.
 Every DEVSIM gate runs on the 1-D MOS of tests/_equilibrium_mos.py (gate | 10 nm oxide | 200 nm
 equilibrium semiconductor, zero-field far end), built directly from the physics_equilibrium primitives.
 
-On v0.15.1 (ebdfe5c) every gate below fails: physics_equilibrium has no install_sheet_charge /
+On v0.15.1 (2e1af87) every gate below fails: physics_equilibrium has no install_sheet_charge /
 install_bulk_charge / work_function_offset_V / fermi_ref_param, physics_traps no FilmInterfaceTraps,
 TransportModel no dos_mass_at_bg, Electrode no work_function_eV (AttributeError / TypeError), and
 install_interface_traps(InterfaceTraps(fixed_charge_C_m2=...)) on a non-bipolar interface raises
 ValueError. The "unchanged" gates pin v0.15.1 values: the model-string digest below was
-recorded on ebdfe5c.
+recorded on 2e1af87.
 """
 import math
 import warnings
@@ -171,7 +171,7 @@ from dynameta.carriers.devsim_env import import_devsim     # noqa: E402
 
 ds = import_devsim()
 DEV = "eqchg"
-# v0.15.1 (ebdfe5c) digest of the fixture's model-defining calls (tests/_equilibrium_mos.LOGGED, floats
+# v0.15.1 (2e1af87) digest of the fixture's model-defining calls (tests/_equilibrium_mos.LOGGED, floats
 # masked) -- MOS.build_mos with no new option. Recorded on the unfixed tree.
 V0151_DIGEST = "19b423384a05358374ec32efe3dad140c7a848724be9e5d2505440d533bef166"
 
@@ -204,7 +204,7 @@ def _clean():
 
 def test_model_strings_unchanged_without_new_options():
     """Bit-identical defaults: a device that requests no new option makes exactly the v0.15.1 definition
-    calls (digest recorded on ebdfe5c; this gate passes on v0.15.1 by construction)."""
+    calls (digest recorded on 2e1af87; this gate passes on v0.15.1 by construction)."""
     d, _ = _log_digest()
     assert d == V0151_DIGEST
 

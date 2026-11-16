@@ -142,13 +142,13 @@ def test_isotropic_tensor_equals_the_scalar_field_and_refusals():
 
 
 def _base_module():
-    """The pmm_backend of the v0.15.1 release commit (230516c on main), loaded side by side (skip when git or
+    """The pmm_backend of the v0.15.1 release commit (b8a73c0 on main), loaded side by side (skip when git or
     the history is unavailable)."""
     try:
-        src = subprocess.run(["git", "show", "230516c:dynameta/optics/lumenairy_bridge/pmm_backend.py"],
+        src = subprocess.run(["git", "show", "b8a73c0:dynameta/optics/lumenairy_bridge/pmm_backend.py"],
                              capture_output=True, text=True, check=True, encoding="utf-8").stdout
     except Exception:                                                    # pragma: no cover
-        pytest.skip("git history of the base commit 230516c unavailable")
+        pytest.skip("git history of the base commit b8a73c0 unavailable")
     mod = types.ModuleType("_pmm_backend_base")
     mod.__dict__["__name__"] = "_pmm_backend_base"
     exec(compile(src, "pmm_backend_base.py", "exec"), mod.__dict__)

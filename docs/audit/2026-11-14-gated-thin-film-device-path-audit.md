@@ -10,7 +10,7 @@ code was changed. Every number below was MEASURED unless it is marked otherwise.
 
 ## Version, scope, method
 
-- **Audited code:** DynaMeta **v0.15.1**, commit **ebdfe5c** ("Merge pull request #37"), which equals the
+- **Audited code:** DynaMeta **v0.15.1**, commit **2e1af87** ("Merge pull request #37"), which equals the
   local `origin/main` on the day of the audit. The package was imported from a read-only clone at that commit
   (`sys.path.insert(0, clone)`, with an assertion that `dynameta.__file__` lies in the clone; the pip-installed
   copy is older and was not used).

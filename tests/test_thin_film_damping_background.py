@@ -29,7 +29,7 @@ LAM = 1200e-9
 W12 = 2.0 * math.pi * C_LIGHT / LAM
 M = 0.30 * M_E
 REPO = pathlib.Path(__file__).resolve().parents[1]
-BASE_REF = "230516c"                       # the v0.15.1 release commit on main
+BASE_REF = "b8a73c0"                       # the v0.15.1 release commit on main
 
 
 # ------------------------------------------------------------------------------------------------

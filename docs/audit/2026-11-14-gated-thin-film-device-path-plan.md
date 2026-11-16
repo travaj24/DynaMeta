@@ -1,10 +1,10 @@
 # Gated thin-film device path: assessment and implementation plan (2026-11-14)
 
 Companion to `docs/audit/2026-11-14-gated-thin-film-device-path-audit.md` (23 findings against v0.15.1,
-commit ebdfe5c). This document (1) records an independent check of every finding and proposed fix,
+commit 2e1af87). This document (1) records an independent check of every finding and proposed fix,
 (2) gives a verdict per finding, and (3) turns the accepted work into packages that separate engineers can
 build in parallel git worktrees without talking to each other. No library code was changed. Every number
-marked MEASURED was produced for this assessment (v0.15.1 imported from a read-only clone at ebdfe5c,
+marked MEASURED was produced for this assessment (v0.15.1 imported from a read-only clone at 2e1af87,
 DEVSIM 2.11.2, Python 3.14, numpy 2.4.4, BLAS pinned to 2 threads, Windows); numbers marked AUDIT are quoted
 from the audit and were not re-run. The audit's fixtures were later replaced by generic ones (audit,
 "Fixtures"): every number in this plan was then re-measured on them (on an export of the v0.15.1 tree with
@@ -266,7 +266,7 @@ differs between sub-layers, which is exactly the graded case.
    test file is added to the `solvers-devsim` file list in `.github/workflows/ci.yml` (append at the end of
    the list; P15 resolves adjacent-line conflicts by union). Tests over ~60 s are `@pytest.mark.slow`.
    Two DEVSIM solves compared bitwise need `@pytest.mark.devsim_isolated`.
-8. **Git hygiene.** One worktree per package, branch `wip/v016_<pkg>` from origin/main (ebdfe5c or the
+8. **Git hygiene.** One worktree per package, branch `wip/v016_<pkg>` from origin/main (2e1af87 or the
    later merged main). Never `git stash` (shared across worktrees). Never merge into a worktree while a
    test run is going there. Do not edit files you do not own; if you need a change there, write it in
    your package note as a request to the owner package.

@@ -80,7 +80,7 @@ pockels_phase_modulator.py`: electrostatics -> Pockels tensor -> tensor FEM repr
 independent TMM scalar-n_y solve (|dR|=2e-3, dphi modulation matched to 2.5e-4 rad, 3.9 deg over
 0-6 V) -- proves the generalized spine on a real non-carrier modulator. REMAINING: 1a is the
 analytic series-cap field (exact for a layered parallel-plate); the full Laplace/Poisson FEM driver
-for laterally non-uniform geometries is DONE (C1 c5ea33e, `carriers/electrostatics_fem.py` +
+for laterally non-uniform geometries is DONE (C1 5f3548a, `carriers/electrostatics_fem.py` +
 `validation/electrostatics_fem.py`); the crystal-orientation rotation and a rigorous
 Airy/Kramers-Kronig Franz-Keldysh remain follow-ons.*
 - **1a Electrostatics driver:** a pure-dielectric Laplace/Poisson solve for E = -grad(phi)
@@ -102,11 +102,11 @@ Composition for stacking shifts on a region added via `core/effects.DeltaEffect`
 zero-drive baseline so a ComposedEffect does not double-count the background). Post-phase
 adversarial audit (6 agents): all findings fixed -- uniform_temperature_rise shape/finite guard,
 ASCII-only docstrings (removed 3 Greek glyphs), honest driver docstrings (the bridge did not yet
-auto-assemble {E,T} -- that tracked seam has since SHIPPED, C7 fda2058), and the validation
+auto-assemble {E,T} -- that tracked seam has since SHIPPED, C7 434603e), and the validation
 no-shift/slope gates made non-tautological.
-REMAINING -- ALL DONE since: the volumetric-Joule heat-equation FEM (C2 cf3d603) + transient
-(R5 a3fc901, `validation/thermal_transient_fem.py`); electro-thermal coupling via the Picard loop
-(R6 0f16fb5, `validation/electrothermal_picard.py`); the anisotropic dn/dT tensor variant (9730ec3).*
+REMAINING -- ALL DONE since: the volumetric-Joule heat-equation FEM (C2 3ae6276) + transient
+(R5 d72f49b, `validation/thermal_transient_fem.py`); electro-thermal coupling via the Picard loop
+(R6 964d771, `validation/electrothermal_picard.py`); the anisotropic dn/dT tensor variant (61207b7).*
 - **2a Thermal driver:** steady + transient heat equation (FEM), Joule source from the
   electrical solve (electro-thermal). Emits T into the FieldBundle.
 - **2b `ThermoOpticModel`** (dn/dT) + material thermal params (k, Cp, dn/dT).
@@ -129,7 +129,7 @@ quad-fit R2=0.9998); (2) a physical GaAs well shows a quadratic edge redshift (R
 monotonic e-h overlap drop + no shift at F=0; (3) the device turns ON absorption (d-alpha>0, Im(eps)
 0.01->0.245) at a probe 2 sigma below the zero-field exciton, and reduces EXACTLY to eps_bg at F=0
 (|eps0-eps_bg|=2e-15). REMAINING: the band-to-band continuum (Elliott) on top of the single exciton
-line and the MQW stack/coupled-well variant are DONE (9730ec3, `validation/qcse_elliott_mqw.py`,
+line and the MQW stack/coupled-well variant are DONE (61207b7, `validation/qcse_elliott_mqw.py`,
 re-run green 2026-06-11); a rigorous 2D exciton binding(F) remains the open follow-on.*
 - Extend the **existing `SchrodingerPoisson1D`** with an in-well field -> Stark-shifted
   sub-bands + a simple exciton model -> `ElectroAbsorptionModel` (d(alpha), d(n) via KK).
@@ -149,17 +149,17 @@ rotation-invariant uniaxial eigenvalues {n_o^2,n_o^2,n_e^2} + isotropic reductio
 graphene universal-sigma0 + Pauli blocking (Re(sigma)->0 once 2E_F>hbar*omega) + gate-tunable
 absorption + R+T+A=1 + sigma->0 Fresnel -- and `validation/lc_uniaxial_fem.py` (tensor FEM: the
 PLANAR (theta=0) and HOMEOTROPIC (theta=90) principal director states == TMM at n_o/n_e). REMAINING:
-(a) **off-diagonal-tensor FEM** -- RESOLVED (ca5a33e): this LC oracle SURFACED what looked like a
+(a) **off-diagonal-tensor FEM** -- RESOLVED (486073b): this LC oracle SURFACED what looked like a
 pre-existing P0b gap, but the root cause was mesh.SetPML's coordinate stretch (exact only for
 isotropic media), NOT the matrix-CF matvec and NOT an NGSolve defect -- the assembly itself was
-proven exact to ~1e-16 (`docs/ngsolve_offdiag_check.py`, b7913e9; see
+proven exact to ~1e-16 (`docs/ngsolve_offdiag_check.py`, cf16c17; see
 `docs/ngsolve_offdiag_investigation.md`). Fix: an explicit anisotropic UPML
 (Lambda=diag(s_z,s_z,1/s_z)) folded into the weak form for tensor eps; the NotImplementedError
 guard is REMOVED. Validated: `validation/lc_tilted_fem.py` (theta=0..90) +
 `validation/magneto_optic_faraday.py` GATE D (re-run green 2026-06-11). (b) the graphene FEM
-surface-current boundary condition is DONE (8ca4ef9, `validation/graphene_sheet_fem.py`); (c) the
-LC/PCM thermal-pulse switching drivers are DONE (5df780b, `validation/switching_drivers.py`) and
-two-constant elasticity (K11!=K33) is DONE (5b8038f, `validation/lc_two_constant_bvp.py`).*
+surface-current boundary condition is DONE (7d794b8, `validation/graphene_sheet_fem.py`); (c) the
+LC/PCM thermal-pulse switching drivers are DONE (7d52030, `validation/switching_drivers.py`) and
+two-constant elasticity (K11!=K33) is DONE (9120a7c, `validation/lc_two_constant_bvp.py`).*
 - `PCMModel`: crystalline-fraction state -> effective (n,k) (GST/Sb2S3/VO2); optional
   thermal-pulse switching driver.
 - **LC director driver** (Frank-elastic + field) -> uniaxial tensor along n-hat (reuses
@@ -186,8 +186,8 @@ two-constant elasticity (K11!=K33) is DONE (5b8038f, `validation/lc_two_constant
   FEM -- so the port reduces to wiring `RCWAStack` to the seam + the structured-slab path.
 - **Iterative/scaling solver** -- BDDC is in; a NGSolve-AMS/HYPRE binding is the next rung for
   large 3D (Part D). The non-ENZ mechanisms are well-conditioned, so this is now viable.
-- **AC/transient carriers** **[DONE 2026-06-02]** -- the full dynamics axis shipped: 38aac5c (ssac)
-  + f29518f (transient); validations ac_capacitance / ac_diode / transient_diode /
+- **AC/transient carriers** **[DONE 2026-06-02]** -- the full dynamics axis shipped: a92b7b7 (ssac)
+  + f43f8c7 (transient); validations ac_capacitance / ac_diode / transient_diode /
   transient_metasurface.
 - **Optimization / inverse-design** -- rides on a fast forward solver (RCWA). **Groundwork DONE
   (2026-06-02):** a scoped Lumenairy-style array-backend seam (`core/backend.py`: `array_namespace`
@@ -197,8 +197,8 @@ two-constant elasticity (K11!=K33) is DONE (5b8038f, `validation/lc_two_constant
   through these maps for free (validation/backend_autodiff.py: jax.grad of the Pockels eps matches
   the analytic slope; numpy/jax agree to 0). The NumPy path is bit-identical float64 and never
   imports jax/cupy; the FEM/DEVSIM solvers (C++/host-numpy) are deliberately untouched.
-- **FDTD** **[DONE]** -- shipped: 1-D engine C9 ddd92fe; 2D/3D fdtd_nd 1d4df64; nonlinear R15
-  47bde0b (Kerr, all-optical); see `docs/fdtd_engine_roadmap.md`.
+- **FDTD** **[DONE]** -- shipped: 1-D engine C9 e6d755d; 2D/3D fdtd_nd cc2cde8; nonlinear R15
+  d1a2fe0 (Kerr, all-optical); see `docs/fdtd_engine_roadmap.md`.
 
 ---
 

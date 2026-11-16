@@ -116,7 +116,7 @@ def test_dg_off_switch_and_dead_layer():
 
 
 def test_gamma_wall_is_the_exact_free_gas_wall_gamma():
-    """GAMMA_WALL (user decision 2026-11-04; fails on ee0ad04, where the name does not exist) =
+    """GAMMA_WALL (user decision 2026-11-04; fails on e35cda2, where the name does not exist) =
     (3 pi/4)/I^2, I = int_0^1 (1 - t^2)/sqrt(t^2 ln t^2 - t^2 + 1) dt (DG audit doc, GATE B).
 
     Pinned two independent ways: (1) I by scipy quadrature here (not the mpmath value the literal was
