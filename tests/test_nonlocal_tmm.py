@@ -313,8 +313,8 @@ def _enz_feature_omega(layer, theta_rad, w_enz):
 
 
 def test_gate7_enz_blueshift_one_over_d():
-    # ITO-like: eps_inf ~ 3.9, ENZ in the near-IR; degenerate-semiconductor v_F ~ 1e6 m/s.
-    eps_inf, wp, gamma = 3.9, 2.40e15, 1.0e14
+    # TCO-like: eps_inf ~ 4, ENZ in the near-IR; degenerate-semiconductor v_F ~ 1e6 m/s.
+    eps_inf, wp, gamma = 4.0, 2.40e15, 1.2e14
     beta = nt.beta_from_vf(1.0e6)
     w_enz = wp / math.sqrt(eps_inf)
     theta = math.radians(60.0)

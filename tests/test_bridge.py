@@ -16,14 +16,14 @@ from dynameta.materials import Material, MaterialRegistry, ConstantOptical, Drud
 from dynameta.analysis import (resonance_dip, gate_cv, sheet_resistance_ohm_sq,
                                lumped_rc_bandwidth, switching_energy_per_area)
 
-N_BG = 4e26
+N_BG = 3e26
 PERIOD = 300e-9
 
 
 def _registry():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("ito", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+    reg.add(Material("ito", DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
     return reg
 
 
@@ -288,29 +288,31 @@ def test_gate_cv_rejects_transposed_grid():
         gate_cv([cf], "semi", voltage_key="gate")
 
 
-# ---- lumped-RC bandwidth + switching energy (ported from Metasurface_Modulator Stage 4) ----
-def test_lumped_rc_bandwidth_formula_with_modulator_C():
-    # Checks the RC-bandwidth FORMULA against the Metasurface_Modulator's MEASURED areal
-    # capacitance C=0.0145 F/m^2 (a fixed INPUT, not a carrier-derived reproduction -- the
+# ---- lumped-RC bandwidth + switching energy ----
+def test_lumped_rc_bandwidth_formula_with_gate_C():
+    # Checks the RC-bandwidth FORMULA on fixed INPUTS (not a carrier-derived reproduction -- the
     # end-to-end carrier->C->f_3dB chain is exercised in validation/bandwidth_cv.py; audit AN-2).
-    # reference-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; 370 nm cell; medium access
-    # 5 um path / 1 um pad -> ~15.4 GHz (the Modulator's result).
-    rho_s = sheet_resistance_ohm_sq(4e26, 30e-4, 5e-9)
-    assert abs(rho_s - 1040.0) < 5.0                       # ~1040 Ohm/sq
-    C_area = 0.0145                                         # F/m^2
-    cell_area = (370e-9) ** 2
+    # Generic gated-film cell: film n_bg = 3e26 m^-3, mu = 40 cm^2/Vs, t = 6 nm -> rho_s = 1/(q n mu t)
+    # = 866.88 Ohm/sq; areal C of the series oxA 2 nm (eps 9) + oxB 6 nm (eps 20) gate stack,
+    # eps0 / (2e-9/9 + 6e-9/20) = 1.69548e-2 F/m^2; 400 nm cell (1.6e-13 m^2) -> C_cell = 2.7128 fF;
+    # access 5 um path / 1 um pad -> R = 4334.4 Ohm and f_3dB = 1/(2 pi R C_cell) = 13.536 GHz
+    # (all by hand from the closed forms).
+    rho_s = sheet_resistance_ohm_sq(3e26, 40e-4, 6e-9)
+    assert abs(rho_s - 866.88) < 5.0                       # ~867 Ohm/sq
+    C_area = 8.8541878128e-12 / (2e-9 / 9.0 + 6e-9 / 20.0)  # F/m^2
+    cell_area = (400e-9) ** 2
     R, C_cell, f3db = lumped_rc_bandwidth(C_area, rho_s, path_length_m=5e-6,
                                           pad_width_m=1e-6, cell_area_m2=cell_area)
-    assert abs(C_cell - 1.985e-15) < 1e-17                 # ~1.99 fF/cell
-    assert abs(f3db / 1e9 - 15.4) < 0.3                    # ~15.4 GHz
+    assert abs(C_cell - 2.7128e-15) < 1e-17                # ~2.71 fF/cell
+    assert abs(f3db / 1e9 - 13.536) < 0.3                  # ~13.5 GHz
     assert abs(f3db - 1.0 / (2 * np.pi * R * C_cell)) < 1.0  # closed form
     # tighter access (shorter path) -> higher bandwidth
     _, _, f3db_tight = lumped_rc_bandwidth(C_area, rho_s, path_length_m=0.5e-6,
                                            pad_width_m=1e-6, cell_area_m2=cell_area)
     assert f3db_tight > f3db
-    # switching energy 0.5 C V^2 over an 8 V swing
-    E = switching_energy_per_area(C_area, 8.0)
-    assert np.isclose(E, 0.5 * C_area * 64.0, atol=0)
+    # switching energy 0.5 C V^2 over a 6 V swing
+    E = switching_energy_per_area(C_area, 6.0)
+    assert np.isclose(E, 0.5 * C_area * 36.0, atol=0)
 
 
 # ---- eps_grid OUTPUT shape contract (audit-v2): a transposed/wrong-shape grid must raise ----

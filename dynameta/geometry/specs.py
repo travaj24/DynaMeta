@@ -233,7 +233,7 @@ class CarrierSpec:
           1e5-1e9x off, wrong sign; extended matches the Sah-Noyce-Shockley oracle to < 1e-3), and
         * heavily doped junctions that do not converge at DynaMeta's DC tolerance in double (1e25/1e22
           p+n: converges at abs 1e8 only in extended).
-      NOT for: well-conditioned devices (the degenerate ITO reference metasurface agrees to 4e-16 in
+      NOT for: well-conditioned devices (the degenerate-film reference metasurface agrees to 4e-16 in
       either precision -- extended buys nothing), and NOT for ssac / noise: DEVSIM factorizes the
       small-signal system in DOUBLE even in extended mode, so its floor stays (an AdvisoryWarning says
       so; use the DC dI/dV for the f -> 0 conductance and drive the lightly doped contact).

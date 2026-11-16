@@ -8,8 +8,8 @@ DEVSIM Newton with info=True and records the iteration count of every continuati
                     Fermi-Dirac bipolar DD, the wall potential ramped +0.15 V in 5 steps -> an
                     electron accumulation peak of 7.5e25 m^-3 at the wall while the bulk holes sit at
                     n_i^2/N = 1e8 m^-3 (the minority the relative criterion must still protect).
-  ito_gate          validation/gated_dd's ITO bar: unipolar DD, n_bg = 4e26, 10 nm oxide, gate ramped
-                    0 -> 1 V in 0.25 V steps (accumulation to ~1.4e27 m^-3).
+  ito_gate          a gated degenerate-film bar: unipolar DD, n_bg = 3e26, 10 nm oxide, gate ramped
+                    0 -> 1 V in 0.25 V steps (accumulation to 3.6e26 m^-3 at the oxide face).
   r27a_slab         the R27-a n+ slab (1e25 m^-3, one minority-blocking majority contact, holes kicked
                     3x off equilibrium; tests/test_bipolar_recombination_bgn_ionization.py) -- here
                     with the SRH-only physics, a single relaxation solve.
@@ -123,8 +123,8 @@ def ito_gate(dev, *, extended=False, vmax=1.0, dv=0.25):
         XP.enable(dev)
     with quiet():
         EQ.setup_dielectric_region(dev, "ox", eps_static=9.0)
-        DD.setup_semiconductor_region_dd(dev, "ito", n_bg_m3=4e26, eps_static=9.5,
-                                         dos_mass_kg=0.35 * M_E, mobility_m2Vs=30e-4)
+        DD.setup_semiconductor_region_dd(dev, "ito", n_bg_m3=3e26, eps_static=9.0,
+                                         dos_mass_kg=0.30 * M_E, mobility_m2Vs=40e-4)
         EQ.setup_interface(dev, "ox_ito")
         EQ.setup_contact(dev, "gate")
         DD.setup_contact_ohmic_dd(dev, "back")
@@ -132,7 +132,7 @@ def ito_gate(dev, *, extended=False, vmax=1.0, dv=0.25):
             nx = len(ds.get_node_model_values(device=dev, region=reg, name="x"))
             ds.set_node_values(device=dev, region=reg, name="Potential", values=[0.0] * nx)
         nx = len(ds.get_node_model_values(device=dev, region="ito", name="x"))
-        ds.set_node_values(device=dev, region="ito", name="Electrons", values=[4e26] * nx)
+        ds.set_node_values(device=dev, region="ito", name="Electrons", values=[3e26] * nx)
         ds.set_parameter(device=dev, name="gate_bias", value=0.0)
         ds.set_parameter(device=dev, name="back_bias", value=0.0)
         # the gated_dd recipe's step (1): a Poisson-only pre-solve (continuity frozen), Potential in V

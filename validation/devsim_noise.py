@@ -23,7 +23,7 @@ GATE E  Diffusion vs shot discriminant: a BIASED resistor keeps S = 4kT G (no sh
         be 1.93x larger at 0.1 V) while a forward diode gives S = 2qI = (1/2) 4kT G_d.
 GATE F  Hooge 1/f (opt-in): biased resistor, S_H = alpha_H I^2 / (N f), N = n L. F3: the same law on
         the 3-D Kuhn-tensor bar (N = n V; it read 1.125 before the P1 element couples, 2026-11-06).
-GATE G  2-D LAYERED device (LayeredDevsimBuilder reference metasurface, degenerate FD ITO, 9 regions,
+GATE G  2-D LAYERED device (LayeredDevsimBuilder metasurface cell, degenerate FD film, 9 regions,
         dielectric interfaces, edge-metal grounds) via set_ssac_gate: S_I = 4kT Re Y, 1 GHz - 1 PHz, at
         Vg = 0 (flat band) and Vg = +2 V (degenerate accumulation, where the FD g-factor SG is only
         approximately Nyquist-consistent).
@@ -187,8 +187,8 @@ def _seed(dev, names, region="bulk"):
         seed_kinetic_traps(dev, [region])
 
 
-def unipolar_1d_resistor(dev="ures", *, L=1e-6, n_bg=5e26):
-    """1-D unipolar DD bar (ITO-like, FD g-factor ON, degenerate) with circuit contact 'hi'."""
+def unipolar_1d_resistor(dev="ures", *, L=1e-6, n_bg=3e26):
+    """1-D unipolar DD bar (degenerate oxide film, FD g-factor ON) with circuit contact 'hi'."""
     from dynameta.carriers.physics_equilibrium import M_E
     fresh()
     mesh = dev + "_m"
@@ -202,8 +202,8 @@ def unipolar_1d_resistor(dev="ures", *, L=1e-6, n_bg=5e26):
     ds.finalize_mesh(mesh=mesh)
     ds.create_device(mesh=mesh, device=dev)
     with quiet():
-        DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=n_bg, eps_static=9.5,
-                                         dos_mass_kg=0.35 * M_E, mobility_m2Vs=0.004)
+        DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=n_bg, eps_static=9.0,
+                                         dos_mass_kg=0.30 * M_E, mobility_m2Vs=0.004)
         DD.setup_contact_ohmic_dd(dev, "lo")
         DD.setup_contact_ohmic_dd_circuit(dev, "hi", node_name="vhi", source_name="V1")
     _solve(max(1e10, n_bg * 1e-12), 1e-9)
@@ -247,7 +247,7 @@ def bipolar_2d_resistor(dev="res2d", *, LX=1e-6, LY=0.4e-6, nd=1e23):
     return dev
 
 
-def unipolar_3d_resistor(dev="res3d", *, LX=200.0, LY=80.0, LZ=80.0, n_bg=4e26):
+def unipolar_3d_resistor(dev="res3d", *, LX=200.0, LY=80.0, LZ=80.0, n_bg=3e26):
     """3-D unipolar DD bar [nm] on the exact Kuhn-tensor mesh (devsim_3d.kuhn_bar_mesh, 20 nm cells, in
     memory). It was an unstructured gmsh mesh (14-20 nm) until 2026-11-04: MEASURED sum NodeVolume =
     1.225 x the bar volume there (DEVSIM's unsigned circumcentric pieces), so G_dc was not sigma A/L --
@@ -264,8 +264,8 @@ def unipolar_3d_resistor(dev="res3d", *, LX=200.0, LY=80.0, LZ=80.0, n_bg=4e26):
     ds.finalize_mesh(mesh=mesh)
     ds.create_device(mesh=mesh, device=dev)
     with quiet():
-        DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=n_bg, eps_static=9.5,
-                                         dos_mass_kg=0.35 * M_E, mobility_m2Vs=0.004)
+        DD.setup_semiconductor_region_dd(dev, "bulk", n_bg_m3=n_bg, eps_static=9.0,
+                                         dos_mass_kg=0.30 * M_E, mobility_m2Vs=0.004)
         DD.setup_contact_ohmic_dd(dev, "lo")
         DD.setup_contact_ohmic_dd_circuit(dev, "hi", node_name="vhi", source_name="V1")
     _solve(max(1e10, n_bg * 1e-12), 1e-9)
@@ -913,7 +913,7 @@ def gate_f_hooge(alpha=2e-3, v=0.05, L=1e-5, nd=1e22):
     return sh / (alpha * I * I / (nd * L * ff))
 
 
-def gate_f3_hooge(alpha=2e-3, v=1e-3, n_bg=4e26, LX=200e-9, A=80e-9 * 80e-9):
+def gate_f3_hooge(alpha=2e-3, v=1e-3, n_bg=3e26, LX=200e-9, A=80e-9 * 80e-9):
     """3-D Hooge on the default Kuhn-tensor bar (unipolar_3d_resistor, 960 tets): S_hooge f / (alpha
     I^2 / N) - 1 at f = 1, 1e3 Hz with N = n_bg LX A (closed form), and its DERIVED budget. Budget: with
     uniform n and a linear potential the SG current is exact and noise_analysis's SG edge density is
@@ -942,8 +942,8 @@ FREQS_G = [1e9, 1e11, 1e13, 1e15]
 
 
 def gate_g_layered(vg=0.0, freqs=None):
-    """2-D LAYERED device: the reference metasurface (validation/_reference_device: degenerate ITO,
-    FD g-factor ON, HfO2/Al2O3 stack, edge-metal grounds, 9 regions) through LayeredDevsimBuilder +
+    """2-D LAYERED device: the metasurface cell (validation/_reference_device: degenerate film,
+    FD g-factor ON, two-oxide gate stack, edge-metal grounds, 9 regions) through LayeredDevsimBuilder +
     set_ssac_gate, at gate bias vg (no DC current: equilibrium at every vg). Returns
     (S_I/(4kT Re Y), Re Y [S/m per unit y], per-region split)."""
     from validation._reference_device import build_reference_modulator

@@ -23,11 +23,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, Q, HBAR, M_E
 
-N_BG = 4e26
-M = 0.35 * M_E
+N_BG = 3e26
+M = 0.25 * M_E          # Kane band-edge mass
 GS, GV = 2, 1
-ALPHA = 0.5            # eV^-1 (ITO-like)
-EPS_R = 9.5
+ALPHA = 0.4            # eV^-1 (TCO-like)
+EPS_R = 9.0
 
 
 def _bulk_EF(alpha_eV):

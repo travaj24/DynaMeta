@@ -6,12 +6,12 @@ from dynameta.analysis import modulator_figure_of_merit
 
 def test_modulator_figure_of_merit():
     C_area = 7.65e-3            # F/m^2
-    V = 2.0
+    V = 1.5
     rho_s = 100.0              # Ohm/sq
     path, pad = 5e-6, 1e-6
-    cell = (370e-9) ** 2
+    cell = (400e-9) ** 2
     spec = modulator_figure_of_merit(
-        optical_contrast=0.26, contrast_lambda_nm=1350.0, gate_C_per_area_F_m2=C_area,
+        optical_contrast=0.26, contrast_lambda_nm=1200.0, gate_C_per_area_F_m2=C_area,
         voltage_swing_V=V, sheet_resistance_ohm_sq=rho_s, path_length_m=path, pad_width_m=pad,
         cell_area_m2=cell)
     R = rho_s * path / pad

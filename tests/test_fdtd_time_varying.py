@@ -367,7 +367,7 @@ def test_v18_drude_of_t_accepts_the_transient_optics_drudeoptical_contract():
     from dynameta.constants import M_E
     from dynameta.materials.optical_model import DrudeOptical
     n = 2.0e25
-    m0, g0 = 0.35 * M_E, 5.0e13
+    m0, g0 = 0.30 * M_E, 5.0e13
     hot = DrudeOptical(eps_inf=4.0, m_opt_kg=lambda nn: 0.45 * M_E + 0.0 * nn, gamma_rad_s=8.0e13)
     cold = DrudeOptical(eps_inf=4.0, m_opt_kg=m0, gamma_rad_s=g0)
     wp_c, g_c = cold.wp_gamma(n)

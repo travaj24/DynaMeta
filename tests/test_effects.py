@@ -33,7 +33,7 @@ def test_optical_model_effect_forwards_density():
     class _FakeOptical:
         def eps(self, lambda_m, *, n_m3=None):
             return np.asarray(n_m3, dtype=complex) * 1e-27 + 1.0
-    n = np.array([4e26, 5e26])
+    n = np.array([3e26, 5e26])
     eff = OpticalModelEffect(_FakeOptical())
     assert np.allclose(eff.eps({"n": n}, 1300e-9), _FakeOptical().eps(1300e-9, n_m3=n))
 
@@ -195,7 +195,7 @@ def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
 
 # ---- IntersubbandEffect (R7) ----------------------------------------------------------------
 
-EPS_INF, M_OPT, GAM_INTRA, GAM_INTER = 4.25, 0.225 * M_E, 1.1e14, 1.0e13
+EPS_INF, M_OPT, GAM_INTRA, GAM_INTER = 4.0, 0.30 * M_E, 1.2e14, 1.0e13
 
 
 def _one_band_subband():
@@ -216,8 +216,9 @@ def test_intersubband_requires_subband_field():
 def test_intersubband_single_band_reduces_to_eps_inf_along_z():
     """v0.16 (no Drude term along z): one sub-band has no intersubband transition, so the z response is the background
     alone (eps_zz == eps_inf: a confined electron cannot be accelerated along z) while the in-plane
-    response is the Drude of its sheet density. v0.15.1 returned eps_zz == eps_xx (the Drude, the
-    double count): eps_zz = 3.3568+0.0678i, |eps_zz - eps_inf| = 0.896 on this fixture. A one-state set is incomplete by
+    response is the Drude of its sheet density. The double-counting form (z_response='drude_plus_subbands',
+    eps_zz == eps_xx, the Drude) gives eps_zz = 3.3309+0.0554i, |eps_zz - eps_inf| = 0.671 on this fixture
+    (measured). A one-state set is incomplete by
     construction, hence fsum_check='off'."""
     res = _one_band_subband()
     m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off")
@@ -266,12 +267,12 @@ def test_intersubband_two_bands_anisotropic_and_passive():
 
 def test_burstein_moss_reduces_and_off_switch():
     from dynameta.constants import Q_E
-    eps_inf, m_opt, gamma = 4.25, 0.225 * M_E, 1.1e14
-    n_ref = 4.0e26
+    eps_inf, m_opt, gamma = 4.0, 0.30 * M_E, 1.2e14
+    n_ref = 3.0e26
     drude = DrudeOptical(eps_inf=eps_inf, m_opt_kg=m_opt, gamma_rad_s=gamma)
     bg = OpticalModelEffect(drude)
     from dynameta.core.effects import BursteinMossEdge
-    edge = BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    edge = BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     comp = ComposedEffect(background=bg, deltas=[DeltaEffect(edge, baseline_fields={"n": n_ref})])
     # at n_ref the delta is identically zero -> bare Drude
     # AUDIT T-6: rtol=0.0 -- the delta is identically zero at n_ref, so this is an exactness check
@@ -281,7 +282,7 @@ def test_burstein_moss_reduces_and_off_switch():
                        rtol=0.0, atol=1e-12)
     # enabled=False -> bare Drude at ALL n (true off-switch)
     off = ComposedEffect(background=bg, deltas=[DeltaEffect(
-        BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+        BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                          enabled=False), baseline_fields={"n": n_ref})])
     for n in (2e26, 1e27):
         # AUDIT T-6: rtol=0.0 -- a true off-switch must reproduce the bare Drude tensor exactly.
@@ -293,9 +294,9 @@ def test_burstein_moss_reduces_and_off_switch():
 def test_burstein_moss_blueshift_and_passive():
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
-    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    edge = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     # Burstein-Moss: higher density -> larger optical gap (blueshift)
-    assert edge.optical_gap_J(8e26) > edge.optical_gap_J(4e26) > edge.optical_gap_J(1e26)
+    assert edge.optical_gap_J(8e26) > edge.optical_gap_J(3e26) > edge.optical_gap_J(1e26)
     # above-gap Im(eps) >= 0 (passive, exp(-iwt)); probe at a photon energy above Eg_opt
     lam_above = 2 * np.pi * 299792458.0 * 1.0546e-34 / (4.5 * Q_E)   # ~4.5 eV photon (> gap)
     assert edge.eps({"n": 6e26}, lam_above).imag >= 0.0
@@ -304,7 +305,7 @@ def test_burstein_moss_blueshift_and_passive():
 def test_burstein_moss_requires_density():
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
-    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    edge = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     with pytest.raises(ValueError):
         edge.eps({}, 1300e-9)
 
@@ -482,8 +483,8 @@ def test_burstein_moss_dn_matches_quad_to_infinity():
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
     from dynameta.core.effects.base import _photon_energy_J
-    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
-    n_re0 = np.sqrt(complex(4.25)).real
+    edge = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    n_re0 = np.sqrt(complex(4.0)).real
     for lam in (1300e-9, 1550e-9):
         for n in (1e26, 7e26, 1e27):
             got = float(np.sqrt(complex(edge.eps({"n": np.asarray(float(n))}, lam))).real - n_re0)
@@ -499,18 +500,23 @@ def test_burstein_moss_delta_uses_one_pinned_grid():
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
     from dynameta.core.effects.base import _photon_energy_J
-    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
-    n_re0, scale = np.sqrt(complex(4.25)).real, edge._kk_dn_scale()
+    edge = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    n_re0, scale = np.sqrt(complex(4.0)).real, edge._kk_dn_scale()
     grid0 = edge._kk_grid()
     dn = lambda n, lam: float(np.sqrt(complex(edge.eps({"n": np.asarray(float(n))}, lam))).real - n_re0)
     for lam in (1300e-9, 1550e-9):
         e_ph = _photon_energy_J(lam)
-        ref = dn(4e26, lam)
-        q_ref = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(4e26))), e_ph)
+        ref = dn(3e26, lam)
+        q_ref = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(3e26))), e_ph)
         for n in (1e26, 7e26, 1e27):
             d_model = dn(n, lam) - ref
             d_quad = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(float(n)))), e_ph) - q_ref
-            assert abs(d_model - d_quad) / scale < 1e-4
+            # the absorption edge is integrated analytically (BursteinMossEdge._kk_dn_at), so the error
+            # does not depend on where Eg_opt(n) falls in a grid cell: MEASURED worst 1.5e-6 of the dn scale
+            # over n_ref 2.5e26 .. 5e26 and n 1e26 .. 1e27 at Eg0 3.5 and 3.6 eV (bar 6.7x above it; the
+            # plain Maclaurin rule gives 1.98e-4). A per-call grid leaves the common truncation uncancelled;
+            # the identity assert below catches it
+            assert abs(d_model - d_quad) / scale < 1e-5
     assert edge._kk_grid() is grid0                           # same object across every n and lambda
 
 
@@ -519,14 +525,14 @@ def test_burstein_moss_tail_test_replaces_the_bracket_only_guard():
     accepted a grid ending 1 meV above Eg. A grid of the SHIPPED width must now be flagged."""
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
-    short = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+    short = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                              e_grid_J=(1e-21, 9.0 * Q_E, 3001))
     with pytest.warns(RuntimeWarning, match="Kramers-Kronig grid ends"):
-        short.eps({"n": np.asarray(4e26)}, 1300e-9)
+        short.eps({"n": np.asarray(3e26)}, 1300e-9)
     # p >= 2 is a genuinely divergent KK integral, not a grid choice
     with pytest.raises(ValueError, match="tauc_exponent"):
-        BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
-                         tauc_exponent=2.0).eps({"n": np.asarray(4e26)}, 1300e-9)
+        BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                         tauc_exponent=2.0).eps({"n": np.asarray(3e26)}, 1300e-9)
 
 
 def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
@@ -542,7 +548,7 @@ def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
     from dynameta.constants import Q_E
     from dynameta.core.effects import BursteinMossEdge
     from dynameta.core.effects.base import _photon_energy_J
-    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+    edge = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                             tauc_exponent=0.0)
     n = np.asarray(1e26)
     Eg = float(edge.optical_gap_J(n))
@@ -561,23 +567,26 @@ def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
         assert complex(edge.eps({"n": n}, _photon_energy_J(1.0) / (frac * Eg))).imag >= 0.0
 
     # (c) continuity as p -> 0 (the pre-fix p = 0 branch was discontinuous in p by construction).
-    n_re0 = np.sqrt(complex(4.25)).real
+    n_re0 = np.sqrt(complex(4.0)).real
     lam = _photon_energy_J(1.0) / (0.5 * Eg)
     dn = {}
     for p in (0.0, 1e-9):
-        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+        ed = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                               tauc_exponent=p)
         dn[p] = float(np.sqrt(complex(ed.eps({"n": n}, lam))).real - n_re0)
     assert dn[1e-9] == pytest.approx(dn[0.0], rel=1e-8)
-    # and it is the RIGHT number: the step edge's KK partner, to the O(h) the 10 meV grid allows
-    assert dn[0.0] == pytest.approx(_bm_dn_quad(1.5, Eg, 0.5 * Eg, p=0.0), rel=2e-3)
+    # and it is the RIGHT number: the step edge's KK partner. The step is integrated analytically
+    # (BursteinMossEdge._kk_dn_at), so its place inside a grid cell no longer matters: MEASURED rel error
+    # 1.7e-5 .. 1.9e-5 over Eg0 3.45 .. 3.70 eV, second order in h (6.0e-5 / 1.8e-5 / 5.2e-6 at
+    # 20 / 10 / 5 meV); bar 5.3x above the worst. The plain Maclaurin rule gives 6.4e-4 .. 4.2e-3.
+    assert dn[0.0] == pytest.approx(_bm_dn_quad(1.5, Eg, 0.5 * Eg, p=0.0), rel=1e-4, abs=0)
 
     # (d) p > 0 is untouched, bit for bit.
     rng = np.random.default_rng(0)
     E = np.concatenate([np.linspace(1e-25, 5 * Eg, 20001), np.array([Eg]),
                         rng.uniform(1e-25, 5 * Eg, 5000)])
     for p in (0.25, 0.5, 1.0, 1.9):
-        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+        ed = BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                               tauc_exponent=p)
         x = np.maximum(E - Eg, 0.0) / Eg
         assert np.array_equal(np.asarray(ed._eps2(E, Eg)), 1.5 * x ** p * (Eg / E) ** 2)
@@ -585,7 +594,7 @@ def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
 
 def test_burstein_moss_auto_kk_grid_is_size_capped():
     """FIX-VERIFY W1 kill 1 (second half).  The auto E_hi scales as ``tol^(-1/(2-p))``, so at the
-    fixed 10 meV spacing the grid is 7.7e4 points at p = 0.5 but 1.56e9 -- a 12.4 GB float64 array,
+    fixed 10 meV spacing the grid is 7.5e4 points at p = 0.5 but 1.51e9 -- a 12.1 GB float64 array,
     before the per-row temporaries -- at p = 1.5 (direct-forbidden Tauc).  ``_KK_ROW_CHUNK_BYTES``
     cannot help: a chunk is never smaller than ONE row of ``grid.size`` doubles.  The auto grid is
     now capped and raises with the ``e_grid_J`` escape hatch named; the override itself still
@@ -594,10 +603,15 @@ def test_burstein_moss_auto_kk_grid_is_size_capped():
     from dynameta.core.effects import BursteinMossEdge
 
     def mk(p, **kw):
-        return BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+        return BursteinMossEdge(eps_inf=4.0, Eg0_J=3.5 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                                 tauc_exponent=p, **kw)
 
-    for p, npts in ((0.5, 76849), (1.0, 1080001)):                 # under the cap, unchanged
+    # under the cap: npts = ceil(E_hi / 10 meV) + 1, forced odd, E_hi = 1.5 Eg0 [tol (2-p) B(p+1, 2-p)]^(-1/(2-p))
+    # (tol 1e-3): E_hi = 747.1226 eV at p = 0.5 -> 74715; at p = 1, E_hi = 1.5 * 3.5 eV * 2000 = 10500 eV, i.e.
+    # E_hi / h = 1.05e6 exactly in real arithmetic, and the float evaluation lands just ABOVE it, so the
+    # ceiling gives 1050001, + 1, forced odd -> 1050003 (a regression identity of the grid law, re-evaluated
+    # by hand above; the arithmetic is the library's, so this pins the rounding too)
+    for p, npts in ((0.5, 74715), (1.0, 1050003)):
         assert mk(p)._kk_grid().size == npts
     for p in (1.5, 1.9):
         with pytest.raises(ValueError, match="e_grid_J"):

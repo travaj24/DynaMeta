@@ -2,7 +2,7 @@
 Array-backend namespace dispatch (Python Array API standard).
 
 A SCOPED adoption of the dispatch pattern from the sibling Lumenairy library
-(Free_Space_Optics/Lumenairy/lumenairy/backend/array.py, Andrew Traverso) -- here it is applied
+(lumenairy/backend/array.py) -- here it is applied
 ONLY to the pure-array CONSTITUTIVE material-response maps (the EffectModels in core.effects and the
 graphene surface conductivity), NOT to the heavy solvers: NGSolve (FEM) and DEVSIM (carriers) are
 C++ and consume host NumPy, and the scipy specializations (eigh_tridiagonal(select), LinearND/

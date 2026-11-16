@@ -1,6 +1,6 @@
 """
 Schrodinger-Poisson CarrierSolver: a quantum-corrected alternative to the classical
-DEVSIM Stage-1, for the degenerate ITO accumulation layer. Wraps the validated
+DEVSIM Stage-1, for the accumulation layer of a degenerate semiconductor film. Wraps the validated
 `SchrodingerPoisson1D` (BenDaniel-Duke + degenerate 2D filling + Trellakis self-
 consistency) and emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY -- the native
 3D-grid branch of assemble_eps places the (x,y,z) density without any FieldLift synthesis (the
@@ -64,7 +64,7 @@ from dynameta.core.carrier_field import (
 from dynameta.core.interfaces import RegionInfo
 from dynameta.core.numerics import trapz
 from dynameta.carriers.schrodinger_poisson import (
-    SchrodingerPoisson1D, M_E, Q, EPS0, bulk_fermi_level_3d_T0_J, sp_bulk_fermi_level_J,
+    SchrodingerPoisson1D, Q, EPS0, bulk_fermi_level_3d_T0_J, sp_bulk_fermi_level_J,
     sp_face_flux_C_m2)
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 from dynameta.constants import T_REF   # audit X-24: one reference temperature
@@ -77,13 +77,19 @@ _PSI_XTOL_V = 1e-9          # brentq tolerance on psi_s for both gate maps
 class SchrodingerPoissonCarrier:
     """A quantum (Schrodinger-Poisson) CarrierSolver over a laterally-uniform
     semiconductor slab. Implements regions() + solve(bias), emitting CarrierField(ndim=3).
-    bias.voltages: {"gate": Vg, "body": 0}."""
+    bias.voltages: {"gate": Vg, "body": 0}.
 
-    def __init__(self, *, semi_thk_m: float = 12e-9, n_bg_m3: float = 4e26,
-                 m_eff_kg: float = 0.35 * M_E, eps_static: float = 9.5,
-                 T_K: float = T_REF, lateral_m: float = 12e-9, semi_material: str = "ITO",
+    The film's material parameters have no defaults: `n_bg_m3` (background density [m^-3]),
+    `m_eff_kg` (band-edge effective mass [kg]) and `eps_static` (static relative permittivity) are
+    required keywords, and `eps_oxide` is required whenever `oxide_thk_m` is given. For a preset film,
+    `materials.tco_presets.dual_gate_film_kwargs(material)` returns the first three plus its
+    `alpha_np_per_eV`, ready to pass as `**kwargs`."""
+
+    def __init__(self, *, n_bg_m3: float, m_eff_kg: float, eps_static: float,
+                 semi_thk_m: float = 12e-9,
+                 T_K: float = T_REF, lateral_m: float = 12e-9, semi_material: str = "film",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
-                 oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
+                 oxide_thk_m: Optional[float] = None, eps_oxide: Optional[float] = None,
                  alpha_np_per_eV: float = 0.0, g_s: int = 2, g_v: int = 1,
                  neumann_body: bool = False,
                  surface_potential_of_gate: Optional[Callable[[float], float]] = None,
@@ -95,12 +101,15 @@ class SchrodingerPoissonCarrier:
         if gate_map not in _GATE_MAPS:
             raise ValueError("SchrodingerPoissonCarrier: gate_map must be one of {}, got "
                              "{!r}".format(_GATE_MAPS, gate_map))
+        if oxide_thk_m and eps_oxide is None:
+            raise ValueError("SchrodingerPoissonCarrier: eps_oxide (the gate oxide's static relative "
+                             "permittivity) is required with oxide_thk_m; there is no material default")
         self.fermi_level = fermi_level
         self.gate_map = gate_map
         self.semi_thk_m = float(semi_thk_m)
         self.n_bg_m3 = float(n_bg_m3)
         self.m_eff_kg = float(m_eff_kg)
-        self.g_s, self.g_v = int(g_s), int(g_v)        # spin + valley degeneracy (ITO: 2, 1)
+        self.g_s, self.g_v = int(g_s), int(g_v)        # spin + valley degeneracy (single-valley oxide: 2, 1)
         self.eps_static = float(eps_static)
         self.T_K = float(T_K)
         self.lateral_m = float(lateral_m)
@@ -126,7 +135,7 @@ class SchrodingerPoissonCarrier:
         #      gate_map="flat_band_excess" Vg = psi_s + q*N_exc(psi_s)/C_ox (see the module docstring).
         #      Most of Vg drops across the oxide once the channel accumulates, so psi_s << Vg.
         #   3. else identity psi_s=Vg (qualitative only; documented over-estimate).
-        self._C_ox = (eps_oxide * EPS0 / float(oxide_thk_m)) if oxide_thk_m else None
+        self._C_ox = (float(eps_oxide) * EPS0 / float(oxide_thk_m)) if oxide_thk_m else None
         if surface_potential_of_gate is not None:
             self._psi_s = surface_potential_of_gate
         elif self._C_ox is not None:

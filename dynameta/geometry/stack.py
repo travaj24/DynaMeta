@@ -31,10 +31,9 @@ from dynameta.geometry.cross_section import (Circle, CrossSection, Ellipse, Poly
 
 # ---- sidewall taper (2026-11-02, workstream B2 of the lumenairy-5.50 bridge PR) -----------------
 # lumenairy 5.50's PMM2DStackPure.add_tapered_pillar(s) slices a pillar whose bounds interpolate
-# LINEARLY from a bottom to a top cross-section ABOUT THE PILLAR'S OWN FIXED CENTRE. The house
-# physics rule (memory feedback_taper_not_slant; measured 2026-10-06 on
-# exp11_common.coated_pillar_geometry: finger 160 nm at the top -> 126.5 nm at the slot floor,
-# 2.00 deg per face) is that EVERY metal feature is WIDEST AT ITS TOP and narrows toward its base,
+# LINEARLY from a bottom to a top cross-section ABOUT THE PILLAR'S OWN FIXED CENTRE. The physics
+# rule (a measured etched metal finger narrows from 160 nm at its top to 126.5 nm at its floor, 2.00 deg
+# per face) is that EVERY metal feature is WIDEST AT ITS TOP and narrows toward its base,
 # symmetrically about its own centre; keeping a gap constant by widening the neighbour is a SLANT
 # and is wrong. The model below expresses exactly that, and nothing else by default:
 #   * `Inclusion.shape` stays the section at the layer's TOP face (z_hi; the Stack is listed
@@ -98,8 +97,8 @@ class Taper:
                             allow_wider_bottom: bool = False) -> "Taper":
         """The bottom section of a feature whose every face leans INWARD by `angle_deg` from the
         vertical over a layer `thickness_m` thick: each face moves in by d = thickness * tan(angle),
-        so a width w_top -> w_top - 2 d (the exp10/exp11 `wz(w_top, z)` convention; the house value
-        is 2 deg per face, but the caller states it). Exact for rectangle, circle and regular
+        so a width w_top -> w_top - 2 d (the usual `wz(w_top, z)` taper convention; the caller states
+        the angle). Exact for rectangle, circle and regular
         polygon (apothem - d, i.e. circumradius - d / cos(pi / n)); an ellipse's semi-axes move in
         by d (the true parallel curve of an ellipse is not an ellipse -- exact at its 4 vertices).
         A negative angle (wider bottom) needs allow_wider_bottom=True. A general Polygon has no

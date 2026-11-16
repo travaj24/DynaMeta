@@ -66,7 +66,11 @@ def optical_model_to_lumenairy_eps(model, *, n_m3: Optional[float] = None
     wavelength -> PERMITTIVITY callable accepted by every RCWAStack layer slot. Free-carrier
     models (DrudeOptical) need the density: pass n_m3 explicitly (raises otherwise, the same
     contract as model.eps itself). For the REGION-index slots (n_superstrate/n_substrate)
-    take sqrt: lambda wl: np.sqrt(fn(wl)) -- Lumenairy region media are INDICES."""
+    take the square root with the library's branch rule, lambda wl: np.sqrt(fn(wl) + 0j) --
+    Lumenairy region media are INDICES. The ``+ 0j`` reads an exactly-zero imaginary part as +0.0
+    (resonance._outgoing_sqrt, the element-wise form): a lossless metal whose eps carries Im = -0.0
+    (np.conj of a real eps, complex(x, -0.0), mixed arithmetic on Python 3.14) would otherwise get the
+    gain-signed index -i sqrt(|eps|), which the bridges refuse as a gain half-space."""
     def _eps(wl: float) -> complex:
         return complex(model.eps(float(wl), n_m3=n_m3))
     return _eps

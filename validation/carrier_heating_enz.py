@@ -39,9 +39,9 @@ from dynameta.carriers.carrier_heating import (TwoTempParams, two_temperature_re
 from dynameta.transient_optics import optical_transient_response, enz_reflector_stack
 from dynameta.optics.tmm_reference import layered_rta
 
-M0, ALPHA_EV, GAMMA0 = 0.35 * M_E, 0.5, 1.0e14
+M0, ALPHA_EV, GAMMA0 = 0.25 * M_E, 0.4, 1.2e14
 N = 1.0e27
-DRUDE0 = DrudeOptical(eps_inf=3.9, m_opt_kg=M0, gamma_rad_s=GAMMA0)
+DRUDE0 = DrudeOptical(eps_inf=4.0, m_opt_kg=M0, gamma_rad_s=GAMMA0)
 T0 = 300.0
 # TTM: degenerate-gas electron heat capacity gamma_e = (pi^2/2) n kB^2/E_F
 E_F = float(fermi_energy_J(N, M0, ALPHA_EV))
@@ -51,10 +51,10 @@ TAU_COOL = (GAMMA_E * T0) / PARAMS.G_e_l                          # linearized e
 
 
 def _cold_eps(lam):
-    """Front ITO eps at T_e = T0 (the per-instant heating Drude evaluated cold)."""
+    """Front film eps at T_e = T0 (the per-instant heating Drude evaluated cold)."""
     m = float(kane_mass_of_Te(M0, ALPHA_EV, N, T0))
     g = float(gamma_of_Te(GAMMA0, T0, p=1.0))
-    return complex(DrudeOptical(eps_inf=3.9, m_opt_kg=m, gamma_rad_s=g).eps(lam, n_m3=N))
+    return complex(DrudeOptical(eps_inf=4.0, m_opt_kg=m, gamma_rad_s=g).eps(lam, n_m3=N))
 
 
 def _peak_dR(times, pump, lam):
@@ -123,8 +123,8 @@ def main():
     # finite-difference d Re(eps)/d Te at both probes (independent sensitivity check)
     def depsdTe(lam):
         m1 = float(kane_mass_of_Te(M0, ALPHA_EV, N, T0)); m2 = float(kane_mass_of_Te(M0, ALPHA_EV, N, T0 + 1000.0))
-        e1 = complex(DrudeOptical(eps_inf=3.9, m_opt_kg=m1, gamma_rad_s=gamma_of_Te(GAMMA0, T0, p=1.0)).eps(lam, n_m3=N))
-        e2 = complex(DrudeOptical(eps_inf=3.9, m_opt_kg=m2, gamma_rad_s=gamma_of_Te(GAMMA0, T0 + 1000.0, p=1.0)).eps(lam, n_m3=N))
+        e1 = complex(DrudeOptical(eps_inf=4.0, m_opt_kg=m1, gamma_rad_s=gamma_of_Te(GAMMA0, T0, p=1.0)).eps(lam, n_m3=N))
+        e2 = complex(DrudeOptical(eps_inf=4.0, m_opt_kg=m2, gamma_rad_s=gamma_of_Te(GAMMA0, T0 + 1000.0, p=1.0)).eps(lam, n_m3=N))
         return (e2.real - e1.real) / 1000.0
     g3 = bool(lam_near is not None and dR_near > 2.0 * dR_far)
     ok = ok and g3

@@ -6,7 +6,7 @@ Gates
   D1 DEFAULTS OFF, cross-commit: the ordered DEVSIM mesh-definition call log of build_device (create_2d_mesh,
      add_2d_mesh_line, add_2d_region, add_2d_interface, add_2d_contact with every argument's repr) hashes to the
      digest RECORDED ON 098553f (the v0.15.0 tip this branch was cut from) for five builder fixtures -- the
-     GaN-like E4 diode, the Si lateral diode, the reference modulator (drift-diffusion), the N-AlGaAs / p-GaAs
+     GaN-like E4 diode, the Si lateral diode, the reference cell (drift-diffusion), the N-AlGaAs / p-GaAs
      stack and the in-region z-junction GaAs layer -- with junction_band omitted, None and False. (Measured as well
      on 098553f vs this branch, same scratch recorder, Windows: the node coordinates and the solved digests of the
      four solved fixtures are identical too -- audit note.)
@@ -25,7 +25,7 @@ Gates
   Z1 detection: the AlGaAs / GaAs stack gets ONE z band at the interface and its x lines are untouched; the in-region
      z expression gets its band at the centre of its undoped sliver; an n-p-n lateral layer gets two x bands; a
      junction near the edge-metal line has its band clipped there (the line stays, no sliver edge).
-  Z2 no junction (reference modulator): one AdvisoryWarning, and the call log is the graded one.
+  Z2 no junction (reference cell): one AdvisoryWarning, and the call log is the graded one.
 FAILS ON THE OLD CODE (098553f): TypeError (no junction_band keyword) / ImportError (no junction_mesh) everywhere
 but D1, an IDENTITY gate (its digests were recorded there), and A1's band-off half, which IS the old mesh.
 Runtime (MEASURED, Windows dev box, serial, -m "not slow"): see the solvers-devsim entry in .github/workflows/ci.yml.
@@ -114,8 +114,10 @@ FIXTURES = {
 }
 # RECORDED ON 098553f (2026-11-08, Windows, devsim 2.11.2) with the same hashing (sha256 of the JSON of
 # [(call name, sorted [(kwarg, repr(value))])], first 16 hex digits). Python floats' repr is platform-independent.
+# refmod_dd is the generic cell of validation/_reference_device.py, recorded the same way on the library before
+# the junction band with this cell copied in.
 CALL_LOG_0554410 = {"gan_e4": ("2222f9fa11e3b536", 14), "si_lat": ("88ab8e4edd6b754a", 14),
-                    "refmod_dd": ("c0ffd08506038d10", 52), "gaas_pn": ("5e37a0478f5b930a", 24),
+                    "refmod_dd": ("cff831de92cdaea1", 52), "gaas_pn": ("5e37a0478f5b930a", 24),
                     "gaas_homo_one": ("a9477d37a15a4029", 20)}
 
 
@@ -130,7 +132,7 @@ def _call_log(monkeypatch, name, **kw):
         monkeypatch.setattr(DL.ds, nm, w)
     b = DL.LayeredDevsimBuilder(FIXTURES[name](), mesh_name="m_" + name, device_name="d_" + name, **kw)
     # v0.16 (DOS-mass-at-n_bg guard, docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
-    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so
+    # shared validation device (validation/_reference_device.film_dos_mass) varies by 65 % over [0.1, 10] n_bg, so
     # every build of it now warns once (AdvisoryWarning); the call log is unchanged (the guard makes no DEVSIM call)
     guard = (pytest.warns(AdvisoryWarning, match="density-dependent") if name.startswith("refmod")
              else contextlib.nullcontext())
@@ -156,7 +158,7 @@ def test_d1_defaults_off_mesh_call_log_is_the_0554410_digest(monkeypatch, name):
 
 def test_d1_refmod_default_mesh_moved_with_v016(monkeypatch):
     """v0.16 moved pin: with the default Mesh2DSpec the shared validation device's degenerate film gets the
-    screening grading, so its call log is no longer the 0554410 digest (more mesh lines: 17 -> 188 z nodes
+    screening grading, so its call log is no longer the 0554410 digest (more mesh lines: 19 -> 208 z nodes
     across the film); the bipolar fixtures above are not refined and keep their digests with the default spec."""
     digest, n, _ = _call_log(monkeypatch, "refmod_dd_v016")
     assert digest != CALL_LOG_0554410["refmod_dd"][0] and n > CALL_LOG_0554410["refmod_dd"][1]

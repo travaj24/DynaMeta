@@ -28,10 +28,13 @@ GATE C -- KRAMERS-KRONIG TRUNCATION vs scipy.quad TO INFINITY (audit R-2). The p
             stopped 5 eV above the edge, was 44-50% LOW: the cutoff-free Tauc tail leaves an
             E_hi^-1.5 remainder, so the observed halving-per-doubling IS the convergence law);
         (2) the DeltaEffect DIFFERENCE matches the difference of two separately-converged quad values
-            to < 1e-4 of the dn scale. The shipped grid was rebuilt PER eps() CALL from the per-call
-            Eg_opt(n), so a DeltaEffect integrated its two halves on DIFFERENT grids, the large
-            common truncation did not cancel, and the delta came out 14-16x too large. The grid is
-            now a pure function of the configuration, so both halves share it;
+            to < 1e-5 of the dn scale. The absorption edge is integrated analytically
+            (BursteinMossEdge._kk_dn_at), so the error no longer depends on where Eg_opt(n) falls in a
+            grid cell: MEASURED worst 1.5e-6 over n_ref 2.5e26 .. 5e26 and n 1e26 .. 1e27 at Eg0 3.5 and
+            3.6 eV (a factor 6.7 below the bar; the plain Maclaurin rule gives 1.98e-4 there). The shipped grid was rebuilt PER eps()
+            CALL from the per-call Eg_opt(n), so a DeltaEffect integrated its two halves on DIFFERENT
+            grids, the large common truncation did not cancel, and the delta came out 14-16x too large.
+            The grid is now a pure function of the configuration, so both halves share it;
         (3) the grid object is literally reused across n and lambda (pinning, by identity);
         (4) a grid of the SHIPPED width now trips the tail test -- the old guard only checked that
             the grid BRACKETED the gap and the probe, and accepted a grid ending 1 meV above Eg.
@@ -54,10 +57,10 @@ from dynameta.core.effects import (BursteinMossEdge, OpticalModelEffect, Compose
                                    as_tensor)
 from dynameta.materials.optical_model import DrudeOptical
 
-EPS_INF, M_OPT, GAMMA = 4.25, 0.225 * M_E, 1.1e14      # reference ITO Drude
-EG0 = 3.6 * Q_E                                        # undoped optical gap [J]
+EPS_INF, M_OPT, GAMMA = 4.0, 0.30 * M_E, 1.2e14        # generic TCO Drude
+EG0 = 3.5 * Q_E                                        # undoped optical gap [J]
 M_VC = 0.5 * M_E                                       # reduced joint conduction-valence mass
-N_REF = 4.0e26                                         # n_bg (DeltaEffect baseline)
+N_REF = 3.0e26                                         # n_bg (DeltaEffect baseline)
 ALPHA_EDGE = 1.5                                       # dimensionless interband edge amplitude (Tauc p=0.5)
 
 
@@ -173,10 +176,10 @@ def main():
         BursteinMossEdge(eps_inf=EPS_INF, Eg0_J=EG0, m_vc_kg=M_VC, alpha_edge=ALPHA_EDGE,
                          e_grid_J=(1e-21, 9.0 * Q_E, 3001)).eps({"n": np.asarray(N_REF)}, 1300e-9)
         tail_test = any("Kramers-Kronig grid ends" in str(x.message) for x in wrec)
-    g_c = bool(worst_abs < 2e-2 and worst_delta < 1e-4 and pinned and tail_test)
+    g_c = bool(worst_abs < 2e-2 and worst_delta < 1e-5 and pinned and tail_test)
     ok = ok and g_c
     print("[bm] GATE C: |dn - quad|/quad worst = {:.2e} (< 2e-2); |delta - quad delta|/dn_scale worst "
-          "= {:.2e} (< 1e-4); grid pinned across n/lambda = {}; shipped-width grid trips the tail "
+          "= {:.2e} (< 1e-5); grid pinned across n/lambda = {}; shipped-width grid trips the tail "
           "test = {} -> {}".format(worst_abs, worst_delta, pinned, tail_test,
                                    "PASS" if g_c else "FAIL"), flush=True)
 

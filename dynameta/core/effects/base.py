@@ -261,14 +261,14 @@ def kramers_kronig_dn_rows(e_grid_J: np.ndarray, dalpha_rows: np.ndarray,
     """Batched kramers_kronig_dn: dn for MANY dalpha rows (shape (M, N)) on ONE fixed uniform grid.
     Row-for-row it equals kramers_kronig_dn up to summation reassociation only (BLAS dot vs
     pairwise .sum; ~1e-15 relative) -- the per-element terms pref*w[j]*a[j]/(E[j]^2-E[i]^2), with
-    w the R-3 endpoint half-weights, are the same on both paths (they must be: BursteinMossEdge
-    reaches the KK transform only through here). Same grid validation as kramers_kronig_dn.
+    w the R-3 endpoint half-weights, are the same on both paths (they must be). Same grid validation as
+    kramers_kronig_dn.
 
     e_eval_J = None: returns the full (M, N) dn rows via the cached parity kernel (two matmuls).
     e_eval_J given (a photon energy INSIDE the grid): returns the (M,) dn AT that energy only --
     np.interp(e_eval, E, dn_row) is local-linear, so only the TWO kernel rows bracketing e_eval
     contribute; those are built directly in O(N) (no N^2 kernel, nothing worth caching) and applied
-    as two matvecs. This is the path a per-probe caller (BursteinMossEdge) wants: it does O(M*N)
+    as two matvecs. This is the path a per-probe caller wants: it does O(M*N)
     work instead of the O(M*N^2) full transform."""
     E = np.asarray(e_grid_J, dtype=np.float64)
     A = np.asarray(dalpha_rows, dtype=np.float64)
@@ -288,16 +288,25 @@ def kramers_kronig_dn_rows(e_grid_J: np.ndarray, dalpha_rows: np.ndarray,
     e_eval = float(e_eval_J)
     if not (E[0] <= e_eval <= E[-1]):
         raise ValueError("e_eval_J must lie within e_grid_J (np.interp would silently clamp)")
-    pref = (HBAR * C_LIGHT / np.pi) * 2.0 * h
-    E2 = E * E
     i0 = int(np.clip(np.searchsorted(E, e_eval, side="right") - 1, 0, E.size - 2))
-    parity = np.arange(E.size) % 2
-    w = _kk_endpoint_weights(E.size)              # R-3 endpoint half-weights
 
     def _dn_at(i):                                # dn[i] rows: one O(N) kernel row, one matvec
-        opp = parity != (i % 2)                   # opposite-parity columns (excludes j == i)
-        return A[:, opp] @ (pref * w[opp] / (E2[opp] - E2[i]))
+        opp, row = _kk_kernel_row(E, i)
+        return A[:, opp] @ row
 
     d0, d1 = _dn_at(i0), _dn_at(i0 + 1)
     w = (e_eval - E[i0]) / (E[i0 + 1] - E[i0])    # np.interp's local-linear weight in [0, 1]
     return d0 + (d1 - d0) * w
+
+
+def _kk_kernel_row(E: np.ndarray, i: int):
+    """Row i of the Maclaurin KK kernel on the uniform grid E: (opp, row) with dn[i] = dalpha[opp] @ row,
+    opp the opposite-parity mask (it excludes j == i) and row = (hbar c / pi) 2h w_j / (E_j^2 - E_i^2), w the
+    R-3 endpoint half-weights. The one definition of a kernel row (kramers_kronig_dn_rows' probe path and
+    BursteinMossEdge._kk_dn_at use it)."""
+    E = np.asarray(E, dtype=np.float64)
+    h = E[1] - E[0]
+    pref = (HBAR * C_LIGHT / np.pi) * 2.0 * h
+    opp = (np.arange(E.size) % 2) != (int(i) % 2)
+    w = _kk_endpoint_weights(E.size)
+    return opp, pref * w[opp] / (E[opp] * E[opp] - E[int(i)] * E[int(i)])

@@ -117,7 +117,7 @@ def sheet_resistance_ohm_sq(n_m3, mobility_m2Vs, thickness_m):
 def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
                         path_length_m, pad_width_m, cell_area_m2):
     """Intrinsic single-cell electrical RC 3-dB bandwidth of a gated modulator cell
-    (ported from the Metasurface_Modulator Stage-4 lumped model).
+    (a lumped access-RC model).
 
     The gate charges through the in-plane ACCESS resistance
     R_access = rho_sheet * (path_length / pad_width) into the per-cell capacitance

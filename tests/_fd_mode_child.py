@@ -1059,10 +1059,10 @@ def sc_builders(opts):
                 b.solve(BiasPoint({"anode": 0.0}, "eq"))
         o = _transport_markers(b.device, "tco")
         ds.delete_device(device=b.device)
-        spec = Stacked3DSpec(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, semi_thk_m=12e-9,
-                             oxide_thk_m=8e-9, n_bg_m3=4e26, eps_semi=9.5, eps_oxide=18.0, dos_mass_kg=0.35 * M_E,
+        spec = Stacked3DSpec(semi_material="ITO", oxide_material="oxB", lateral_m=12e-9, semi_thk_m=12e-9,
+                             oxide_thk_m=8e-9, n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E,
                              physics="drift_diffusion", carrier_statistics=st,
-                             chi_semi_eV=4.4, extra_semiconductors=[("xs", "AZO", 5e-9, 9.0, 1e26, 4.3)])
+                             chi_semi_eV=4.4, extra_semiconductors=[("xs", "AZO", 6e-9, 9.0, 1e26, 4.3)])
         c = Devsim3DEquilibrium(spec, mesh_name="u3m" + tag, device_name="u3d" + tag)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

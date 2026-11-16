@@ -29,10 +29,13 @@ BRANCH CHOICE (this is where naive implementations die)
 In every medium the out-of-plane wavevector is ``kz = sqrt(eps*(omega/c)^2 - k_par^2)`` where the
 in-plane wavevector ``k_par`` is held FIXED during the complex-omega continuation (the physically
 correct QNM convention -- the mode is labelled by its conserved transverse momentum, not by a
-fixed real angle).  ``kz`` is evaluated on numpy's PRINCIPAL square-root branch,
-``np.sqrt(... + 0j)`` (the branch with ``Re(kz) >= 0``, and ``Im(kz) > 0`` on the negative-real
-cut).  Why this is the correct OUTGOING branch under ``exp(-i*omega*t)`` with a forward wave
-``exp(+i*kz*z)``:
+fixed real angle).  ``kz`` is evaluated on the PRINCIPAL square-root branch,
+``sqrt(... + 0j)`` (the branch with ``Re(kz) >= 0``, and ``Im(kz) > 0`` on the negative-real
+cut).  The ``+ 0j`` matters: it reads an exactly-zero imaginary part of the argument as +0.0, so
+a lossless argument on the cut takes ``+i sqrt(a)`` even when it arrives as ``-a - 0j`` (signed
+zeros survive ``np.conj``, a negative permittivity times a positive number, and -- from Python
+3.14 -- mixed complex-real arithmetic); see :func:`_outgoing_sqrt`.  Why this is the correct
+OUTGOING branch under ``exp(-i*omega*t)`` with a forward wave ``exp(+i*kz*z)``:
 
   * On the real-omega axis with a lossless propagating channel the principal branch gives
     ``Re(kz) > 0``: the transmitted/reflected wave carries power AWAY from the stack (outgoing).
@@ -193,6 +196,10 @@ def _eval_eps(spec: EpsSpec, omega: complex) -> complex:
 #     in essentially every sample (39706 mismatching words / 20 000 values).  `_kz` can only reach
 #     that by an exact cancellation of `eps k0^2` against `kpar^2` down to 1e-310, which no
 #     physical stack does; if a caller ever contrives one, the two spellings disagree there.
+#     That equality is between the two square roots of the SAME argument.  The `+ 0j` of
+#     `np.sqrt(... + 0j)` is part of the branch rule, not decoration: it turns an Im = -0.0
+#     argument (a lossless medium) into Im = +0.0, and without it the principal root of a
+#     negative real argument is the GROWING evanescent wave.  `_outgoing_sqrt` keeps it.
 #   * `cmath.exp` == `np.exp` BIT-for-bit (0/40 000) on the argument shape `_propagate` produces,
 #     `1j*kz*d` with |arg| ~ 30, and on the negative-real-cut / tiny-imaginary / huge / kz^2
 #     classes.  EXCEPTIONS at LARGE |arg|: 7/38428 mismatches at |arg| ~ 400 and 30/45432 at
@@ -207,12 +214,37 @@ def _eval_eps(spec: EpsSpec, omega: complex) -> complex:
 #     ARRAYS, and their `wp^2 / (w^2 + i w gamma)` would change value under CPython's division
 #     algorithm.  The remaining per-call dispatch there lives in the caller's eps closure.
 # ------------------------------------------------------------------------------------------------
+def _outgoing_sqrt(x) -> complex:
+    """Principal square root of a scalar ``x`` with an exactly-zero imaginary part read as +0.0:
+    the ONE square-root branch rule for an out-of-plane wavevector, propagation constant or
+    end-medium index of a passive medium (see the module branch note).
+
+    Why the ``+ 0j``.  The principal root is continuous from ABOVE on the negative real axis, but
+    IEEE 754 keeps the sign of a zero: ``cmath.sqrt(complex(-a, -0.0))`` is ``-i sqrt(a)``, the
+    GROWING evanescent wave, while ``complex(-a, +0.0)`` gives the decaying ``+i sqrt(a)``.  A
+    lossless medium carries a -0.0 imaginary part easily -- ``np.conj`` of a real permittivity,
+    ``complex(x, -0.0)``, a negative real permittivity times a positive real number
+    (``-20 * (+0.0) = -0.0``), and, from Python 3.14 on, mixed complex-real arithmetic, which
+    keeps the sign of a zero (``complex(2.25, -0.0) * 2e-3`` has Im = -0.0 on 3.14 and +0.0 on
+    3.13).  Adding ``0j`` maps Im = -0.0 to +0.0 (IEEE ``-0.0 + 0.0 = +0.0``) and leaves every
+    other imaginary part, and every real part except a zero's sign, exactly as it was; the sign
+    of a zero real part does not change the principal root.  So the root is the decaying /
+    outgoing one for every lossless argument on every interpreter, and bit-identical to
+    ``cmath.sqrt(x)`` for every other argument.  A genuinely NEGATIVE imaginary part (gain) keeps
+    the principal branch (``Re >= 0``, the outgoing wave of a gain medium).
+
+    ``cmath.sqrt`` is bit-identical to ``np.sqrt`` on every argument class this library produces
+    except DENORMAL ones (|x| ~ 1e-310), which need an exact 1e-310-level cancellation to reach
+    (measured; the substitution note above).  Scalars only; an array caller writes ``np.sqrt(x + 0j)``, which
+    applies the same rule element-wise."""
+    return cmath.sqrt(x + 0j)
+
+
 def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
-    """Out-of-plane wavevector on the PRINCIPAL (outgoing) branch -- see the module branch note.
-    ``cmath.sqrt`` is bit-identical to the ``np.sqrt(... + 0j)`` this replaced on every argument
-    class reachable here; it is NOT on DENORMAL arguments, which need an exact 1e-310-level
-    cancellation of ``eps k0^2`` against ``kpar^2`` to reach (audit P-6)."""
-    return cmath.sqrt(eps * k0 * k0 - k_par * k_par)
+    """Out-of-plane wavevector ``sqrt(eps k0^2 - k_par^2)`` on the PRINCIPAL (outgoing) branch,
+    with a lossless (exactly-zero imaginary) argument always taking the decaying / propagating
+    root -- :func:`_outgoing_sqrt`, see the module branch note."""
+    return _outgoing_sqrt(eps * k0 * k0 - k_par * k_par)
 
 
 # The ONE polarization vocabulary of this module (audit V-3/V-8): the 'sp' family of

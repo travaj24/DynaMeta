@@ -6,8 +6,9 @@ strongly through the pillar -> the semiconductor accumulates MORE directly under
 surrounding lower-eps oxide. This is a genuinely NON-SEPARABLE lateral carrier topology (a different
 MATERIAL laterally, not just a gate-footprint patch).
 
-Stack: semi(ITO) | oxide=Al2O3(eps 9, lower, buried) | diel1=HfO2(eps 18, upper) ; full gate on top.
-Inclusion: an HfO2(eps 18) pillar (50% of the cell, centered) inside the lower Al2O3 oxide.
+Stack: semi(ITO, n_bg 3e26, eps 9.0, DOS mass 0.30 m_e) | oxide=oxA(eps 9, lower, buried) | diel1=oxB(eps 20,
+upper) ; full gate on top.
+Inclusion: an oxB (eps 20) pillar (50% of the cell, centered) inside the lower oxA oxide.
 
 GATE A: the mesh carries the 4 regions (semi, oxide, diel1, the pillar) + converges + accumulates.
 GATE B: LATERAL variation -- the gate-side accumulation under the pillar (cell centre) EXCEEDS that in
@@ -27,18 +28,18 @@ from dynameta.carriers.devsim_3d import Stacked3DSpec, Inclusion3D, Devsim3DEqui
 from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.sweep import BiasPoint
 
-N_BG = 4e26
+N_BG = 3e26
 VG = 1.0
 
 
 def main():
     print("[t] === 3D carriers: lateral material INCLUSION (high-eps pillar in the gate oxide) ===", flush=True)
     spec = Stacked3DSpec(
-        semi_material="ITO", lateral_m=16e-9, semi_thk_m=12e-9, n_bg_m3=N_BG, eps_semi=9.5,
-        dos_mass_kg=0.35 * 9.1093837015e-31, grid_n=(20, 20, 25), mesh_min_nm=0.5, mesh_max_nm=2.0,
-        oxide_material="Al2O3", oxide_thk_m=4e-9, eps_oxide=9.0,        # lower (buried) oxide, low eps
-        extra_dielectrics=[("HfO2", 4e-9, 18.0)],                       # upper oxide (gate sits on it)
-        inclusions=[Inclusion3D(name="pillar", material="HfO2", role="dielectric", eps=18.0,
+        semi_material="ITO", lateral_m=16e-9, semi_thk_m=12e-9, n_bg_m3=N_BG, eps_semi=9.0,
+        dos_mass_kg=0.30 * 9.1093837015e-31, grid_n=(20, 20, 25), mesh_min_nm=0.5, mesh_max_nm=2.0,
+        oxide_material="oxA", oxide_thk_m=4e-9, eps_oxide=9.0,          # lower (buried) oxide, low eps
+        extra_dielectrics=[("oxB", 4e-9, 20.0)],                        # upper oxide (gate sits on it)
+        inclusions=[Inclusion3D(name="pillar", material="oxB", role="dielectric", eps=20.0,
                                  in_layer="oxide", x_frac=0.5, y_frac=0.5)])
     ds = import_devsim()
     b = Devsim3DEquilibrium(spec, mesh_name="inc3_m", device_name="inc3_d")

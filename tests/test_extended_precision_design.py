@@ -308,7 +308,7 @@ def test_e6_stacked3d_from_design_follows_the_design():
     from validation._reference_device import build_reference_modulator
     d = build_reference_modulator("equilibrium")
     # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
-    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg,
+    # shared validation device (validation/_reference_device.film_dos_mass) varies by 65 % over [0.1, 10] n_bg,
     # so building it warns once
     # (once per material instance: the three designs share d's materials)
     with pytest.warns(AdvisoryWarning, match="density-dependent"):

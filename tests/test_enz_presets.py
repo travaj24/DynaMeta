@@ -47,8 +47,8 @@ def test_tin_crossover_and_830nm_against_measured_films():
 
 
 def test_zrn_against_published_points():
-    """ZrN (Naik et al. 2013, the single complete fit): crossover within 6 % of the authors' 'around 430 nm'
-    (Naik et al. 2011); eps(830 nm) against the measured -21.15 + 7.64i (Guler et al. 2015): real part within
+    """ZrN (Naik et al. 2013, the single complete fit): crossover within 6 % of 'around 430 nm' for ZrN films
+    (Naik, Kim, Boltasseva, Opt. Mater. Express 1, 1090 (2011)); eps(830 nm) against the measured -21.15 + 7.64i (Guler et al. 2015): real part within
     10 %, imaginary within 25 % (a different film). Mutant: TiN's parameters miss the ZrN crossover."""
     z = EP.zrn()
     assert _zero(z.eps, 0.36e-6, 0.60e-6) == pytest.approx(430e-9, rel=0.06, abs=0.0)
@@ -88,7 +88,7 @@ def test_inas_optical_mass_against_dyksik():
 
 def test_inas_screened_plasma_wavelengths_within_the_published_spread():
     """Published Si:InAs screened plasma wavelengths at nearly equal nominal density disagree by 7-25 % (the
-    density calibration of each paper): 9.5 / 5.8 um at 1.25e19 / 7.35e19 cm^-3 (Wei et al. 2017, P), 10.1 /
+    density calibration of each paper): 9.5 / 5.8 um at nominal 1.25e19 / 7.35e19 cm^-3 (Wei et al. 2017, P), 10.1 /
     6.45 / 5.7 / 4.64 um at 1.0 / 3.25 / 4.4 / 7.5e19 cm^-3 (Desouky et al. 2017, values from Law et al. 2012, S).
     The preset lies within 10 % of the Desouky set and within 18 % of Wei's (whose 7.35e19 point sits 25 % above
     Desouky's 7.5e19 one). Mutant: alpha = 0 misses every point by > 50 %."""

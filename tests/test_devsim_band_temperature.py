@@ -429,11 +429,11 @@ def _with_materials(layers, extra, rename):
 def _ito_azo_design(azo_tr):
     from dynameta.materials import DrudeOptical, Material
     from validation.carriers_3d_multisemi import _design
-    layers = [("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"), ("ito_bot", 6e-9, "ITO"),
-              ("azo_top", 5e-9, "ITO"), ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]
+    layers = [("mirror", 80e-9, "mirror_metal"), ("lower_oxb", 6e-9, "oxB"), ("ito_bot", 8e-9, "ITO"),
+              ("azo_top", 6e-9, "ITO"), ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")]
     ito = _design(layers).materials.get("ITO")
     itoc = dataclasses.replace(ito, name="ITOc", transport=dataclasses.replace(ito.transport, chi_eV=4.4,
-                                                                                 band_gap_eV=3.6))
+                                                                                 band_gap_eV=3.5))
     azo = Material("AZO", DrudeOptical(eps_inf=3.8, m_opt_kg=0.3 * M_E, gamma_rad_s=1e14), transport=azo_tr)
     return _with_materials(layers, (itoc, azo), {"ito_bot": "ITOc", "azo_top": "AZO"})
 
@@ -464,8 +464,8 @@ def test_3d_from_design_reads_chi_and_n_i_through_the_band_model():
     assert spec.chi_semi_eV == 4.4
     # bipolar 3-D body with a derived n_i
     from validation.carriers_3d_multisemi import _design
-    layers = [("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"), ("ito_bot", 12e-9, "ITO"),
-              ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]
+    layers = [("mirror", 80e-9, "mirror_metal"), ("lower_oxb", 6e-9, "oxB"), ("ito_bot", 12e-9, "ITO"),
+              ("upper_oxb", 6e-9, "oxB"), ("patch", 40e-9, "air")]
     ito = _design(layers).materials.get("ITO")
     T = 250.0
     ni300 = n_i_m3(GAAS, T_REF)

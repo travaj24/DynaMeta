@@ -39,7 +39,7 @@ ds = import_devsim()
 
 H = 5e-9                   # lattice step [m]
 U, W = 40, 12              # contact separation / width in lattice units (even: lattice-point corners)
-N_BG, MU = 4e26, 0.004     # uniform donor density [m^-3], mobility [m^2/Vs]
+N_BG, MU = 3e26, 0.004     # uniform donor density [m^-3], mobility [m^2/Vs]
 ALPHA, V_BIAS = 2e-3, 1e-3
 
 
@@ -117,8 +117,8 @@ def _resistor(kind, tmp_path):
     ds.finalize_mesh(mesh="hg_m")
     ds.create_device(mesh="hg_m", device="hg")
     with V.quiet():
-        DD.setup_semiconductor_region_dd("hg", "bulk", n_bg_m3=N_BG, eps_static=9.5,
-                                         dos_mass_kg=0.35 * M_E, mobility_m2Vs=MU)
+        DD.setup_semiconductor_region_dd("hg", "bulk", n_bg_m3=N_BG, eps_static=9.0,
+                                         dos_mass_kg=0.30 * M_E, mobility_m2Vs=MU)
         DD.setup_contact_ohmic_dd("hg", "lo")
         DD.setup_contact_ohmic_dd_circuit("hg", "hi", node_name="vhi", source_name="V1")
     ae = max(1e10, N_BG * 1e-12)
@@ -150,7 +150,7 @@ def test_hooge_uniform_resistor_is_orientation_independent(tmp_path):
     every edge (module doc above). The discrete miss is the SG-segment density term of noise_analysis's
     n_eff = n (1 + w^2/12 + O(w^4)), w = the current-carrying edges' own SG argument vdiff_g: S f N/(alpha I^2)
     = 1 - w^2/12. REVISED 2026-11-07 (v0.15.0 default statistics 'fermi_dirac'): the unipolar FD quasi-field
-    has g = 1 in the prefactor, so w is the raw vdiff (9.68e-4 per 5 nm edge at 1 mV), not vdiff/g (g ~ 15 at
+    has g = 1 in the prefactor, so w is the raw vdiff (9.68e-4 per 5 nm edge at 1 mV), not vdiff/g (g ~ 14 at
     this degeneracy): the miss moved from 3.6e-10 (legacy, MEASURED) to 7.793095e-8 (MEASURED), against
     w^2/12 = 7.793104e-8 -- the gate is now the ATTRIBUTION: |r - (1 - w^2/12)| <= (w^2)^2 + 1e-13 (the next
     order, ~9e-13; MEASURED 8.9e-14), in both orientations; the edge-independent assembly gives 0.5 at

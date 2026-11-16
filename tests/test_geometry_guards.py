@@ -103,8 +103,9 @@ def test_taper_defaults_to_none_and_untapered_inclusion_is_unchanged():
 
 
 def test_from_sidewall_angle_matches_house_convention():
-    # memory feedback_taper_not_slant (measured 2026-10-06, exp11 c1): a 160 nm finger, 2.00 deg per
-    # face, is 126.5 nm at its base -> the face moves in 16.75 nm, i.e. over 479.65 nm of height.
+    # the house taper convention (features narrow about their own centre, widest at the top): a 160 nm
+    # finger, 2.00 deg per face, is 126.5 nm at its base -> the face moves in 16.75 nm, i.e. over
+    # 479.65 nm of height.
     top = Rectangle(1e-6, 2e-6, 160e-9, 160e-9)
     L = 16.75e-9 / math.tan(math.radians(2.0))
     t = Taper.from_sidewall_angle(top, L, 2.0)
@@ -211,8 +212,8 @@ def test_s4_27_device_symmetry_and_fem_hint_see_stack_features():
     from dynameta.constants import M_E
     reg = _reg()
     reg.add(Material("semi", ConstantOptical(4.0 + 0j),
-                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.0,
-                                              dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
+                     transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
+                                              dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E)))
     u = _uniform()
     st = Stack(layers=u.stack.layers, superstrate_material="air", substrate_material="glass",
                features=[Feature("via", Rectangle(P / 2, P / 2, 100e-9, 100e-9), "semi", 0.0,
@@ -383,8 +384,8 @@ def _carrier_design(features=(), taper=None):
     from dynameta.materials import M_E, TransportModel
     r = _reg()
     r.add(Material("semi", optical=ConstantOptical(4.0 + 0j),
-                   transport=TransportModel(n_bg_m3=4e26, eps_static=9.5,
-                                            dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E,
+                   transport=TransportModel(n_bg_m3=3e26, eps_static=9.0,
+                                            dos_mass_kg_of_n_m3=lambda n: 0.30 * M_E,
                                             physics="equilibrium")))
     r.add(Material("ox", ConstantOptical(2.1 + 0j), eps_static_dc=3.9))
     patch = Rectangle(100e-9, 100e-9, 80e-9, 80e-9)

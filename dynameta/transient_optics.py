@@ -21,6 +21,7 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT
 from dynameta.core.layered import LayeredSlab, LayeredStack
+from dynameta.optics.resonance import _outgoing_sqrt
 from dynameta.optics.tmm_reference import layered_rta
 from dynameta.warning_types import UnreliableResultWarning
 
@@ -59,7 +60,7 @@ def _eps_at(spec, lambda_m: float, what: str) -> complex:
 
 def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide=9.0,
                         t_oxide_m: float = 120e-9, eps_mirror=-120.0 + 3.0j):
-    """A default reflective gated-ITO modulator stack for the transient map: air | ITO(eps_ito) | oxide |
+    """A default reflective gated-film modulator stack for the transient map: air | ITO(eps_ito) | oxide |
     mirror. eps_ito is the (graded or scalar) ITO permittivity at this instant. If eps_ito is an array it is
     split into equal ITO sublayers (the depth-resolved ENZ profile); a scalar is one homogeneous film.
 
@@ -89,7 +90,9 @@ def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide=
     nsl = eps_ito.size
     slabs = [LayeredSlab(t_ito_m / nsl, eps=complex(e)) for e in eps_ito]
     slabs.append(LayeredSlab(t_oxide_m, eps=_eps_at(eps_oxide, lam, "eps_oxide")))
-    return LayeredStack(1.0 + 0j, np.sqrt(_eps_at(eps_mirror, lam, "eps_mirror")), slabs)
+    # The mirror index on the passive branch for a lossless metal too: the bare principal root of
+    # eps = -a - 0j is -i sqrt(a), a GAIN-signed index (refused as such by the lumenairy bridge).
+    return LayeredStack(1.0 + 0j, _outgoing_sqrt(_eps_at(eps_mirror, lam, "eps_mirror")), slabs)
 
 
 def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, drude_model=None,

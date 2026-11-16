@@ -578,7 +578,7 @@ def test_validity_guard_warns_for_a_user_gamma_too():
 
 # ---- 3-D builder --------------------------------------------------------------------------------------------
 
-# the 3-D builder's semiconductor and oxide set to the film of this file (its library defaults are another film)
+# the 3-D builder's semiconductor and oxide set to the film of this file (the spec has no material defaults)
 _FILM3D = dict(n_bg_m3=N_BG, dos_mass_kg=M, eps_semi=FX.EPS_S, eps_oxide=20.0, oxide_thk_m=8e-9)
 
 
@@ -635,7 +635,7 @@ def test_3d_builder_density_gradient_on_the_default_mesh_resolves_the_dead_layer
     from dynameta.carriers import devsim_3d as D3
     from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
     dg = EquilibriumDensityGradient(m_eff_kg=M)
-    assert Stacked3DSpec().wall_mesh_min_nm() == 0.5
+    assert Stacked3DSpec(**_FILM3D).wall_mesh_min_nm() == 0.5
     assert Stacked3DSpec(density_gradient=dg, mesh_min_nm=0.02, **_FILM3D).wall_mesh_min_nm() == 0.02
     hw = Stacked3DSpec(density_gradient=dg, **_FILM3D).wall_mesh_min_nm()
     assert hw == pytest.approx(0.0194, rel=0.02)                 # L_s / 40 of the film
@@ -666,14 +666,14 @@ def test_3d_builder_refusals():
     from dynameta.materials.transport_model import KaneBand
     g = EquilibriumDensityGradient()
     with pytest.raises(NotImplementedError, match="equilibrium"):
-        Stacked3DSpec(physics="drift_diffusion", density_gradient=g)
+        Stacked3DSpec(physics="drift_diffusion", density_gradient=g, **_FILM3D)
     with pytest.raises(NotImplementedError, match="extra semiconductor"):
-        Stacked3DSpec(density_gradient=g, extra_semiconductors=[("xs", "TCO", 2e-9, 9.0, 1e26)])
+        Stacked3DSpec(density_gradient=g, extra_semiconductors=[("xs", "TCO", 2e-9, 9.0, 1e26)], **_FILM3D)
     with pytest.raises(NotImplementedError, match="Kane"):
-        Stacked3DSpec(density_gradient=g, bands={"semi": KaneBand(m0_kg=0.25 * M_E, alpha_per_eV=0.4)}, n_bg_m3=3e26,
-                      dos_mass_kg=KaneBand(m0_kg=0.25 * M_E, alpha_per_eV=0.4).dos_mass_kg(3e26))
+        Stacked3DSpec(density_gradient=g, bands={"semi": KaneBand(m0_kg=0.25 * M_E, alpha_per_eV=0.4)},
+                      **dict(_FILM3D, dos_mass_kg=KaneBand(m0_kg=0.25 * M_E, alpha_per_eV=0.4).dos_mass_kg(N_BG)))
     with pytest.raises(ValueError, match="EquilibriumDensityGradient"):
-        Stacked3DSpec(density_gradient=1.8)
+        Stacked3DSpec(density_gradient=1.8, **_FILM3D)
 
 
 def test_film_interface_traps_on_a_dg_film_keep_gauss_law_and_their_classical_occupancy():

@@ -30,9 +30,9 @@ FF = [1e6, 1e8, 1e10]
 
 
 def design():
-    """Gated bipolar n-GaAs (Boltzmann: the diffusion source is Nyquist-exact): Al-Nd mirror (bottom gate) /
-    7 nm HfO2 / 20 nm n-GaAs 1e23 m^-3 with a KINETIC acceptor level (TransportModel.srh_traps), grounded on
-    both x edges / 7 nm HfO2 / Au patch (top gate), 60 nm cell -- tests/_noise_method_child.te_design without
+    """Gated bipolar n-GaAs (Boltzmann: the diffusion source is Nyquist-exact): metal mirror (bottom gate) /
+    6 nm oxide (eps 20) / 20 nm n-GaAs 1e23 m^-3 with a KINETIC acceptor level (TransportModel.srh_traps), grounded on
+    both x edges / 6 nm oxide / metal patch (top gate), 60 nm cell -- tests/_noise_method_child.te_design without
     the AlGaAs layer."""
     from validation import _reference_device as RD
     from validation.devsim_heterojunction import GAAS, transport
@@ -45,15 +45,15 @@ def design():
                              srh_traps=(lv,))
     reg.add(Material("GaAs_n", ConstantOptical(12.0 + 0j), transport=tm))
     cell = UnitCell.square(60e-9)
-    layers = [Layer("mirror", 70e-9, "Al-Nd"), Layer("lower_hfo2", 7e-9, "HfO2"), Layer("gaas", 20e-9, "GaAs_n"),
-              Layer("upper_hfo2", 7e-9, "HfO2"),
-              Layer("patch", 50e-9, "air", inclusions=[Inclusion(centered_square(cell, 30e-9), "Au")])]
+    layers = [Layer("mirror", 80e-9, "mirror_metal"), Layer("lo_ox", 6e-9, "oxB"), Layer("gaas", 20e-9, "GaAs_n"),
+              Layer("up_ox", 6e-9, "oxB"),
+              Layer("patch", 40e-9, "air", inclusions=[Inclusion(centered_square(cell, 30e-9), "metal")])]
     el = [Electrode("bot_contact", "mirror", "full", role="biased"),
           Electrode(GATE, "patch", centered_square(cell, 30e-9), role="biased"),
           Electrode("gnd_left", "gaas", "x_lo", role="ground", fixed_voltage_V=0.0),
           Electrode("gnd_right", "gaas", "x_hi", role="ground", fixed_voltage_V=0.0)]
     return Design(name="trap_gate", unit_cell=cell, stack=Stack(layers=layers, superstrate_material="air",
-                                                                substrate_material="Si"),
+                                                                substrate_material="glass"),
                   electrodes=el, materials=reg)
 
 
@@ -63,7 +63,7 @@ def run(scenario):
     it = PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
                            dynamic=True, kinetic_bin_eV=0.2)
     b = LayeredDevsimBuilder(design(), mesh_name="tn_m", device_name="tn_d",
-                             interface_traps={("gaas", "upper_hfo2"): it})
+                             interface_traps={("gaas", "up_ox"): it})
     b.solve(BiasPoint({}, "eq"))
     kv = PT.kinetic_trap_variables(b.device, "gaas")
     sn = b.noise_spectrum(FF, gate=GATE, per_cell=False)

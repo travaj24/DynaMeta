@@ -112,7 +112,7 @@ def test_x8_lambda_m_is_validated():
 def test_x8_transient_loop_is_byte_identical_on_the_scalar_default():
     """The default build_stack path through optical_transient_response is unchanged: honouring
     lambda_m must not perturb the shipped waveform."""
-    dm = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
+    dm = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
     t = np.linspace(0.0, 3e-11, 12)
     _t, R, T, eps_front = optical_transient_response(t, lambda _ti: 8e26, 1.55e-6, drude_model=dm)
     ref = layered_rta(enz_reflector_stack(complex(dm.eps(1.55e-6, n_m3=8e26)), 1.55e-6), 1.55e-6)

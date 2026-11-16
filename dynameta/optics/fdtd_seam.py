@@ -378,7 +378,7 @@ def _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m, *, eps
 def eps_profile_from_carrier(n_m3_profile, lambda_m, drude_model):
     """Per-DEPTH complex eps from a carrier-density profile n(z) via a DrudeOptical model -- e.g. an ITO
     accumulation / ENZ profile from a DEVSIM n(z) solve. Returns the eps(z) array (same length as n(z)).
-    This is the bridge that makes the gated-ITO optics QUANTITATIVE: the few-nm accumulation has a steep
+    This is the bridge that makes the gated-film optics QUANTITATIVE: the few-nm accumulation has a steep
     eps(z), so a single homogenized eps misses the ENZ; a graded profile (graded_fdtd_layers) captures it."""
     n = np.asarray(n_m3_profile, dtype=float).ravel()
     return np.array([complex(drude_model.eps(float(lambda_m), n_m3=float(ni))) for ni in n], dtype=complex)

@@ -24,8 +24,8 @@ from dynameta.transient_optics import enz_reflector_stack, optical_transient_res
 from dynameta.optics.tmm_reference import layered_rta
 
 LAM = 1550e-9
-ITO = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
-N_OFF, N_ON = 4.0e26, 1.5e27          # m^-3: background -> strong accumulation (ENZ-crossing)
+ITO = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+N_OFF, N_ON = 3.0e26, 1.5e27          # m^-3: background -> strong accumulation (ENZ-crossing)
 TAU = 12e-12                          # access-RC time constant (12 ps)
 
 

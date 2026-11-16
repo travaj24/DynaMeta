@@ -106,9 +106,9 @@ Landed alongside (the synergy glue A2 exposed):
   y-invariant gridded fields solve as true 1-D RCWA) + `formulation=` plumbed through.
 - Per-layer absorption attribution verified (GATE F in `lumenairy_rcwa_bridge.py`):
   per_region_absorption keyed by design layer, graded slabs aggregate, closure to 1e-16.
-- Flagship example `examples/lumenairy_gated_grating.py`: DEVSIM gated-ITO accumulation ->
+- Flagship example `examples/lumenairy_gated_grating.py`: DEVSIM gated-film accumulation ->
   graded Drude eps(z) -> RCWA bridge (1-D fast path, absorption attribution) with the PMM
-  bridge as cross-method referee (|dR| 4e-3 ungated); max gate modulation |dR| = 0.26.
+  bridge as cross-method referee on the ungated device.
 
 ### A3. Bidirectional translation tools (task #171) -- SHIPPED
 

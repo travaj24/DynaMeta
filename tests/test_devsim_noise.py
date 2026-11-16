@@ -65,7 +65,7 @@ def test_johnson_bipolar_1d():
 
 
 def test_johnson_unipolar_1d_fermi_dirac():
-    """GATE A2. Unipolar DD ITO bar (n = 5e26, eta ~ 10, FD g-factor ON) through the new
+    """GATE A2. Unipolar DD degenerate film bar (n = 3e26, FD g-factor ON) through the new
     setup_contact_ohmic_dd_circuit: S = 4kT G to 1.1e-16 (uniform n -> g cancels at equilibrium)."""
     r, _ = _johnson(V.unipolar_1d_resistor, 5e14)
     assert np.max(np.abs(r - 1)) < 1e-9
@@ -88,7 +88,7 @@ def test_johnson_unipolar_3d():
     defect, not by discretization."""
     r, G = _johnson(V.unipolar_3d_resistor, 4e14)
     assert np.max(np.abs(r - 1)) < 1e-9
-    sigma = 1.602176634e-19 * 4e26 * 0.004                     # q n mu of the bar (n_bg, mobility)
+    sigma = 1.602176634e-19 * 3e26 * 0.004                     # q n mu of the bar (n_bg, mobility)
     assert G == pytest.approx(sigma * (80e-9 * 80e-9) / 200e-9, rel=1e-9, abs=0)     # MEASURED -2.2e-16
 
 
@@ -250,20 +250,20 @@ def test_hooge_one_over_f():
 # =====================================================================================================
 
 def test_fdt_layered_metasurface_2d():
-    """GATE G. The 2-D LAYERED reference metasurface (LayeredDevsimBuilder: degenerate ITO with the FD
-    g-factor, HfO2/Al2O3 dielectrics, 9 regions, edge-metal grounds) with the gate made circuit-driven
+    """GATE G. The 2-D LAYERED reference metasurface cell (LayeredDevsimBuilder: degenerate film with the FD
+    g-factor, two-oxide gate dielectrics, 9 regions, edge-metal grounds) with the gate made circuit-driven
     by set_ssac_gate: S_I = 4kT Re Y from 1 GHz to 1 PHz (Re Y spans 7 decades). Measured
     |S/4kTReY - 1| <= 1.3e-11 at Vg = 0 (flat band: uniform n, g cancels) and <= 3.7e-5 at Vg = +2 V
     (degenerate accumulation: the FD g-factor SG edge flux is Nyquist-consistent only to O(h^2) -- the
     documented approximation of the degenerate diffusion source)."""
     # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
-    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg,
+    # shared validation device (validation/_reference_device.film_dos_mass) varies by 65 % over [0.1, 10] n_bg,
     # so building it warns once
     from dynameta.warning_types import AdvisoryWarning
     with pytest.warns(AdvisoryWarning, match="density-dependent"):
         r0, ReY, byr = V.gate_g_layered(0.0)
     assert np.max(np.abs(r0 - 1)) < 1e-9
-    assert ReY.max() / ReY.min() > 1e5 and set(byr) == {"ito"}
+    assert ReY.max() / ReY.min() > 1e5 and set(byr) == {"film"}
     with pytest.warns(AdvisoryWarning, match="density-dependent"):
         r2, _, _ = V.gate_g_layered(2.0)
     assert np.max(np.abs(r2 - 1)) < 1e-3

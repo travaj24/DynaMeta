@@ -2,7 +2,7 @@
 
 Four changes to `optics.solver.solve_fem`. The first three are opt-in; the fourth is a fix to the
 iterative-solver residual check, which was **false-alarming on every PEC-walled symmetry cell**.
-They were written on 2026-09-25 for the exp31 coax study and carried uncommitted until now. This
+They were written on 2026-09-25 for a coaxial-cell study and carried uncommitted until now. This
 pass reviewed them, fixed three defects found in review (one wrong answer, two late refusals),
 and added the gates.
 
@@ -150,4 +150,4 @@ deterministic case (`umfpack`, tensor) is bit-identical across all three runs.
 - `ruff check .`: clean.
 
 `sparsecholesky` speed, measured here: **2.0x** over `umfpack` (8.9 s vs 17.7 s, scalar full cell,
-2223 vertices). The ~3x of 2026-09-25 was measured on the larger exp31 coax cell.
+2223 vertices). The ~3x of 2026-09-25 was measured on a larger coaxial cell.

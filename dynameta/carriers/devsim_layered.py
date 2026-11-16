@@ -1963,8 +1963,8 @@ class LayeredDevsimBuilder:
         v0.14.0 blocker fix (2026-11-04, MEASURED before the fix): after set_ssac_gate the gate's
         Potential Dirichlet reads the circuit node, not the `<name>_bias` parameter, so solve()'s ramp
         -- which only wrote the parameter -- was a no-op for it and a later builder.solve(new bias)
-        silently returned the OLD operating point (reference modulator, 1 V -> solve(2 V): every node
-        Potential equal to the 1 V state to 1.1e-16 V, 1.0 V off a fresh 2 V solve in upper_al2o3).
+        silently returned the OLD operating point (reference cell, 1 V -> solve(2 V): every node
+        Potential equal to the 1 V state to 1.1e-16 V, 1.0 V off a fresh 2 V solve in the outer oxide).
         A circuit-driven electrode is now driven by circuit_alter on its source (the parameter is
         still written, so anything reading it stays consistent).
 

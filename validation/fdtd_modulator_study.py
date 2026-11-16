@@ -1,4 +1,4 @@
-"""FDTD bias x wavelength MODULATOR study: the end-to-end device figure of merit -- how a gated ITO layer
+"""FDTD bias x wavelength MODULATOR study: the end-to-end device figure of merit -- how a gated TCO layer
 modulates the broadband reflection spectrum -- computed with the fast dispersive broadband sweep
 (optics.fdtd_seam.run_fdtd_sweep). A gate bias drives the ITO carrier density from background to
 accumulation; the free-carrier Drude permittivity shifts (toward ENZ / metallic), shifting R(lambda). The
@@ -13,7 +13,7 @@ GATE 1 (each state vs TMM): the dispersive sweep R(lambda) matches TMM for BOTH 
 GATE 2 (modulation vs TMM): the FDTD modulation dR(lambda) matches TMM's dR to ~1e-2, and is a genuine
         non-trivial contrast (peak |dR| > 0.02) -- the device actually modulates.
 
-NOTE (scope): a real ITO modulator's accumulation is a FEW-nm ENZ layer that a uniform FDTD grid
+NOTE (scope): a real gated-film modulator's accumulation is a FEW-nm ENZ layer that a uniform FDTD grid
 under-resolves (a limit of ALL FDTD, per the build-vs-buy verdict) -- use FEM/RCWA for the few-nm ENZ
 sub-layer. This study uses a homogenized 60nm gated layer to demonstrate the broadband bias-sweep
 capability.
@@ -33,11 +33,11 @@ from dynameta.optics.fdtd_seam import run_fdtd_sweep
 from dynameta.optics.tmm_reference import layered_rta, layered_stack_from_design
 
 C = 299792458.0
-ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)   # reference-like ITO
+ITO_DRUDE = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)   # a generic TCO Drude
 
 
 def _ito_at_bias(n_cm3, lo=1100e-9, hi=1900e-9, npts=220):
-    """The gated ITO as a TabulatedOptical (its Drude eps at carrier density n, as a lambda-function both
+    """The gated film as a TabulatedOptical (its Drude eps at carrier density n, as a lambda-function both
     the FDTD dispersive sweep and TMM consume identically)."""
     lam = np.linspace(lo, hi, npts)
     n_m3 = n_cm3 * 1.0e6
@@ -56,8 +56,8 @@ def _design(n_cm3):
 
 
 def main():
-    print("[fm] === FDTD bias x wavelength ITO modulator study (dispersive broadband sweep) ===", flush=True)
-    n_off, n_on = 4.0e20, 1.2e21                            # cm^-3: background -> accumulation
+    print("[fm] === FDTD bias x wavelength gated-film modulator study (dispersive broadband sweep) ===", flush=True)
+    n_off, n_on = 3.0e20, 1.2e21                            # cm^-3: background -> accumulation
     d_off, d_on = _design(n_off), _design(n_on)
     targets = np.linspace(1250e-9, 1650e-9, 9)
 

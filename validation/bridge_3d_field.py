@@ -14,13 +14,14 @@ from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.core import NM, MaterialEpsMap, assemble_eps, choose_lift
 from dynameta.core.lift import IdentityLift
 
-spec = Stacked3DSpec()            # ITO semi + HfO2 oxide, 12nm lateral
+# a generic degenerate film (n_bg 3e26 m^-3, eps 9.0, DOS mass 0.30 m_e) under an eps-20 oxide, 12 nm lateral
+spec = Stacked3DSpec(n_bg_m3=3e26, eps_semi=9.0, eps_oxide=20.0, dos_mass_kg=0.30 * M_E)
 solver = Devsim3DEquilibrium(spec)
 cf = solver.solve(BiasPoint({"gate": 1.0, "body": 0.0}, "gate+1V"))
 
-# n->eps map: ITO Drude (matches the validated reference ITO optical model)
+# n->eps map: a Drude film (the region is named "semi"; its emitted material is the spec's semi_material)
 reg = MaterialRegistry()
-reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+reg.add(Material(spec.semi_material, DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)))
 n_to_eps = MaterialEpsMap(reg)
 
 # minimal alignment: the "semi" mesh region <- carrier "semi", z = through-stack
@@ -31,7 +32,7 @@ align = GeometryAlignment(
                         stack_axis="z")],
     fixed_eps_regions={})
 
-eps_by_region = assemble_eps(cf, align, n_to_eps, IdentityLift(), 1300e-9,
+eps_by_region = assemble_eps(cf, align, n_to_eps, IdentityLift(), 1200e-9,
                               mesh_regions=["semi"])
 ef = eps_by_region["semi"]
 v = ef.values_zyx                 # (Nz, Ny, Nx) complex

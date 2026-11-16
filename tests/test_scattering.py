@@ -6,11 +6,11 @@ import pytest
 from dynameta.constants import Q_E, M_E, HBAR
 from dynameta.materials import DrudeOptical, KaneOpticalMass, MatthiessenGamma
 
-N = np.array([1e26, 4e26, 1e27, 2e27])
+N = np.array([1e26, 3e26, 1e27, 2e27])
 LAM = 1500e-9
 
 
-def _dispersion_optical_mass(n, m0=0.27 * M_E, alpha_eV=0.5):
+def _dispersion_optical_mass(n, m0=0.25 * M_E, alpha_eV=0.4):
     """NON-CIRCULAR reference (audit C7b-1: the old reference re-typed the class's own --
     halved -- formula): m_opt = hbar k_F / v_F evaluated NUMERICALLY from the Kane
     dispersion. E(k) solves E (1 + alpha E) = hbar^2 k^2/(2 m0) (positive quadratic
@@ -30,14 +30,14 @@ def _dispersion_optical_mass(n, m0=0.27 * M_E, alpha_eV=0.5):
 
 
 def test_kane_alpha_zero_is_constant():
-    m = KaneOpticalMass(m0_kg=0.225 * M_E, alpha_eV=0.0)
-    assert np.allclose(m(N), 0.225 * M_E, rtol=0, atol=0)        # exactly m0
+    m = KaneOpticalMass(m0_kg=0.30 * M_E, alpha_eV=0.0)
+    assert np.allclose(m(N), 0.30 * M_E, rtol=0, atol=0)        # exactly m0
 
 
 def test_kane_matches_dispersion_reference():
     # exact Kane optical mass vs the numeric hbar k_F / (dE/dk) of the dispersion --
     # the pre-audit halved closure misses this by ~2x in the enhancement (fails hard)
-    m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
+    m = KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4)
     assert np.allclose(m(N), _dispersion_optical_mass(N), rtol=1e-9, atol=0)
 
 
@@ -45,15 +45,15 @@ def test_kane_legacy_equivalence_and_guard():
     # back-compat contract: legacy closure with alpha_legacy = 2*alpha_Kane equals the
     # exact default with alpha_Kane (the quadratic-inversion identity); exponent is a
     # legacy-only knob
-    m_new = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
-    m_old = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=1.0, legacy=True)
+    m_new = KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4)
+    m_old = KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.8, legacy=True)
     assert np.allclose(m_new(N), m_old(N), rtol=1e-14, atol=0)
     with pytest.raises(ValueError):
-        KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5, exponent=1.0)
+        KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4, exponent=1.0)
 
 
 def test_kane_monotone_and_wp2_sublinear():
-    m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
+    m = KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4)
     mm = m(N)
     assert np.all(np.diff(mm) > 0)                              # heavier carriers at higher n
     wp2 = N * Q_E ** 2 / (8.8541878128e-12 * mm)
@@ -62,8 +62,8 @@ def test_kane_monotone_and_wp2_sublinear():
 
 
 def test_matthiessen_off_switch_is_constant():
-    g = MatthiessenGamma(gamma_const_rad_s=1.1e14)
-    assert np.allclose(g(N), 1.1e14, rtol=0, atol=0)            # all other channels 0 -> exact constant
+    g = MatthiessenGamma(gamma_const_rad_s=1.2e14)
+    assert np.allclose(g(N), 1.2e14, rtol=0, atol=0)            # all other channels 0 -> exact constant
 
 
 def test_matthiessen_additivity_and_temperature_trend():
@@ -77,7 +77,7 @@ def test_matthiessen_additivity_and_temperature_trend():
     assert float(g400(1e27)) > float(g300(1e27)) > float(g200(1e27))
     # ionized-impurity channel rises with n (Brooks-Herring scaling), off by default
     gii = MatthiessenGamma(gamma_const_rad_s=1e13, bh_prefactor_rad_s=3e13, bh_n_ref_m3=1e27,
-                           m_opt=KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5))
+                           m_opt=KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4))
     vals = gii(N)
     assert np.all(np.diff(vals) > 0)                           # more scattering at higher doping
 
@@ -85,10 +85,10 @@ def test_matthiessen_additivity_and_temperature_trend():
 def test_drude_byte_identical_when_neutral():
     # the resolved closures plugged into DrudeOptical reproduce the constant-Drude eps EXACTLY when
     # the new knobs are neutral (alpha=0, only the const damping channel).
-    d_const = DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)
-    d_resolved = DrudeOptical(eps_inf=4.25,
-                              m_opt_kg=KaneOpticalMass(m0_kg=0.225 * M_E, alpha_eV=0.0),
-                              gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.1e14))
+    d_const = DrudeOptical(eps_inf=4.0, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+    d_resolved = DrudeOptical(eps_inf=4.0,
+                              m_opt_kg=KaneOpticalMass(m0_kg=0.30 * M_E, alpha_eV=0.0),
+                              gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.2e14))
     for lam in (1200e-9, 1500e-9, 2000e-9):
         a = d_const.eps(lam, n_m3=N)
         b = d_resolved.eps(lam, n_m3=N)
@@ -96,8 +96,8 @@ def test_drude_byte_identical_when_neutral():
 
 
 def test_drude_passivity_with_resolved_gamma():
-    d = DrudeOptical(eps_inf=4.25,
-                     m_opt_kg=KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5),
+    d = DrudeOptical(eps_inf=4.0,
+                     m_opt_kg=KaneOpticalMass(m0_kg=0.25 * M_E, alpha_eV=0.4),
                      gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=8e13, gamma_phonon_300K_rad_s=3e13))
     eps = d.eps(1500e-9, n_m3=N)
     assert np.all(np.imag(eps) >= 0.0)                         # exp(-i w t) passive

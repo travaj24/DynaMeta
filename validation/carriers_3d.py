@@ -34,7 +34,7 @@ LX_NM = LY_NM = 12.0          # small lateral box (physics is x,y-invariant) kee
                               # the interface-refined node count tractable
 T_SEMI_NM, T_OX_NM = 12.0, 8.0
 T_OX = T_OX_NM * 1e-9                  # metres (Gauss check)
-N_BG, EPS_SEMI, EPS_OX, DOS = 4e26, 9.5, 18.0, 0.35 * M_E
+N_BG, EPS_SEMI, EPS_OX, DOS = 3e26, 9.0, 20.0, 0.30 * M_E
 # per run (2026-11-04): this was a fixed validation/_moscap3d.msh shared by concurrent runs
 import tempfile  # noqa: E402
 MSH = os.path.join(tempfile.mkdtemp(prefix="dynameta_moscap3d_"), "moscap3d.msh")
@@ -104,7 +104,7 @@ def build_mesh():
 def build_device():
     ds.create_gmsh_mesh(mesh="m3", file=MSH)
     ds.add_gmsh_region(mesh="m3", gmsh_name="semi", region="semi", material="ITO")
-    ds.add_gmsh_region(mesh="m3", gmsh_name="oxide", region="oxide", material="HfO2")
+    ds.add_gmsh_region(mesh="m3", gmsh_name="oxide", region="oxide", material="oxB")
     ds.add_gmsh_contact(mesh="m3", gmsh_name="gate", region="oxide", name="gate", material="metal")
     ds.add_gmsh_contact(mesh="m3", gmsh_name="body", region="semi", name="body", material="metal")
     ds.add_gmsh_interface(mesh="m3", gmsh_name="semi_oxide", region0="semi", region1="oxide", name="si_ox")
@@ -167,7 +167,7 @@ def main():
         dn = navg - N_BG
         dQ = Q_E * float(np.sum(0.5 * (dn[1:] + dn[:-1]) * np.diff(zu)))   # C/m^2 (trapezoid in z)
         # the box-method integral the solver itself balances (NodeVolume); the body field is ~0 (Debye
-        # length << 12 nm at 4e26 m^-3), so Gauss is exact on an exact mesh (D2c)
+        # length << 12 nm at 3e26 m^-3), so Gauss is exact on an exact mesh (D2c)
         dQ_fv = Q_E * float(np.sum((n - N_BG) * nv)) / (LX_NM * LY_NM * 1e-18)
         V_surf = Vs[np.abs(zs - zs.max()) < 3e-10].mean()
         D_ox = EPS_OX * EPS0 * (Vg - V_surf) / T_OX                        # C/m^2
@@ -180,8 +180,8 @@ def main():
     acc = results[+1.0][0]; dep = results[-1.0][0]
     # legacy gmsh: unstructured-tet noise (5 %) and the trapezoid Gauss to 15 %. Kuhn-tensor (D2c): exact
     # lateral invariance and the BOX-METHOD Gauss balance (NodeVolume-integrated charge == eps_ox dV/t_ox)
-    # to 1e-4 at both biases (MEASURED -3.4e-6 / -3.7e-6: the residual of solve()'s relative_error=1e-5
-    # Newton stop; legacy gmsh ~0.2); the trapezoid dQ (printed; ratio 0.985 / 0.989, gmsh 0.878 / 0.889)
+    # to 1e-4 at both biases (MEASURED -8.5e-6 / -9.5e-6: the residual of solve()'s relative_error=1e-5
+    # Newton stop; legacy gmsh ~0.2); the trapezoid dQ (printed; ratio 0.989 / 0.994, gmsh 0.884 / 0.897)
     # differs from the box quadrature by ~1.5 % in the 0.5 nm accumulation layer -- a check-quadrature
     # effect, not the solver's.
     inv_tol = 0.05 if legacy else 1e-9

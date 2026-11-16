@@ -31,8 +31,13 @@ SOURCES (status: P = primary / open-access full text read, A = abstract only, S 
   [Dyk16]  M. Dyksik et al., J. Appl. Phys. 120, 043104 (2016), 10.1063/1.4958904 -- Si:InAs optical mass
            0.036 / 0.064 m_e at 1e18 / 1e19 cm^-3; Kane mass law with P^2 = 11.9 eV (P, accepted manuscript)
   [Wei17]  D. Wei, C. Harris, S. Law, Opt. Mater. Express 7, 2672 (2017), 10.1364/OME.7.002672 -- Si:InAs
-           7.35e19 / 1.25e19 cm^-3: screened plasma wavelength 5.8 / 9.5 um, gamma 1.9e13 / 1.4e13 s^-1, eps_inf
-           12.3 (P)
+           layers of doped / undoped InAs multilayers, nominal (design) Si density 7.35e19 / 1.25e19 cm^-3:
+           screened plasma wavelength 5.8 / 9.5 um and scattering rate 1.9e13 / 1.4e13 s^-1 from far-field
+           spectra and effective-medium theory (angular rate: their appendix quotes Gamma in rad/s); eps_inf
+           12.3; no effective mass stated (an empirical omega_p(n) fit instead) (P, NSF PAR copy)
+  [Wei20]  D. Wei, S. Maddox, P. Sohr, S. Bank, S. Law, Opt. Mater. Express 10, 302 (2020),
+           10.1364/OME.383260 -- MBE Si:InAs films 4.1-5.5e19 cm^-3 (Hall): optical Gamma 0.9-2.9e13 rad/s,
+           Hall mobility 1040-1265 cm^2/(V s) (P, NSF PAR copy)
   [Sha22]  S. Shayegan et al., Sci. Adv. 8, eabm4308 (2022) -- n-InAs eps_inf 12.3 (ellipsometry fit) (P)
   [Liu17]  Liu et al., Phys. Rev. Applied 8, 034028 (2017) -- InAs TO / LO 217.4 / 238.5 cm^-1, 300 K (P)
   [Mil20]  D. Milovich et al., J. Photon. Energy 10, 025503 (2020) -- InAs Eg 0.354 eV; phonon damping 2.89e11
@@ -41,14 +46,17 @@ SOURCES (status: P = primary / open-access full text read, A = abstract only, S 
            mu = 3e4 / (1 + (N / 8e17)^0.75) cm^2/(V s) (Baranov, for InAs; used for InAsSb too, D);
            InAs0.915Sb0.085 transparent above ~4.3 um (k.p calculation) (P / S)
   [Tal15]  T. Taliercio et al., Opt. Express 23, 29423 (2015), 10.1364/OE.23.029423 -- InAs0.91Sb0.09:Si
-           3.4e19 cm^-3, m* = 0.1 m_e, screened plasma wavelength 6.25 um, eps_inf 11.7 (P)
+           3.4e19 cm^-3, m* = 0.1 m_e, screened plasma wavelength 6.25 um, eps_inf 11.7; their simulations
+           assume gamma = 0.01 x the plasma frequency (~3e12 rad/s, not a measurement) (P)
+  [Mor24]  Moreau et al., arXiv:2412.01466 -- InAsSb:Si, 1.4e19 cm^-3 (fit): m* 0.083 m_e, gamma 5.9e12 rad/s
+           (S, preprint; read through a summary, not verified line by line)
 
   Polar crystals and glass
   [Mut99]  H. Mutschke et al., Astron. Astrophys. 345, 187 (1999) -- SiC 3C / 4H / 6H TO, LO, eps_inf
            (literature values collected in Table 1), damping 1-3 cm^-1 (2 cm^-1 used), Re(eps) = -2 resonance
            wavelengths (P)
   [Cal15]  J. D. Caldwell et al., Nanophotonics 4, 44 (2015), 10.1515/nanoph-2014-0003 -- 4H-SiC ENZ 10.3 um,
-           AlN ENZ 10.9 um (S)
+           AlN ENZ 10.9 um (Table 2) (P)
   [Sch17]  S. Schoeche et al., J. Appl. Phys. 121, 205701 (2017), 10.1063/1.4983765 -- AlN factorized fit:
            E1(TO) 666.4 / 3.1, E1(LO) 909.9 / 3.1, A1(LO) 886.4 / 9.1 cm^-1, eps_inf 4.08 / 4.13 (P, arXiv)
   [Iak03]  V. Iakovenko et al., arXiv:cond-mat/0301045 -- AlN Raman A1(TO) 610 cm^-1 (P, preprint)
@@ -216,8 +224,9 @@ def tin(*, name: str = "TiN", parameter_set: str = "reddy2017_200nm") -> Materia
 def zrn(*, name: str = "ZrN") -> Material:
     """Zirconium nitride, passive plasmonic / ENZ metal. SINGLE complete published fit [Nai13] (reactive
     sputtered, 800 C, nitrogen-deficient ambient, inferred): eps_b 3.4656, E_p 8.018 eV, gamma_p 0.5192 eV;
-    Lorentz f 2.4509, E0 5.48 eV, gamma 1.7369 eV. Crossover 408.7 nm (D); ~430 nm is quoted for ZrN films by
-    Naik et al., Opt. Mater. Express 1, 1090 (2011) (S, not verified here).
+    Lorentz f 2.4509, E0 5.48 eV, gamma 1.7369 eV. Crossover 408.7 nm (D); "HfN and ZrN have cross-over
+    wavelengths around 430 nm" (Naik, Kim, Boltasseva, Opt. Mater. Express 1, 1090 (2011),
+    10.1364/OME.1.001090, P via arXiv:1108.0993).
     Drude plasma energies 6.6-8.0 eV and damping 0.29-0.62 eV are reported across films (Veszelei 1994, A;
     DFT 7.46 eV). Validity 350-2000 nm. Gate tuning negligible (as tin())."""
     opt = LorentzOscillatorOptical.from_ev(3.4656, ((2.4509, 5.48, 1.7369),), (8.018, 0.5192),
@@ -277,11 +286,19 @@ def inas(n_bg_m3: float, *, name: str = "InAs", eps_inf: float = _INAS_EPS_INF, 
     the plasmon-LO-phonon coupling is included (it moves the ENZ wavelength by ~2.4 % at 1.5e18 cm^-3 and < 0.5 %
     above 1e19); inside an InterbandOnsetGuard that refuses wavelengths at or below the interband onset Eg +
     E_F(n) (~1.7 um at 1e19, ~0.93 um at 1e20). Damping from [Wei17]'s fitted gamma (optical mobility, table in
-    log n, held outside 1.25e19-7.35e19 cm^-3); the DC (Hall) mobility is the Hilsum-form law of [Pet24].
+    log n, held outside 1.25e19-7.35e19 cm^-3): 1.4e13 / 1.9e13 rad/s (74 / 101 cm^-1, optical mobility 1750 /
+    740 cm^2/(V s) with this band, D). The 7.35e19 value is mid-range of the 0.9-2.9e13 rad/s measured on Si:InAs
+    films at 4-5.5e19 [Wei20]; the 1.25e19 value is ~1.9x the DC rate of the Hall law below (7.2e12 rad/s), so
+    it is on the lossy side (spread ~0.6-1.6e13 rad/s at 1.25e19, ~0.9-3e13 at 7.35e19). The DC (Hall)
+    mobility is the Hilsum-form law of [Pet24] (1200-1500 cm^2/(V s) at 4-5.5e19 against [Wei20]'s measured
+    1040-1265).
     eps_static: None = the LST value of the lattice (14.8; ~15.1-15.2 is the usual tabulated value, not
     verified here); chi_eV None (not verified).
     LITERATURE SPREAD: the published screened plasma wavelengths at equal nominal density differ by 7-25 %
-    (5.8 vs 4.64 um near 7.4e19 cm^-3) -- mostly the density calibration (Hall, SIMS, optical) of each paper."""
+    (5.8 vs 4.64 um near 7.4e19 cm^-3) -- mostly the density calibration (Hall, SIMS, optical) of each paper;
+    [Wei17]'s densities are the nominal Si doping, and its 5.8 um at 7.35e19 implies m_opt ~0.18 m_e with eps_inf
+    12.3 against this band's 0.125 (the preset gives 4.8 um there; the damping rate does not depend on that
+    choice)."""
     lat = INAS_LATTICE if (isinstance(lattice, str) and lattice == "default") else lattice
     if lat is not None and abs(float(lat.eps_inf) - float(eps_inf)) > 1e-12:
         lat = PolarLatticeOptical(eps_inf=float(eps_inf), modes=lat.modes)
@@ -300,9 +317,10 @@ def inassb(n_bg_m3: float, *, name: str = "InAsSb", eps_inf: float = _INASSB_EPS
     The same two-band Kane machinery as inas() with the alloy gap (0.288 eV, k.p value of [Pet24]) and InAs's
     Kane P^2 (an assumption, D): optical mass 0.097 m_e at 3.4e19 cm^-3 against [Tal15]'s 0.1. eps_inf 11.7
     ([Tal15]). The alloy's phonons are not sourced, so no lattice term (its effect on the ENZ wavelength is
-    < 0.5 % above ~3e19 cm^-3 in InAs); interband guard as inas(). Damping: the InAs table and DC mobility:
-    the InAs Hilsum-form law (no InAsSb-specific data). eps_static: None = the InAs LST value (an
-    approximation, the alloy value is not sourced)."""
+    < 0.5 % above ~3e19 cm^-3 in InAs); interband guard as inas(). Damping: the InAs table, an upper-loss
+    estimate for the alloy (fitted InAsSb:Si value 5.9e12 rad/s at 1.4e19 [Mor24], S; [Tal15] assume ~3e12;
+    no measured InAsSb rate at 3-7e19 was found); DC mobility: the InAs Hilsum-form law (no InAsSb Hall data).
+    eps_static: None = the InAs LST value (an approximation, the alloy value is not sourced)."""
     es = INAS_LATTICE.static_permittivity() if eps_static is None else eps_static
     return _iii_v(key="inassb", name=name, n_bg_m3=n_bg_m3, gap_eV=gap_eV, kane_P2_eV=kane_P2_eV, eps_inf=eps_inf,
                   lattice=None, optical_mobility_m2Vs=optical_mobility_m2Vs, eps_static=es, chi_eV=chi_eV,
