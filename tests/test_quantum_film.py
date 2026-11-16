@@ -296,13 +296,15 @@ def test_p_reflection_sign_of_film_stack_rt_against_nonlocal_tmm_and_tmm():
 
 def test_film_orientation_is_reciprocal():
     """Turning the asymmetric film over is the reciprocal inverse: T_bottom = J T_top^-1 J,
-    J = diag(1, -1), to 1e-10 (catches any orientation or sign slip of the nonlocal kernel)."""
+    J = diag(1, -1), element by element to 1e-13 of each element (MEASURED <= 2e-15; the elements span
+    fourteen decades, so an absolute bar would test only the largest; catches any orientation or sign
+    slip of the nonlocal kernel)."""
     r = QuantumFilmResponse(_asym(), EPS_INF, GAM)
     kp = 0.8 * 1.3 * W1200 / C_LIGHT
     Tt = r.transfer_matrix(W1200, kp, superstrate_face="top")
     Tb = r.transfer_matrix(W1200, kp, superstrate_face="bottom")
     J = np.diag([1.0, -1.0])
-    assert np.max(np.abs(Tb - J @ np.linalg.inv(Tt) @ J)) < 1e-10
+    assert np.max(np.abs(Tb - J @ np.linalg.inv(Tt) @ J) / np.abs(Tb)) < 1e-13
     assert np.max(np.abs(Tb - Tt)) > 1e-6                            # the film IS asymmetric
 
 
