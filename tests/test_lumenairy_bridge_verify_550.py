@@ -223,9 +223,13 @@ def test_pmm2d_pure_feature_floors_refuse_with_the_version(monkeypatch):
 
 @pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
 def test_feature_floor_table_is_sound():
-    from dynameta.optics.lumenairy_bridge._common import (FEATURE_FLOORS, VERSION_FLOOR,
+    from dynameta.optics.lumenairy_bridge._common import (FEATURE_FLOORS, FEATURE_PROBES, VERSION_FLOOR,
                                                           lumenairy_has, lumenairy_version)
     for name, (floor, what) in FEATURE_FLOORS.items():
         assert tuple(floor) > tuple(VERSION_FLOOR), name     # else it is not a feature floor
-        assert lumenairy_has(name) == (lumenairy_version() >= floor)
+        if name not in FEATURE_PROBES:
+            # a probed row is decided by the installed behaviour, not the version (a release candidate can
+            # carry the feature under an older version string, and 'pmm_gain_media' is right on 5.22.0 too);
+            # tests/test_lumenairy_feature_detection.py ties each probe to the behaviour it detects
+            assert lumenairy_has(name) == (lumenairy_version() >= floor), name
         assert what

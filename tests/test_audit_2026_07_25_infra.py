@@ -179,7 +179,7 @@ def test_t9_ytterbium_photodarkening_follows_the_equilibrium_law():
     assert not m.is_identity
     ln10_10 = math.log(10.0) / 10.0
     # the anchor round-trips: at nbar2_ref the loss equals the measured dB/m anchor
-    assert float(m.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12)
+    assert float(m.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12, abs=0)
     n = np.array([0.0, 0.25, 0.5, 1.0])
     loss = m.photodarkening_loss_per_m(n)
     assert loss.shape == n.shape                                       # shape-preserving (S3-38)
@@ -189,7 +189,7 @@ def test_t9_ytterbium_photodarkening_follows_the_equilibrium_law():
             / float(m.photodarkening_loss_per_m(0.115))) == pytest.approx(4.0, rel=1e-12)
     # the exponent knob still exists for rate-law studies, anchored at the same benchmark
     steep = ytterbium_photodarkening(alpha_eq_dB_per_m=0.58, pd_exponent=7.0)
-    assert float(steep.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12)
+    assert float(steep.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12, abs=0)
     assert float(steep.photodarkening_loss_per_m(0.115)) < 1e-3 * float(
         m.photodarkening_loss_per_m(0.115))
 
@@ -209,10 +209,10 @@ def test_t9_ion_from_cross_sections_round_trips_the_table_and_pins_mccumber():
     assert np.allclose(ion.sigma_a.sigma(lam), sa, rtol=1e-14, atol=0.0)   # AUDIT T-6
     assert np.allclose(ion.sigma_e.sigma(lam), se, rtol=1e-14, atol=0.0)
     assert float(ion.sigma_a.sigma(1.54e-6)) == pytest.approx(float(np.interp(1.54e-6, lam, sa)),
-                                                              rel=1e-14)
+                                                              rel=1e-14, abs=0)
     # McCumber: sigma_e(lam0) == sigma_a(lam0) at the zero-phonon line, for any temperature
     for T in (250.0, 300.0, 350.0):
-        assert float(ion.sigma_e_mccumber(1.53e-6, T)) == pytest.approx(float(sa[1]), rel=1e-12)
+        assert float(ion.sigma_e_mccumber(1.53e-6, T)) == pytest.approx(float(sa[1]), rel=1e-12, abs=0)
 
 
 def test_t9_edfa_cband_targets_is_the_calibration_report_default(monkeypatch):
@@ -247,7 +247,7 @@ def test_t9_edfa_cband_targets_is_the_calibration_report_default(monkeypatch):
     seen["gain"], seen["nf"] = t["small_signal_gain_dB"] - 1.0, t["nf_dB_max"] - 0.5
     rep = cal.calibration_report(_StubAmp())
     assert seen["res"] == "result-sentinel"
-    assert seen["lam_s"] == pytest.approx(t["signal_nm"] * 1e-9, rel=1e-15)   # nm -> m
+    assert seen["lam_s"] == pytest.approx(t["signal_nm"] * 1e-9, rel=1e-15, abs=0)   # nm -> m
     assert rep.targets == t and rep.targets is not t                 # defensive copy
     assert rep.gain_ok and rep.nf_ok
 

@@ -32,9 +32,12 @@ length, and read `gamma` as a shape knob rather than a first-principles 1.
 SCOPE (honest): the electrostatic potential is FROZEN (no Poisson feedback), so this is the
 post-hoc correction sanctioned as the R19 fallback -- quantitative for the dead-layer SHAPE
 near the interface, perturbative for the total charge (pass conserve_charge=True to rescale).
-The in-Newton DG-DD (u and Lambda as DEVSIM solution variables with a Poisson-like u-equation;
-a 5-variable Newton) is the documented follow-on -- DEVSIM node models cannot reference
-neighbor nodes, so the discrete Laplacian must be assembled as an equation, not a model.
+The in-Newton DG (u and Lambda as DEVSIM solution variables with a Poisson-like Lambda-equation)
+exists for drift-diffusion / bipolar regions (physics_density_gradient) and, since v0.16, for
+EQUILIBRIUM films with the Fermi-Dirac closure inside the electrostatic Newton
+(physics_equilibrium_dg; builders: density_gradient=EquilibriumDensityGradient(...)), calibrated
+against the dual-gate Schrodinger-Poisson solver. For a thin film between oxides use those, not this
+closure: v0.16 adds hard_wall='both' and a thin-film guard (dg_correct_density_1d).
 Pure numpy/scipy. Oracle: validation/density_gradient_dead_layer.py (vs Schrodinger-Poisson).
 """
 
@@ -50,7 +53,9 @@ from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m", "GAMMA_WALL",
            # v0.15.1: the valley-resolved electron DG (data)
-           "ValleySet", "SI100_ELECTRON_VALLEYS", "check_valley_table", "GAMMA_SI100_SP_CALIBRATED"]
+           "ValleySet", "SI100_ELECTRON_VALLEYS", "check_valley_table", "GAMMA_SI100_SP_CALIBRATED",
+           # v0.16: the equilibrium in-Newton density gradient's builder spec (data)
+           "EquilibriumDensityGradient"]
 
 
 # GAMMA_WALL (user decision 2026-11-04: a named constant; the DEFAULT gamma stays 1 everywhere).
@@ -173,6 +178,32 @@ SI100_ELECTRON_VALLEYS = (
 GAMMA_SI100_SP_CALIBRATED = 1.88
 
 
+@dataclass(frozen=True)
+class EquilibriumDensityGradient:
+    """Opt-in in-Newton density gradient for an EQUILIBRIUM semiconductor region of a device builder
+    (LayeredDevsimBuilder(density_gradient={region: EquilibriumDensityGradient(...)}); the physics is
+    carriers.physics_equilibrium_dg). Data only (no DEVSIM import).
+
+    gamma       : the DG fit factor; None = the calibrated default for degenerate films
+                  (physics_equilibrium_dg.EQUILIBRIUM_DG_GAMMA). 0 disables (the region stays classical,
+                  bit-identical).
+    m_eff_kg    : the quantization mass (normal to the insulating walls); None = the region's DOS mass at
+                  n_bg (the mass of its parabolic closure).
+    u_floor_rel : sqrt(n) at an insulating-wall node relative to sqrt(n_bg) (a positive floor for the
+                  Newton update; the profile off the wall node does not depend on it)."""
+    gamma: "float | None" = None
+    m_eff_kg: "float | None" = None
+    u_floor_rel: float = 1.0e-6
+
+    def __post_init__(self):
+        if self.gamma is not None and not (np.isfinite(self.gamma) and self.gamma >= 0.0):
+            raise ValueError("EquilibriumDensityGradient.gamma must be finite and >= 0 (or None)")
+        if self.m_eff_kg is not None and not (np.isfinite(self.m_eff_kg) and self.m_eff_kg > 0.0):
+            raise ValueError("EquilibriumDensityGradient.m_eff_kg must be finite and > 0 (or None)")
+        if not (0.0 < self.u_floor_rel < 1.0):
+            raise ValueError("EquilibriumDensityGradient.u_floor_rel must be in (0, 1)")
+
+
 def check_valley_table(valleys) -> tuple:
     """Validate a valley table (a sequence of ValleySet) and return it as a tuple: >= 1 set, every m_z_kg > 0,
     every dos_share > 0, and the shares summing to 1 within 1e-12 (the DOS-consistent split: the
@@ -264,13 +295,34 @@ def quantum_potential_V(z_m, n_m3, m_eff_kg: float, *, gamma: float = 1.0) -> np
 def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
                           T_K: float = T_REF, hard_wall: str = "left",
                           conserve_charge: bool = False, tol: float = 1e-6,
-                          max_nodes: int = 100000) -> np.ndarray:
+                          max_nodes: int = 100000, guard: bool = True) -> np.ndarray:
     """Quantum-corrected density n_dg(z) from the classical profile n_cl(z) via the frozen-
     potential DG boundary-value problem (module header). hard_wall = 'left'|'right' marks the
     insulating (oxide) end where u = sqrt(n) -> 0; the other end is pinned to the classical
-    bulk. conserve_charge=True rescales n_dg so int n dz matches the classical profile (the
+    bulk. hard_wall = 'both' (v0.16) puts an insulating wall at BOTH ends (u = 0 at z[0] and z[-1];
+    the BVP is otherwise unchanged) -- a film between two oxides, which 'left' / 'right' cannot
+    represent (they pin the second oxide face to its classical, wall-free density).
+    conserve_charge=True rescales n_dg so int n dz matches the classical profile (the
     frozen-potential closure otherwise trades interface charge for the dead layer). gamma = 0
     returns n_cl EXACTLY.
+
+    THIN-FILM GUARD (v0.16). The frozen potential has no Poisson feedback, so the closure is only a
+    perturbative shape correction. It warns (UnreliableResultWarning) when (a) the profile spans less
+    than 10 L_q (L_q = dg_length_m(m_eff_kg, gamma=gamma, T_K=T_K), the Boltzmann length this BVP
+    closes with) -- the pinned end then sits inside the dead layer -- or (b) the dead-layer deficit
+    int (n_cl - n_dg) dz exceeds 10 % of the classical carrier sheet int n_cl dz (the denominator is
+    the profile's whole carrier sheet, not its excess over a background, so a flat profile far from
+    any wall does not warn). With conserve_charge=True a rescale factor more than 10 % from 1 is
+    reported (AdvisoryWarning): the lost interface charge is then spread uniformly over the profile,
+    which moves charge to the far side of a thin film instead of pushing it ~1 nm off the wall.
+    MEASURED (the classical profile of a gated 6 nm degenerate film at +5 V, tests/test_density_gradient.py; gamma =
+    1, wall at the gate face): the classical accumulation peak at the wall is deleted (sheet 2.26e18 ->
+    1.44e18 m^-2) and conserve_charge raises the film centre by 49 %. For a degenerate film between oxides use the self-consistent
+    models instead: carriers.sp_dual_gate.DualGateSchrodingerPoisson (both faces gated) or
+    SchrodingerPoissonCarrier (one gate), or the in-Newton equilibrium density gradient
+    (carriers.physics_equilibrium_dg) inside the device solve. guard=False (opt-out) skips the three warnings,
+    for a caller that evaluates the closure on a profile whose potential is ALREADY self-consistent with the
+    density gradient (a fixed-point check of an in-Newton DG solution, where the frozen potential is exact).
 
     The closure is BOLTZMANN (n = n_cl exp(Lambda/V_t)); on a degenerate profile `gamma` is a
     fitted parameter absorbing the generalized-Einstein factor g -- see the module header
@@ -304,13 +356,14 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
         raise ValueError("density_gradient: z_m and n_cl_m3 must be matching 1D arrays")
     if np.any(n_cl <= 0.0):
         raise ValueError("density_gradient: n_cl_m3 must be > 0 everywhere")
-    if hard_wall not in ("left", "right"):
-        raise ValueError("density_gradient: hard_wall must be 'left' or 'right'")
+    if hard_wall not in ("left", "right", "both"):
+        raise ValueError("density_gradient: hard_wall must be 'left', 'right' or 'both'")
     if gamma == 0.0:
         return n_cl.copy()
     from scipy.integrate import solve_bvp
     from scipy.interpolate import interp1d
 
+    both = hard_wall == "both"
     flip = hard_wall == "right"
     zz = z[::-1] * -1.0 if flip else z                       # canonical: wall at zz[0]
     nn = n_cl[::-1] if flip else n_cl
@@ -333,10 +386,15 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
         r = r_of_x(x)
         return np.vstack([y[1], y[0] * np.log(np.maximum(y[0] ** 2, 1e-12) / r)])
 
+    # v0.16: 'both' -> u = 0 at the far end too (a second insulating wall)
+    v_end = 0.0 if both else float(np.sqrt(nn[-1] / n_ref))
+
     def bc(ya, yb):
-        return np.array([ya[0], yb[0] - np.sqrt(nn[-1] / n_ref)])
+        return np.array([ya[0], yb[0] - v_end])
 
     v0 = np.sqrt(nn / n_ref) * np.tanh(x_grid)               # dead-layer-shaped initial guess
+    if both:
+        v0 = v0 * np.tanh(x_grid[-1] - x_grid)
     y0 = np.vstack([v0, np.gradient(v0, x_grid)])
     sol = solve_bvp(rhs, bc, x_grid, y0, tol=tol, max_nodes=max_nodes)
     if not sol.success:
@@ -345,6 +403,43 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
     n_dg = np.maximum(u, 0.0) ** 2
     if flip:
         n_dg = n_dg[::-1]
+    if guard:
+        _dg_thin_film_guard(z, n_cl, n_dg, lq, conserve_charge)
     if conserve_charge:
         n_dg = n_dg * (trapz(n_cl, z) / max(trapz(n_dg, z), 1e-300))
     return n_dg
+
+
+# v0.16: the thresholds of dg_correct_density_1d's thin-film guard (docstring)
+DG_GUARD_MIN_SPAN_LQ = 10.0          # profile span below this many L_q -> UnreliableResultWarning
+DG_GUARD_MAX_DEFICIT = 0.10          # deficit / classical sheet above this -> UnreliableResultWarning
+DG_GUARD_MAX_RESCALE = 0.10          # conserve_charge factor further than this from 1 -> AdvisoryWarning
+
+
+def _dg_thin_film_guard(z, n_cl, n_dg, lq: float, conserve_charge: bool) -> None:
+    """The thin-film guard of dg_correct_density_1d (docstring): span, deficit, rescale."""
+    import warnings
+    from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
+    span = float(abs(z[-1] - z[0]))
+    sheet_cl = float(abs(trapz(n_cl, z)))
+    sheet_dg = float(abs(trapz(n_dg, z)))
+    deficit = (sheet_cl - sheet_dg) / max(sheet_cl, 1e-300)
+    if span < DG_GUARD_MIN_SPAN_LQ * lq or deficit > DG_GUARD_MAX_DEFICIT:
+        warnings.warn(
+            "dg_correct_density_1d: the frozen-potential density-gradient correction is outside its "
+            "range here (profile span {:.3g} L_q, limit {:.3g}; dead-layer deficit {:.1%} of the classical "
+            "carrier sheet, limit {:.0%}, L_q = {:.3g} nm). Without Poisson feedback it deletes the "
+            "interface charge instead of moving it off the wall. For a degenerate film between oxides use "
+            "carriers.sp_dual_gate.DualGateSchrodingerPoisson / SchrodingerPoissonCarrier, or the in-Newton "
+            "equilibrium density gradient (carriers.physics_equilibrium_dg).".format(
+                span / lq, DG_GUARD_MIN_SPAN_LQ, deficit, DG_GUARD_MAX_DEFICIT, lq * 1e9),
+            UnreliableResultWarning, stacklevel=3)
+    if conserve_charge:
+        factor = sheet_cl / max(sheet_dg, 1e-300)
+        if abs(factor - 1.0) > DG_GUARD_MAX_RESCALE:
+            warnings.warn(
+                "dg_correct_density_1d(conserve_charge=True): the whole profile is rescaled by {:.4f} "
+                "(more than {:.0%} from 1), which spreads the dead-layer charge uniformly over the profile "
+                "(to the far side of a thin film) rather than moving it off the wall.".format(
+                    factor, DG_GUARD_MAX_RESCALE),
+                AdvisoryWarning, stacklevel=3)

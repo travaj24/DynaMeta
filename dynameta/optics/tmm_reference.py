@@ -297,14 +297,15 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
                               return_names=False):
     """Build a LayeredStack from a Design (+ optionally the bridge's eps_by_region for a graded
     carrier region). Uniform layers -> scalar slabs; a layer whose eps_by_region entry is a
-    gridded EpsField -> sliced via slice_eps_field; a UNIFORM eps_by_region entry (an
+    gridded EpsField -> sliced via slice_layer_eps_field (axes in nm; raises unless the slabs sum
+    to the layer thickness); a UNIFORM eps_by_region entry (an
     effect-modulated or uniform-carrier eps) -> one slab at that value (it used to fall through
     to the raw material eps, silently dropping uniform modulation -- the PCM/LC/thermo effects
     path). A tensor entry raises (the scalar TMM cannot represent anisotropy -- use the FEM); a
     layer with material inclusions raises (laterally structured -> FEM/RCWA, not this
     extractor). Slabs are ordered superstrate-side first (the Stack lists bottom->top, so
     reversed)."""
-    from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
+    from dynameta.core.layered import LayeredStack, LayeredSlab, slice_layer_eps_field
     # 2026-11-02: Stack.features were silently dropped here (make_layered_tmm_solver's R/T with a
     # metal via was bit-identical to the via-free stack); tapers are inclusions, refused below anyway
     require_supported_geometry(design, "layered_stack_from_design (TMM)")
@@ -320,7 +321,9 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
                              "(anisotropic effect); the scalar TMM cannot represent it -- use "
                              "the FEM solver.".format(L.name))
         if ef is not None and not getattr(ef, "is_uniform", True):
-            _sl = list(reversed(slice_eps_field(ef, 1.0 / S, n_slices=n_slices)))
+            # the slab total must equal the layer thickness (a unit slip in the field's axes
+            # used to thin the layer away silently)
+            _sl = list(reversed(slice_layer_eps_field(ef, L, 1.0 / S, n_slices=n_slices)))
             slabs_top_down.extend(_sl)
             names_top_down.extend([L.name] * len(_sl))
         elif ef is not None:
@@ -342,7 +345,7 @@ def make_layered_tmm_solver(*, n_slices=None):
     each (bias, wavelength) with the layered TMM instead of the FEM -- the FIRST concrete
     wiring of the pluggable seam (a future RCWA backend plugs in the same way). It assembles
     a LayeredStack from the Design + the bridge's `eps_by_region` (slicing a graded carrier
-    region via slice_eps_field) and runs TmmLayeredSolver. Laterally-UNIFORM stacks only -- a
+    region via slice_layer_eps_field) and runs TmmLayeredSolver. Laterally-UNIFORM stacks only -- a
     layer with inclusions, or a laterally-structured eps_by_region entry, raises (use the FEM
     or RCWA).
 
@@ -370,4 +373,7 @@ def make_layered_tmm_solver(*, n_slices=None):
         return res
 
     _solve.cache_fingerprint = "tmm(n_slices={})".format(n_slices)
+    # capability flag read by run_pipeline: this solver slices a carrier field on its native
+    # (non-uniform) z grid exactly, one slab per native interval
+    _solve.native_carrier_grid = True
     return _solve

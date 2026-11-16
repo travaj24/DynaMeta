@@ -173,7 +173,7 @@ def test_gate1_local_limit_2d():
     p0 = hf.HydroParams(p.eps_inf, p.wp, p.gamma, p.beta * 1e-4)
     r_coupled = hf.scattering_2d(mesh, om, p0, local=False, flux_radius=0.7 * Rp)
     assert r_coupled.enhancement == pytest.approx(r_local.enhancement, rel=5e-2)
-    assert r_coupled.P_abs == pytest.approx(r_local.P_abs, rel=8e-2)
+    assert r_coupled.P_abs == pytest.approx(r_local.P_abs, rel=8e-2, abs=0)
 
 
 # ================================================================================================
@@ -223,7 +223,7 @@ def test_f4_host_local_limit_and_guards():
                                    flux_radius=0.7 * Rp)
         r_coup = hf.scattering_2d(mesh, om, p0, local=False, eps_host=eps_host,
                                   flux_radius=0.7 * Rp)
-        assert r_coup.P_abs == pytest.approx(r_local.P_abs, rel=1e-6)
+        assert r_coup.P_abs == pytest.approx(r_local.P_abs, rel=1e-6, abs=0)
         assert r_coup.enhancement == pytest.approx(r_local.enhancement, rel=1e-4)
     for bad in (complex(2.0, 0.3), -1.0, 0.0):
         with pytest.raises(ValueError, match="LOSSLESS dielectric"):

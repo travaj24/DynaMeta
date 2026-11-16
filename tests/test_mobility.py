@@ -11,9 +11,9 @@ from dynameta.carriers.mobility import (
 
 def test_caughey_thomas_zero_field_recovers_mu_low():
     mu_low = 0.05
-    assert caughey_thomas(mu_low, 0.0, 1e5, beta=2.0) == pytest.approx(mu_low, rel=1e-15)
+    assert caughey_thomas(mu_low, 0.0, 1e5, beta=2.0) == pytest.approx(mu_low, rel=1e-15, abs=0)
     # v_sat = inf is the off-switch -> constant mu_low at any field
-    assert caughey_thomas(mu_low, 1e8, float("inf"), beta=2.0) == pytest.approx(mu_low, rel=1e-15)
+    assert caughey_thomas(mu_low, 1e8, float("inf"), beta=2.0) == pytest.approx(mu_low, rel=1e-15, abs=0)
 
 
 def test_drift_velocity_saturates_to_vsat():
@@ -30,7 +30,7 @@ def test_canali_beta2_closed_form():
     mu_low, v_sat, E = 0.04, 2.0e5, 3.0e6
     x = mu_low * E / v_sat
     expect = mu_low / math.sqrt(1.0 + x * x)                     # beta=2 -> 1/sqrt(1+x^2)
-    assert float(caughey_thomas(mu_low, E, v_sat, beta=2.0)) == pytest.approx(expect, rel=1e-14)
+    assert float(caughey_thomas(mu_low, E, v_sat, beta=2.0)) == pytest.approx(expect, rel=1e-14, abs=0)
 
 
 def test_masetti_monotone_and_dilute_limit():
@@ -50,7 +50,7 @@ def test_devsim_string_matches_numpy_smoothed():
         val = eval(pyexpr, {"__builtins__": {}}, env)           # noqa: S307 (trusted, our own string)
         Eabs = math.sqrt(E * E + es * es)
         ref = mu_low / (1.0 + (mu_low * Eabs / v_sat) ** beta) ** (1.0 / beta)
-        assert val == pytest.approx(ref, rel=1e-12)
+        assert val == pytest.approx(ref, rel=1e-12, abs=0)
     # smoothed magnitude -> abs() form (caughey_thomas) for E >> e_smooth
     big = 1.0e6
     sm = mu_low / (1.0 + (mu_low * math.sqrt(big * big + es * es) / v_sat) ** beta) ** (1.0 / beta)

@@ -62,10 +62,24 @@ optics.nonlocal_tmm + optics.hydro_fem + optics.hydro_fdtd (hydrodynamic non-loc
 response), optics.harmonics, optics.hot_carrier, and dynameta.analysis (Fano / Lorentzian
 fitting, Kramers-Kronig consistency checks).
 
+v0.16 adds the gated thin-film device path: carriers.sp_dual_gate (DualGateSchrodingerPoisson /
+GateStack / OxideBarrier: a film gated through oxide on both faces, with optional finite barriers,
+interface traps and exchange-correlation), carriers.kane_band (a nonparabolic Kane band in the
+DEVSIM electrostatics; materials.KaneBand), the opt-in in-Newton equilibrium density gradient
+(carriers.density_gradient.EquilibriumDensityGradient), lateral gate leakage with the sheet IR drop
+(carriers.gate_leakage), charge-only film interface traps (carriers.physics_traps.FilmInterfaceTraps),
+the screening-length DEVSIM mesh grading and the native carrier z grid on the layered-optics path,
+optics.quantum_film (the nonlocal quantum response of a thin film: QuantumFilm, the equivalent
+uniaxial layer) and optics.quantum_film_pipeline (QuantumFilmOptical), thin-film damping and
+background models (materials.BoundaryScattering, BandFillingBackground), optics.fem_2d_tm (an
+independent 2-D periodic TM finite-element referee, H_y on a corner-graded mesh) and
+optics.fem_2d_tm_hydro (its hydrodynamic film extension), and dynameta.measurement (pupil,
+parameter and patch averaging of a modelled spectrum, instrument functions).
+
 (Module map refreshed per audit 6.3; v0.8/v0.9 gap closed per audit R-9.)
 """
 
-__version__ = "0.15.1"
+__version__ = "0.16.0"
 
 # Geometry + materials data model (lightweight)
 # Windows: expose the pip 'tbb' wheel's runtime DLLs (<prefix>/Library/bin) so numba's
@@ -87,6 +101,8 @@ from dynameta.materials import (
     Material, MaterialRegistry, OpticalModel, ConstantOptical, TabulatedOptical,
     DrudeOptical, TransportModel, TrapSpec, fit_drude_params,
     KaneOpticalMass, MatthiessenGamma,
+    KaneBand, BoundaryScattering, BandFillingBackground, TabulatedBackground,
+    fuchs_sondheimer_factor, fs_effective_rate,
 )
 from dynameta.sweep import Sweep, BiasPoint
 # Bridge core (data + alignment + bridge; still no devsim/ngsolve)
@@ -117,6 +133,8 @@ __all__ = [
     "Material", "MaterialRegistry", "OpticalModel", "ConstantOptical",
     "TabulatedOptical", "DrudeOptical", "TransportModel", "TrapSpec", "fit_drude_params",
     "KaneOpticalMass", "MatthiessenGamma",
+    "KaneBand", "BoundaryScattering", "BandFillingBackground", "TabulatedBackground",
+    "fuchs_sondheimer_factor", "fs_effective_rate",
     # sweep
     "Sweep", "BiasPoint",
     # bridge core

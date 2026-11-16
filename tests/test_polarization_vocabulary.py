@@ -450,27 +450,27 @@ def test_six_representative_valid_calls_are_unchanged():
 
     # (1) {'s','p'} -- tmm_reference at oblique incidence
     R, T, A = stack_rta(1.0, layers, 1.5, LAM, theta_deg=20.0, pol="p")
-    assert R == pytest.approx(0.09263059330420648, rel=rel)
-    assert T == pytest.approx(0.8907963770833686, rel=rel)
-    assert A == pytest.approx(0.016573029612425016, rel=rel)
+    assert R == pytest.approx(0.09263059330420648, rel=rel, abs=0)
+    assert T == pytest.approx(0.8907963770833686, rel=rel, abs=0)
+    assert A == pytest.approx(0.016573029612425016, rel=rel, abs=0)
 
     # (2) {'s','p'} -- the nonlocal/hydrodynamic twin (the V-3 _admittance pair)
     res = nt.stack_rt(OMEGA, [nt.DielectricLayer(4.0 + 0.1j, 100e-9)], pol="s", n_sub=1.5,
                       theta_rad=0.4)
-    assert res.R == pytest.approx(0.18095391367699734, rel=rel)
-    assert res.T == pytest.approx(0.7954599176077697, rel=rel)
-    assert res.r == pytest.approx(-0.4111491838484168 + 0.10913414817451986j, rel=rel)
+    assert res.R == pytest.approx(0.18095391367699734, rel=rel, abs=0)
+    assert res.T == pytest.approx(0.7954599176077697, rel=rel, abs=0)
+    assert res.r == pytest.approx(-0.4111491838484168 + 0.10913414817451986j, rel=rel, abs=0)
 
     # (3) {'s','p'} -- the complex-omega S-matrix
     sm = layered_smatrix_complex(OMEGA, [(4.0 + 0.1j, 200e-9)], pol="p", theta_rad=0.4, n_sub=1.5)
-    assert sm.R == pytest.approx(0.1612626538609237, rel=rel)
-    assert sm.r == pytest.approx(-0.39439740946364943 - 0.07558662096751108j, rel=rel)
+    assert sm.R == pytest.approx(0.1612626538609237, rel=rel, abs=0)
+    assert sm.r == pytest.approx(-0.39439740946364943 - 0.07558662096751108j, rel=rel, abs=0)
 
     # (4) {'s','p'} -- the surface-SHG closed form (the silent p-pol fallthrough site)
     shg = rudnick_stern_flat_shg(800e-9, 45.0, -20 + 1j, -5 + 0.5j, 1e-20, polarization="p")
-    assert shg["S_up"] == pytest.approx(3.049357811774525e-34, rel=rel)
+    assert shg["S_up"] == pytest.approx(3.049357811774525e-34, rel=rel, abs=0)
     assert shg["E_perp_in"] == pytest.approx(-0.06255598764049232 - 0.023343669336714817j,
-                                             rel=rel)
+                                             rel=rel, abs=0)
     assert rudnick_stern_flat_shg(800e-9, 45.0, -20 + 1j, -5 + 0.5j, 1e-20,
                                   polarization="s")["S_up"] == 0.0
 
@@ -495,16 +495,16 @@ def test_six_representative_valid_calls_are_unchanged():
     # takes the first branch, every >= 5.30 resolve the second (measured 2026-07-29:
     # 5.30/5.31 agree across CI+dev platforms to rel < 4e-14 against these numbers).
     if lum_530:
-        assert float(Rg) == pytest.approx(0.10697475359703666, rel=1e-11)
-        assert float(Tg) == pytest.approx(0.89302524640296754, rel=1e-11)
+        assert float(Rg) == pytest.approx(0.10697475359703666, rel=1e-11, abs=0)
+        assert float(Tg) == pytest.approx(0.89302524640296754, rel=1e-11, abs=0)
     else:
-        assert float(Rg) == pytest.approx(0.10697476345509854, rel=1e-11)
-        assert float(Tg) == pytest.approx(0.8930252365449003, rel=1e-11)
+        assert float(Rg) == pytest.approx(0.10697476345509854, rel=1e-11, abs=0)
+        assert float(Tg) == pytest.approx(0.8930252365449003, rel=1e-11, abs=0)
 
     Rb, Tb = berreman_RT([(np.diag([4.0 + 0j, 4.4 + 0j, 4.0 + 0j]), 250e-9)], 1.31e-6,
                          n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j, angle=0.2, row=0)
-    assert float(Rb) == pytest.approx(0.12139127031149236, rel=1e-11)
-    assert float(Tb) == pytest.approx(0.8786087296885077, rel=1e-11)
+    assert float(Rb) == pytest.approx(0.12139127031149236, rel=1e-11, abs=0)
+    assert float(Tb) == pytest.approx(0.8786087296885077, rel=1e-11, abs=0)
 
 
 # ------------------------------------------------------------------------------------------------

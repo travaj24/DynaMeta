@@ -21,11 +21,14 @@ GATE C (OOP tensor specialist vs ANALYTIC): a uniform GYROTROPIC slab (eps_xy = 
         J = [[s, -i d], [i d, s]], s = (r+ + r-)/2, d = (r+ - r-)/2, with r+- the scalar
         Airy reflections at n+- = sqrt(eps_r -+ g) (eps.(x +- i y) = (eps_r -+ g)(x +- i y)
         -- hand-derived eigenpair; < 1e-3, the documented PMM OOP floor).
-GATE D (scope guards): partial-y rectangle, structured-grid EpsField, and incidence_side=
-        'bottom' all raise (conical is NO LONGER a guard -- GATE F solves it).
+GATE D (scope guards): a partial-y rectangle and incidence_side='bottom' raise; a laterally
+        structured gridded EpsField on a full-period x grid is REFUSED under
+        lateral_partition=None (naming the keyword) and ACCEPTED by the default (v0.16; conical
+        is NO LONGER a guard either -- GATE F solves it).
 GATE E (per-layer absorption): PMM at RCWA-bridge parity -- budget closure + the RCWA split
         agreeing with the PMM reference on a lossy metal-grating / lossy-spacer stack (TE tight;
-        TM at n_orders 256, past Laurent's pre-asymptotic overshoot -- rewritten 2026-11-02).
+        TM at n_orders 256 -- rewritten 2026-11-02; since v0.16 the TM leg runs the default
+        'li' rule with the bridge's face-flux split).
 GATE F (CONICAL s/p synthesis, audit 8.1-1 / consumer-gap B): the bridge synthesizes the
         rotated s/p totals + co-pol r/t from lumenairy 5.22 per_order_amplitudes (the native
         lab rows are s/p mixtures at phi != 0). Three oracles: (1) a UNIFORM slab at conical
@@ -140,6 +143,10 @@ def main():
     #       raster new  4.8e-5   1.7e-5   8.3e-6   (S = 128 / 256 / 384, max(128, 8 N))
     #       raster old  4.8e-5   4.6e-3   3.1e-3   (S = 128 / 129 / 193 -- duty 0.5039 at 129:
     #                                               dR/d(duty)_TE 1.19 x 0.00388 = 4.6e-3, exact)
+    #       raster v0.16 3.5e-5  4.5e-6   1.4e-6   (the default since v0.16: area-weighted node-
+    #                                               lattice raster, S >= 8192 on a 1-D stack;
+    #                                               the 'raster new' row is now raster_sampling=
+    #                                               'point')
     #   TM  n_orders      32       64       128
     #       li, raster  4.7e-3   1.7e-3   8.0e-4   (algebraic, ~N^-1.15 fitted over 256..768)
     #       analytic L  3.0e-2   9.1e-3   6.5e-3   (overshoots: R 0.478 -> 0.518 -> 0.515 ... 0.509
@@ -173,7 +180,15 @@ def main():
     tm_n = (32, 64, 128)
     e_li = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation="li")(*args_tm).R - ref_tm)
             for n in tm_n]
-    e_lau = [abs(make_lumenairy_rcwa_solver(n_orders=n)(*args_tm).R - ref_tm) for n in tm_n]
+    # v0.16: the bridge default is formulation='auto', which resolves this TM metal cell to 'li';
+    # the Laurent leg is now spelled out (and its once-per-solver AdvisoryWarning silenced: the
+    # comparison is the point here)
+    import warnings
+    from dynameta.warning_types import AdvisoryWarning
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", AdvisoryWarning)
+        e_lau = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation="laurent")(*args_tm).R
+                     - ref_tm) for n in tm_n]
     rate = float(np.log(e_li[0] / e_li[-1]) / np.log(tm_n[-1] / tm_n[0]))
     print("[lpb]   TM |R - PMM| n_orders 32/64/128: li (raster) {} (rate N^-{:.2f}) | Laurent "
           "(analytic, NOT gated as convergence) {}".format(
@@ -227,17 +242,26 @@ def main():
             None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     except ValueError:
         g_d += 1
-    # genuinely x-VARYING values: laterally-uniform grids are in scope (they slice to
-    # uniform slabs); only true lateral structure must raise
-    grid = EpsField(values_zyx=np.broadcast_to(2.0 + 0.1 * np.arange(8.0),
-                                               (3, 1, 8)).astype(complex),
+    # a laterally structured gridded field on an x grid covering the FULL period (v0.16: the
+    # bridge partitions it, lateral_partition='auto' the default): lateral_partition=None must
+    # refuse it with the reason (the v0.15.1 behaviour, kept as the opt-out), and the default
+    # must accept it and return a passive, finite result. (Until v0.16 this probe asserted that
+    # ANY structured field raises -- its 8 x samples at 0..7 nm covered 2 % of the cell and it
+    # passed only through the later x-coverage guard.)
+    xg = np.arange(16) * (PER * 1e9 / 16)
+    grid = EpsField(values_zyx=np.broadcast_to(2.0 + 0.1 * np.arange(16.0),
+                                               (3, 1, 16)).astype(complex),
                     z_axis_u=np.array([0.0, 50.0, 100.0]),
-                    x_axis_u=np.arange(8.0), y_axis_u=np.array([0.0]))
+                    x_axis_u=xg, y_axis_u=np.array([0.0]))
+    d_grid = _design([Layer("a", 100e-9, "hi")], pol="y")
     try:
-        pmm(_design([Layer("a", 100e-9, "hi")], pol="y"), None, {"a": grid}, LAM,
-            1.0 + 0j, 1.5 + 0j)
-    except ValueError:
-        g_d += 1
+        make_lumenairy_pmm_solver(degree=14, n_orders=15, lateral_partition=None)(
+            d_grid, None, {"a": grid}, LAM, 1.0 + 0j, 1.5 + 0j)
+    except ValueError as exc:
+        g_d += int("lateral_partition" in str(exc))
+    r_grid = pmm(d_grid, None, {"a": grid}, LAM, 1.0 + 0j, 1.5 + 0j)
+    g_d += int(bool(np.isfinite(r_grid.R) and 0.0 < r_grid.R < 1.0
+                    and 0.0 <= r_grid.R + r_grid.T <= 1.0 + 1e-9))
     # incidence_side='bottom' still raises (the bridge solves TOP incidence only)
     try:
         d_bot = _design(lays, pol="y")
@@ -245,9 +269,10 @@ def main():
         pmm(d_bot, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     except NotImplementedError:
         g_d += 1
-    g_d = bool(g_d == 3)
+    g_d = bool(g_d == 4)
     ok = ok and g_d
-    print("[lpb] GATE D: partial-y / gridded-structured / conical guards -> {}".format(
+    print("[lpb] GATE D: partial-y / lateral_partition=None / default-accepts / bottom guards "
+          "-> {}".format(
         "PASS" if g_d else "FAIL"), flush=True)
 
     # ---- GATE E: per-layer absorption parity (audit 8.1-3) -- CROSS-ENGINE oracle:
@@ -284,6 +309,12 @@ def main():
     # printed, and a TE leg (Laurent valid) is the tight cross-engine check: |d| 5e-5 at n = 32
     # (RCWA's split is quadrature-limited near 1e-4 in TE: 9e-5 at n = 96). A key swap or a
     # mis-normalized map is off by >= 0.02 (TM) / 0.24 (TE) -- direction-sensitive either way.
+    # v0.16: the RCWA default resolves this TM metal cell to formulation='li' (analytic shapes)
+    # and the bridge then attributes each layer its POYNTING-FLUX difference across its faces
+    # (rcwa_backend._face_flux_split; the 'li wanders' above was lumenairy's volume integral,
+    # inconsistent with the inverse-rule field and no longer used for an 'li' solve). Distance
+    # to the degree-24 PMM split: 8.9e-4 at n_orders 64, 3.8e-4 at 256 (v0.15.1's Laurent volume
+    # split: 0.010 / 1.2e-3). TE is unchanged (Laurent, lumenairy's split, 2.1e-4).
     def _split_dist(r_a, r_b):
         return max(abs(r_a.per_region_absorption[k] - r_b.per_region_absorption[k])
                    for k in ("grating", "spacer"))
@@ -302,8 +333,8 @@ def main():
                and dists[1] < 3e-3 and dist_te < 3e-4)
     ok = ok and g_e
     print("[lpb] GATE E: PMM per-layer absorption -- budget closure {:.1e}; PMM degree-"
-          "stability {:.1e}; RCWA split vs PMM: TM n_orders 64 {:.3f} (Laurent overshoot, "
-          "printed) -> 256 {:.1e} (< 3e-3); TE n_orders 32 {:.1e} (< 3e-4) [PMM TM grating/"
+          "stability {:.1e}; RCWA split vs PMM: TM n_orders 64 {:.1e} (printed) -> 256 "
+          "{:.1e} (< 3e-3); TE n_orders 32 {:.1e} (< 3e-4) [PMM TM grating/"
           "spacer = {:.4f}/{:.4f}] -> {}".format(
               close_p, self_conv, dists[0], dists[1], dist_te,
               r_p.per_region_absorption.get("grating", float("nan")) if keys_ok else float("nan"),

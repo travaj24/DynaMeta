@@ -117,13 +117,13 @@ def test_from_sidewall_angle_matches_house_convention():
 def test_from_sidewall_angle_other_kinds():
     d = 100e-9 * math.tan(math.radians(5.0))
     c = Taper.from_sidewall_angle(Circle(0.0, 0.0, 80e-9), 100e-9, 5.0).bottom
-    assert c.radius_m == pytest.approx(80e-9 - d, rel=1e-14)
+    assert c.radius_m == pytest.approx(80e-9 - d, rel=1e-14, abs=0)
     e = Taper.from_sidewall_angle(Ellipse(0.0, 0.0, 80e-9, 50e-9), 100e-9, 5.0).bottom
-    assert (e.rx_m, e.ry_m) == pytest.approx((80e-9 - d, 50e-9 - d), rel=1e-14)
+    assert (e.rx_m, e.ry_m) == pytest.approx((80e-9 - d, 50e-9 - d), rel=1e-14, abs=0)
     top = RegularPolygon(0.0, 0.0, 80e-9, 6, 10.0)
     h = Taper.from_sidewall_angle(top, 100e-9, 5.0).bottom
     # exact parallel offset: the APOTHEM moves in by d
-    assert h.radius_m * math.cos(math.pi / 6) == pytest.approx(80e-9 * math.cos(math.pi / 6) - d, rel=1e-13)
+    assert h.radius_m * math.cos(math.pi / 6) == pytest.approx(80e-9 * math.cos(math.pi / 6) - d, rel=1e-13, abs=0)
     assert (h.n_sides, h.rotation_deg) == (6, 10.0)
     with pytest.raises(ValueError, match="explicitly"):
         Taper.from_sidewall_angle(Polygon([(0, 0), (1e-7, 0), (0, 1e-7)]), 100e-9, 2.0)
@@ -432,8 +432,12 @@ def test_plain_design_results_unchanged_rcwa_bridge():
     # is byte-identity of the plain-design raster path). Since v0.13.0 the default is 'auto', which
     # solves this rectangle pillar analytically (R 0.19094726805155943 -- 8.3e-5 from the S = 128
     # raster, the raster's edge-quantization error; 2026-11-02). n_orders 5 <= 16, so the
-    # 2026-11-02 raster lattice max(128, 8 N) is the same S = 128 as at 7bfea2e.
-    r = make_lumenairy_rcwa_solver(n_orders=5, inclusion_model="raster")(
+    # 2026-11-02 raster lattice max(128, 8 N) is the same S = 128 as at 7bfea2e. v0.16: the
+    # point raster is raster_sampling='point' (explicit here); the new default area-weighted
+    # node-lattice raster gives R 0.19092953372781601 / T 0.7791819309495345 on this pillar
+    # (1.8e-5 from the analytic layer, against 8.3e-5 for the point raster). The pillar is a
+    # dielectric in TE, so formulation 'auto' resolves to 'laurent' (the v0.15.1 rule).
+    r = make_lumenairy_rcwa_solver(n_orders=5, inclusion_model="raster", raster_sampling="point")(
         _pillar(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     assert (r.R, r.T) == pytest.approx((0.1910304737839642, 0.7791097782748155), abs=1e-12)
     # the phase is in DEGREES: one shared abs=1e-12 bounded it at 1.7e-14 rad, below the BLAS

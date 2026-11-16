@@ -332,7 +332,7 @@ class TestF3ChannelPlan:
         amp = _edfa(bins=4)
         pl, r = amp.channel_plan(), _edfa(bins=4).solve(n_nodes=41)
         assert isinstance(pl, ChannelPlan)
-        assert np.allclose(pl.lambda_m, r.lambda_m) and np.allclose(pl.direction, r.u)
+        assert np.allclose(pl.lambda_m, r.lambda_m, atol=0) and np.allclose(pl.direction, r.u)
         assert list(pl.kind) == list(r.kind) and np.array_equal(pl.is_ase, r.is_ase)
         # and the forward-ASE spectrum reached through the plan matches noise.py's own extraction
         sp = output_ase_spectrum(r, "fwd", signal_lambda_m=1.560e-6)
@@ -432,7 +432,7 @@ class TestF2TransientAse:
         tr = simulate_transient(amp, t, n_nodes=61, store_profiles=True,
                                 signal_drive=lambda tt: np.array([2.0 * sig]))
         fr = tr.frame_as_steady(len(t) - 1)
-        assert float(fr.power_W[fr.kind.index("signal"), 0]) == pytest.approx(2.0 * sig, rel=1e-15)
+        assert float(fr.power_W[fr.kind.index("signal"), 0]) == pytest.approx(2.0 * sig, rel=1e-15, abs=0)
         assert float(fr.signal_gain_dB[0]) == float(tr.signal_gain_dB[-1, 0])
         driven = FiberAmplifier(ER, fib, [Pump(0.3, 0.980e-6)], [Signal(2.0 * sig, 1.560e-6)],
                                 AseBand(1.52e-6, 1.575e-6, 12)).solve(n_nodes=61)
@@ -468,7 +468,7 @@ class TestF2TransientAse:
 class TestF4StokesCeiling:
     def test_single_pump_is_the_identity(self):
         pumps = [Pump(0.25, 0.980e-6)]
-        assert effective_pump_lambda_m(pumps) == pytest.approx(0.980e-6, rel=1e-15)
+        assert effective_pump_lambda_m(pumps) == pytest.approx(0.980e-6, rel=1e-15, abs=0)
 
     def test_photon_weighted_mean_lies_between_the_two_wavelengths(self):
         """The defect: the ceiling was read from pumps[0] alone, so a 915+976 nm Yb pump reported
@@ -478,14 +478,14 @@ class TestF4StokesCeiling:
         eff = effective_pump_lambda_m(pumps)
         assert 0.915e-6 < eff < 0.976e-6
         # power-weighted HARMONIC mean, verified against the closed form
-        assert eff == pytest.approx(2.0 / (1.0 / 0.915e-6 + 1.0 / 0.976e-6), rel=1e-14)
+        assert eff == pytest.approx(2.0 / (1.0 / 0.915e-6 + 1.0 / 0.976e-6), rel=1e-14, abs=0)
         ceil = stokes_limit(eff, 1.060e-6)
         assert stokes_limit(0.915e-6, 1.060e-6) < ceil < stokes_limit(0.976e-6, 1.060e-6)
 
     def test_order_independence(self):
         a = effective_pump_lambda_m([Pump(0.3, 0.915e-6), Pump(0.7, 0.976e-6)])
         b = effective_pump_lambda_m([Pump(0.7, 0.976e-6), Pump(0.3, 0.915e-6)])
-        assert a == pytest.approx(b, rel=1e-15)
+        assert a == pytest.approx(b, rel=1e-15, abs=0)
 
     def test_zero_pump_is_nan_not_a_crash(self):
         assert math.isnan(effective_pump_lambda_m([Pump(0.0, 0.98e-6)]))
@@ -503,7 +503,7 @@ class TestF5F8Detection:
         b = detection_noise(r, 1.560e-6, **kw)
         assert b.var_thermal == 0.0
         assert b.var_total == b.var_optical
-        assert b.var_total == pytest.approx(b.var_shot + b.var_sig_sp + b.var_sp_sp, rel=1e-15)
+        assert b.var_total == pytest.approx(b.var_shot + b.var_sig_sp + b.var_sp_sp, rel=1e-15, abs=0)
         assert b.apd_gain == 1.0 and b.apd_excess_noise_F == 1.0
 
     def test_dark_current_is_reachable_and_correct(self):
@@ -514,14 +514,14 @@ class TestF5F8Detection:
         i_d = 1e-6
         a, b = detection_noise(r, 1.560e-6, **kw), detection_noise(r, 1.560e-6, dark_current_A=i_d,
                                                                   **kw)
-        assert b.var_shot - a.var_shot == pytest.approx(2.0 * Q_E * i_d * 10e9, rel=1e-12)
+        assert b.var_shot - a.var_shot == pytest.approx(2.0 * Q_E * i_d * 10e9, rel=1e-12, abs=0)
 
     def test_thermal_terms_match_their_closed_forms(self):
         r, kw = self._base()
         b = detection_noise(r, 1.560e-6, tia_current_noise_A_rtHz=12e-12, **kw)
-        assert b.var_thermal == pytest.approx((12e-12) ** 2 * 10e9, rel=1e-14)
+        assert b.var_thermal == pytest.approx((12e-12) ** 2 * 10e9, rel=1e-14, abs=0)
         j = detection_noise(r, 1.560e-6, load_ohm=50.0, temperature_K=300.0, **kw)
-        assert j.var_thermal == pytest.approx(4.0 * KB * 300.0 * 10e9 / 50.0, rel=1e-14)
+        assert j.var_thermal == pytest.approx(4.0 * KB * 300.0 * 10e9 / 50.0, rel=1e-14, abs=0)
 
     def test_noise_figure_is_independent_of_the_receiver(self):
         """The amplifier's NF must not depend on what detects it (the audit-S3-10 principle). Only
@@ -585,9 +585,9 @@ class TestF5F8Detection:
                               **kw).var_total == a.var_total
         M, F = 8.0, 3.0
         b = detection_noise(r, 1.560e-6, apd_gain=M, apd_excess_noise_F=F, **kw)
-        assert b.var_shot == pytest.approx(a.var_shot * M * M * F, rel=1e-12)
-        assert b.var_sig_sp == pytest.approx(a.var_sig_sp * M * M, rel=1e-12)
-        assert b.i_signal_A == pytest.approx(a.i_signal_A * M, rel=1e-12)
+        assert b.var_shot == pytest.approx(a.var_shot * M * M * F, rel=1e-12, abs=0)
+        assert b.var_sig_sp == pytest.approx(a.var_sig_sp * M * M, rel=1e-12, abs=0)
+        assert b.i_signal_A == pytest.approx(a.i_signal_A * M, rel=1e-12, abs=0)
 
     def test_apd_is_validated(self):
         r, kw = self._base()
@@ -614,8 +614,8 @@ class TestF1ErbiumCBand:
         old = erbium(cband_refit=False)
         assert not np.array_equal(erbium().sigma_a.sigma(self.LAM), old.sigma_a.sigma(self.LAM))
         # the legacy spectra are the two independent Gaussian sums, unchanged
-        assert float(old.sigma_a.sigma(1.530e-6)) == pytest.approx(5.9309e-25, rel=1e-4)
-        assert float(old.sigma_e.sigma(1.560e-6)) == pytest.approx(3.0400e-25, rel=1e-4)
+        assert float(old.sigma_a.sigma(1.530e-6)) == pytest.approx(5.9309e-25, rel=1e-4, abs=0)
+        assert float(old.sigma_e.sigma(1.560e-6)) == pytest.approx(3.0400e-25, rel=1e-4, abs=0)
 
     def test_the_legacy_model_violates_its_own_mccumber_relation(self):
         """The finding itself, still asserted against cband_refit=False so the defect it records
@@ -633,7 +633,7 @@ class TestF1ErbiumCBand:
         ion = erbium()
         lam = np.arange(1520.0, 1571.0, 0.5) * 1e-9
         ratio = ion.sigma_e.sigma(lam) / np.array([float(ion.sigma_e_mccumber(x)) for x in lam])
-        assert np.allclose(ratio, 1.0, rtol=1e-12)
+        assert np.allclose(ratio, 1.0, rtol=1e-12, atol=0)
 
     def test_the_refit_removes_the_interior_sigma_a_minimum(self):
         c = np.arange(1533.0, 1570.5, 0.5) * 1e-9
@@ -667,7 +667,7 @@ class TestF1ErbiumCBand:
         got = float(hot.sigma_e.sigma(lam)) / float(new.sigma_e.sigma(lam))
         want = math.exp((new.eps_J - H_PLANCK * C_LIGHT / lam)
                         * (1.0 / (KB * 350.0) - 1.0 / (KB * 300.0)))
-        assert got == pytest.approx(want, rel=1e-12)
+        assert got == pytest.approx(want, rel=1e-12, abs=0)
 
     def test_the_refit_amplifier_still_solves_and_respects_stokes(self):
         from dynameta.optics.fiber_amp import power_conversion_efficiency
@@ -685,14 +685,14 @@ class TestF1ErbiumCBand:
 class TestF12McCumberEps:
     def test_default_eps_is_the_zero_line(self):
         assert ER.mccumber_eps_J is None
-        assert ER.eps_J == pytest.approx(H_PLANCK * C_LIGHT / ER.zero_line_m, rel=1e-15)
+        assert ER.eps_J == pytest.approx(H_PLANCK * C_LIGHT / ER.zero_line_m, rel=1e-15, abs=0)
 
     def test_a_fitted_eps_is_honoured_and_validated(self):
         from dynameta.optics.fiber_amp import RareEarthIon
         eps = 0.95 * H_PLANCK * C_LIGHT / 0.976e-6
         ion = RareEarthIon("Yb3+fit", YB.sigma_a, YB.sigma_e, tau_s=YB.tau_s,
                            zero_line_m=YB.zero_line_m, mccumber_eps_J=eps)
-        assert ion.eps_J == pytest.approx(eps, rel=1e-15)
+        assert ion.eps_J == pytest.approx(eps, rel=1e-15, abs=0)
         # a smaller eps means a smaller (eps - h nu) to the red, i.e. less inflated sigma_e
         lam = 1.060e-6
         assert float(ion.sigma_e_mccumber(lam)) < float(YB.sigma_e_mccumber(lam))
@@ -705,7 +705,7 @@ class TestF12McCumberEps:
         eps = 0.95 * H_PLANCK * C_LIGHT / 0.976e-6
         ion = RareEarthIon("Yb3+fit", YB.sigma_a, YB.sigma_e, tau_s=YB.tau_s,
                            zero_line_m=YB.zero_line_m, mccumber_eps_J=eps)
-        assert at_temperature(ion, 350.0).mccumber_eps_J == pytest.approx(eps, rel=1e-15)
+        assert at_temperature(ion, 350.0).mccumber_eps_J == pytest.approx(eps, rel=1e-15, abs=0)
 
 
 # ============================ F-9: the Marcuse validity window ==============================
@@ -713,7 +713,7 @@ class TestF12McCumberEps:
 class TestF9MarcuseValidity:
     def test_v_number_closed_form(self):
         assert v_number(1.4e-6, 0.24, 1.55e-6) == pytest.approx(
-            2.0 * math.pi * 1.4e-6 * 0.24 / 1.55e-6, rel=1e-15)
+            2.0 * math.pi * 1.4e-6 * 0.24 / 1.55e-6, rel=1e-15, abs=0)
 
     def test_validity_is_array_safe(self):
         """The reason this is a query and not a warning inside mode_field_radius_m: lambda_m is
@@ -763,7 +763,7 @@ class TestF10PassiveFiber:
         ch = ChannelSet.build(ER, f, np.array([1.55e-6]), np.array([1.0]))
         got = metastable_fraction(ch, np.array([1e-3]), f, upconversion_C_up=3e-23)
         assert np.isfinite(got)
-        assert got == pytest.approx(metastable_fraction(ch, np.array([1e-3]), f), rel=1e-15)
+        assert got == pytest.approx(metastable_fraction(ch, np.array([1e-3]), f), rel=1e-15, abs=0)
 
     def test_giles_calibration_still_requires_ions(self):
         from dynameta.optics.fiber_amp import giles_calibrated_fiber
@@ -792,7 +792,7 @@ class TestF10PassiveFiber:
         nr = analyze_noise(r, 1.55e-6)
         # NF of a passive attenuator IS 1/G -- the PSD form gives it for free with zero ASE
         assert nr.nf_dB == pytest.approx(10.0 * alpha * L / math.log(10.0), rel=1e-6)
-        assert nr.nf_dB == pytest.approx(-float(r.signal_gain_dB[0]), rel=1e-12)
+        assert nr.nf_dB == pytest.approx(-float(r.signal_gain_dB[0]), rel=1e-12, abs=0)
         assert math.isinf(nr.osnr_dB) and nr.osnr_dB > 0    # no ASE -> no noise to beat it down
         assert math.isnan(nr.n_sp)                          # no inversion -> undefined, not zero
         assert math.isnan(nr.n_sp_local_min)
@@ -837,7 +837,7 @@ class TestF6Comms:
         for n in (2, 4, 8, 16):
             mu, sg = np.arange(n, dtype=float), np.full(n, 0.12)
             want = 2.0 * (n - 1) / n * 0.5 * erfc(1.0 / (2.0 * 0.12) / math.sqrt(2.0))
-            assert pam_ser(mu, sg) == pytest.approx(float(want), rel=1e-12)
+            assert pam_ser(mu, sg) == pytest.approx(float(want), rel=1e-12, abs=0)
 
     def test_ml_threshold_is_the_midpoint_only_for_equal_variances(self):
         assert ml_thresholds(np.array([0.0, 1.0]), np.array([0.2, 0.2]))[0] == pytest.approx(0.5)
@@ -990,7 +990,7 @@ class TestF6Comms:
         for loss in (0.0, 10.0, 25.0):
             r = link_performance(PamFormat(order=4, mean_power_W=1e-3), loss_dB=loss, **kw)
             want = (r.snr_elec_dB - 20.0 * math.log10(2.0 * math.sqrt(2.0)) - 1.76) / 6.02
-            assert r.enob == pytest.approx(want, rel=1e-12)
+            assert r.enob == pytest.approx(want, rel=1e-12, abs=0)
             assert (r.snr_elec_dB - 1.76) / 6.02 - r.enob == pytest.approx(1.5001, abs=1e-4)
 
     def test_ser_to_ber_gray_coding(self):
@@ -1025,7 +1025,7 @@ class TestF7WallPlug:
         from dynameta.optics.fiber_amp import power_conversion_efficiency
         amp, r = self._solved()
         b = wall_plug_efficiency(amp, r, [PumpSource(0.5)])
-        assert b.eta_optical_pce == pytest.approx(power_conversion_efficiency(amp, r), rel=1e-15)
+        assert b.eta_optical_pce == pytest.approx(power_conversion_efficiency(amp, r), rel=1e-15, abs=0)
 
     def test_optical_power_balance_is_a_real_closure_and_not_an_identity(self):
         """RE-PINNED, because the previous form could not fail. Closed against `total_heat_W` the
@@ -1077,15 +1077,15 @@ class TestF7WallPlug:
     def test_electrical_power_is_the_diode_and_coupling_chain(self):
         amp, r = self._solved()
         b = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.90)], aux_electrical_W=0.25)
-        assert b.p_electrical_pumps_W == pytest.approx(0.3 / (0.45 * 0.90), rel=1e-14)
-        assert b.p_electrical_total_W == pytest.approx(b.p_electrical_pumps_W + 0.25, rel=1e-14)
+        assert b.p_electrical_pumps_W == pytest.approx(0.3 / (0.45 * 0.90), rel=1e-14, abs=0)
+        assert b.p_electrical_total_W == pytest.approx(b.p_electrical_pumps_W + 0.25, rel=1e-14, abs=0)
 
     def test_duty_cycle_scales_delivered_power_not_electrical_cost(self):
         amp, r = self._solved()
         full = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.9)])
         half = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.9)], duty_cycle=0.5)
-        assert half.p_electrical_total_W == pytest.approx(full.p_electrical_total_W, rel=1e-15)
-        assert half.eta_wallplug == pytest.approx(0.5 * full.eta_wallplug, rel=1e-12)
+        assert half.p_electrical_total_W == pytest.approx(full.p_electrical_total_W, rel=1e-15, abs=0)
+        assert half.eta_wallplug == pytest.approx(0.5 * full.eta_wallplug, rel=1e-12, abs=0)
 
     def test_multi_pump_uses_the_photon_weighted_ceiling(self):
         amp = FiberAmplifier(ER, FiberSpec(1.4e-6, 0.23, 1e25, 8.0),
@@ -1096,14 +1096,14 @@ class TestF7WallPlug:
         assert (stokes_limit(0.976e-6, 1.560e-6) < b.eta_stokes_limit
                 < stokes_limit(1.480e-6, 1.560e-6))
         assert b.p_electrical_pumps_W == pytest.approx(0.15 / (0.45 * 0.9) + 0.15 / (0.30 * 0.9),
-                                                       rel=1e-14)
+                                                       rel=1e-14, abs=0)
 
     def test_energy_per_bit_and_per_port(self):
         amp, r = self._solved()
         b = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.9)], aux_electrical_W=0.5)
         e = energy_per_bit_J(b, 20e9)
-        assert e == pytest.approx(b.p_electrical_total_W / 20e9, rel=1e-14)
-        assert energy_per_bit_J(b, 20e9, ports=64) == pytest.approx(e / 64, rel=1e-14)
+        assert e == pytest.approx(b.p_electrical_total_W / 20e9, rel=1e-14, abs=0)
+        assert energy_per_bit_J(b, 20e9, ports=64) == pytest.approx(e / 64, rel=1e-14, abs=0)
 
     def test_validation(self):
         amp, r = self._solved()

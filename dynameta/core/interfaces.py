@@ -115,6 +115,42 @@ class OpticalSolver(Protocol):
                  lambda_m: float, n_super: complex, n_sub: complex) -> OpticalResult: ...
 
 
+#: Capability flags an optical solver may declare as attributes of the callable. They change what the
+#: pipeline hands the solver, so a wrapper around a solver (the result cache, a screening wrapper, ...)
+#: must not lose them: the pipeline reads them through solver_capability(), which follows the standard
+#: `__wrapped__` link (the one functools.wraps sets), and every wrapper in the library sets that link
+#: (declare_wrapped_solver). tests/test_solver_capabilities.py runs the pipeline with and without each
+#: wrapper and keeps a census of the readers.
+#:   native_carrier_grid -- the solver slices a non-uniform z axis, so run_pipeline asks a
+#:                          LayeredDevsimBuilder for the carriers on their native z mesh lines.
+OPTICAL_SOLVER_CAPABILITIES = ("native_carrier_grid",)
+
+
+def declare_wrapped_solver(wrapper, inner):
+    """Mark `wrapper` as a wrapper of the optical solver `inner` (sets ``wrapper.__wrapped__``), so every
+    capability the wrapper does not declare itself is read from `inner` by solver_capability(). Returns
+    `wrapper`. Use it for every callable or object that delegates the physics to another solver."""
+    wrapper.__wrapped__ = inner
+    return wrapper
+
+
+def solver_capability(solver, name: str, default=False):
+    """The capability `name` declared by `solver` or, when the solver does not declare it, by the solver
+    it wraps (the ``__wrapped__`` chain, followed to the innermost solver). `default` when nobody in the
+    chain declares it. A wrapper that must NOT inherit a capability declares it itself (e.g. False)."""
+    if name not in OPTICAL_SOLVER_CAPABILITIES:
+        raise ValueError("solver_capability: unknown capability {!r} (known: {})".format(
+            name, OPTICAL_SOLVER_CAPABILITIES))
+    obj, seen = solver, set()
+    while obj is not None and id(obj) not in seen:
+        seen.add(id(obj))
+        try:
+            return getattr(obj, name)
+        except AttributeError:
+            obj = getattr(obj, "__wrapped__", None)
+    return default
+
+
 @runtime_checkable
 class LayeredStackSolver(Protocol):
     """Solves a LayeredStack (Fourier-modal / TMM family) -- the seam a future RCWA backend

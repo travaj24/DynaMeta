@@ -100,3 +100,61 @@ def test_the_sharded_job_still_carries_the_schedule_only_guard():
     block = src[src.index("nightly-validation:"):]
     guard = "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
     assert guard in block[:block.index("steps:")], "nightly-validation lost its schedule-only guard"
+
+
+def test_traps_oracles_cross_version_gates_need_an_explicit_main():
+    """validation.traps_oracles gates E'/F compare against a checkout of the pre-traps code. They used to
+    default to a GUESSED sibling folder (<parent of the repo's parent>/DynaMeta); on a workstation that folder
+    can hold any version, and a newer working copy there turned E' red for an environment reason. The
+    checkout must now be named with --main; without it the two gates skip (the script states the reason)."""
+    from validation import traps_oracles as TO
+    assert TO._parser().parse_args([]).main is None
+    assert TO._parser().parse_args(["--main", "x"]).main == "x"
+    assert not hasattr(TO, "DEFAULT_MAIN")
+
+
+def test_fdtd_3d_reduces_exits_42_without_numba():
+    """validation.fdtd_3d_reduces gates its order probe on the numba backend. Without numba (the
+    nightly-validation install) it must exit with run_all's capability-absent code 42 before any solve,
+    not rc=1 from a RuntimeError after ~20 s of numpy solves."""
+    import importlib.util
+    if importlib.util.find_spec("numba") is not None:
+        pytest.skip("numba is installed here: the script runs its gates for real (the `numba` CI job)")
+    p = subprocess.run([sys.executable, "-m", "validation.fdtd_3d_reduces"], cwd=REPO,
+                       capture_output=True, text=True, timeout=300)
+    assert p.returncode == 42, (p.returncode, p.stdout[-600:], p.stderr[-600:])
+    assert "SKIP" in p.stdout and "numba" in p.stdout
+
+
+def test_smoke_drift_scan_follows_sibling_validation_imports():
+    """The smoke tier's reverse-drift warning names gated scripts with no heavy-solver path that are in
+    neither SMOKE nor SMOKE_EXCLUDED. A script that reaches DEVSIM only through a sibling validation module
+    (`import validation.bipolar_density_gradient as V`) is NOT solver-free, and the scan must say so: it used
+    to name two such scripts on every smoke run, which trains readers to ignore the warning. The tree is
+    curated: the warning names nothing."""
+    assert R._is_heavy("bipolar_density_gradient")
+    assert R._is_heavy("bipolar_dg_strong_inversion") and R._is_heavy("valley_density_gradient")
+    assert not R._is_heavy("_harness")                   # every script imports it: it must not count
+    all_gated = set(R._gated(R.HERE, skip=R.SKIP))
+    assert R._uncurated_solver_free(all_gated) == []
+
+
+def test_validation_is_a_regular_package_that_wins_over_a_foreign_one(tmp_path):
+    """validation/ is a REGULAR package: a namespace package (no __init__.py) loses to ANY regular package
+    named `validation` on sys.path, whatever the order -- e.g. another project's checkout on a shared
+    PYTHONPATH, after which the test files importing validation.* load the wrong module. A foreign regular
+    package placed AFTER the repository must not shadow it."""
+    other = tmp_path / "other"
+    foreign = other / "validation"
+    foreign.mkdir(parents=True)
+    (foreign / "__init__.py").write_text("FOREIGN = True\n", encoding="ascii")
+    code = ("import validation, validation._eqdg_fixture as f; "
+            "print(validation.__file__); print(f.__file__); print(hasattr(validation, 'FOREIGN'))")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([REPO, str(other)]))
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path), env=env, capture_output=True, text=True,
+                         timeout=120)
+    assert out.returncode == 0, out.stderr
+    pkg, fix, foreign_seen = out.stdout.split()
+    assert os.path.normcase(pkg) == os.path.normcase(os.path.join(REPO, "validation", "__init__.py"))
+    assert os.path.normcase(fix) == os.path.normcase(os.path.join(REPO, "validation", "_eqdg_fixture.py"))
+    assert foreign_seen == "False"

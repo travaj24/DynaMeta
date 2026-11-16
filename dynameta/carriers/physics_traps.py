@@ -76,6 +76,14 @@ FORMULATION (all SI; energies are measured from the intrinsic level E_i, + towar
    "fermi_dirac" they take the exact FD emission densities (srh_capture_exprs fd=True; v0.15 integration);
    kinetic interface bins cost (bins) x (region nodes) unknowns, budgeted (KINETIC_UNKNOWN_BUDGET).
 
+6. Equilibrium-film interface traps (v0.16, FilmInterfaceTraps / install_film_interface_traps). A
+   Potential-only film has one Fermi level and no quasi-Fermi levels, so its interface states are in
+   thermal equilibrium with it: occupancy f = 1/(1 + exp((E - E_F)/kT)) at the region's V_t, energies
+   quoted from the local conduction-band edge (E - E_c, signed), a uniform D_it band split at a
+   charge-neutrality level (acceptor-like above, donor-like below) and/or discrete levels. The band's
+   charge is the closed-form Fermi integral (no quadrature) and its Potential derivative is supplied in
+   closed form, so the Newton solve stays quadratic; C_it = q^2 D_it inside the band.
+
 DEVSIM REALIZATION. The sheet terms are applied on the SEMICONDUCTOR side of the interface as node
 models weighted by ItArea = A_node/NodeVolume, where A_node is the interface area each node owns
 (computed from DEVSIM's own interface element list: 1 in 1-D, half of each interface edge in 2-D, a third
@@ -115,7 +123,11 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
     closed-form derivatives carry the d ln gamma/dc terms (install_interface_traps). The legacy statistics
     are unchanged (fd=False: the strings character-for-character).
   * Interface traps need a bipolar (n AND p) semiconductor side -- the SRH occupancy uses both.
-    A semiconductor/semiconductor interface raises (heterojunctions are D1a's).
+    A semiconductor/semiconductor interface raises (heterojunctions have their own path). v0.16: on an interface
+    WITHOUT a bipolar side, InterfaceTraps carrying only fixed_charge_C_m2 install it as a plain sheet
+    charge (physics_equilibrium.install_sheet_charge), and an EQUILIBRIUM film takes FilmInterfaceTraps
+    (FORMULATION item 6).
+
   * 3-D: on the devsim_3d tensor (Kuhn) mesh (D2c, v0.14.0 default) the 3-D sheet-charge shift equals
     the 1-D one (validation/traps_oracles.py --3d, gates G2/G3). On the legacy mesher='gmsh' mesh DEVSIM's
     node volumes over-count (sum NodeVolume = 1.20 x the semiconductor volume, 1.29 x the oxide's) and
@@ -701,6 +713,149 @@ class InterfaceTraps:
         return out
 
 
+_FILM_CHARGE_MODES = ("split", "acceptor", "donor")
+
+
+@dataclass(frozen=True)
+class FilmInterfaceTraps:
+    """Interface-trap density at the interface of an EQUILIBRIUM (Potential-only) semiconductor film
+    with an insulator (v0.16): a bias-dependent sheet charge whose occupancy is the Fermi-Dirac function
+    of the film's own Fermi level at the local surface potential, at the region's lattice temperature
+    (its V_t). No capture kinetics and no recombination -- the equilibrium film has no quasi-Fermi
+    levels; for a bipolar drift-diffusion region use InterfaceTraps.
+
+    ENERGIES are E - E_c [eV], measured from the LOCAL conduction-band edge at the interface: negative in
+    the gap, positive inside the band (an equilibrium film carries no band gap or intrinsic level, and a
+    degenerate film's E_F, and often its charge-neutrality level, lie above E_c).
+      dit_eV_m2        : uniform D_it [eV^-1 m^-2] (1e12 cm^-2 eV^-1 = 1e16 m^-2 eV^-1) over
+                         [e_lo_eV, e_hi_eV]; 0 (default) = no band.
+      levels           : extra discrete levels ((E - E_c [eV], N_it [m^-2]), ...).
+      charge           : "split" -- acceptor-like above neutral_level_eV (neutral empty, -q filled), donor-like
+                         below (neutral filled, +q empty), the charge-neutrality-level picture; "acceptor" /
+                         "donor" -- every state of that kind.
+      neutral_level_eV : the charge-neutrality level E_0 - E_c [eV] (required for "split" when the spec
+                         holds any state).
+    With E_F at E_0 and the band many kT wide on both sides the trapped charge is zero.
+
+    CHARGE (exact, no quadrature; eta = (E_F - E_c)/kT the region's closure argument,
+    physics_equilibrium.equilibrium_eta_expr, S(x) = ln(1 + e^x), s(x) = 1/(1 + e^-x) = S'(x)):
+        acceptor band [a, b]: Q/q = -D V_t [S(eta - a/V_t) - S(eta - b/V_t)]      (= -D int_a^b f dE)
+        donor band [a, b]   : Q/q = +D V_t [S(b/V_t - eta) - S(a/V_t - eta)]      (= +D int_a^b (1-f) dE)
+        acceptor level E, N : Q/q = -N s(eta - E/V_t);  donor level: +N s(E/V_t - eta)
+    and dQ/dpsi follows in closed form (d eta/dpsi = 1/V_t): for the bands -q D [f(a) - f(b)] each,
+    for a level -q N f (1 - f)/V_t -- so a uniform band gives the trap capacitance C_it = -dQ/dpsi_s =
+    q^2 D_it [f(e_lo) - f(e_hi)] -> q^2 D_it inside the band, and the gate-to-surface-potential efficiency
+    d psi_s/dV_G = C_ox/(C_ox + C_s + C_it). S and s are written overflow-free
+    (S(x) = max(x, 0) + ln(1 + e^-|x|), s(x) = e^(min(x, 0))/(1 + e^-|x|)): DEVSIM traps exp overflow
+    even in an unselected ifelse branch (MEASURED, devsim 2.11.2).
+    """
+    dit_eV_m2: float = 0.0
+    e_lo_eV: Optional[float] = None
+    e_hi_eV: Optional[float] = None
+    neutral_level_eV: Optional[float] = None
+    charge: str = "split"
+    levels: Tuple[Tuple[float, float], ...] = ()
+
+    def __post_init__(self):
+        if self.charge not in _FILM_CHARGE_MODES:
+            raise ValueError("FilmInterfaceTraps.charge must be one of {}, got {!r}".format(
+                _FILM_CHARGE_MODES, self.charge))
+        d = float(self.dit_eV_m2)
+        if not (math.isfinite(d) and d >= 0.0):
+            raise ValueError("FilmInterfaceTraps.dit_eV_m2 must be finite and >= 0, got {!r}".format(
+                self.dit_eV_m2))
+        if d > 0.0:
+            lo, hi = self.e_lo_eV, self.e_hi_eV
+            if lo is None or hi is None or not (math.isfinite(float(lo)) and math.isfinite(float(hi))
+                                                and float(hi) > float(lo)):
+                raise ValueError("FilmInterfaceTraps with dit_eV_m2 > 0 needs finite e_lo_eV < e_hi_eV "
+                                 "(E - E_c, eV), got {!r}, {!r}".format(lo, hi))
+        for lv in self.levels:
+            if len(lv) != 2 or not (math.isfinite(float(lv[0])) and math.isfinite(float(lv[1]))
+                                    and float(lv[1]) >= 0.0):
+                raise ValueError("FilmInterfaceTraps.levels entries are (E - E_c [eV], N_it [m^-2] >= 0), "
+                                 "got {!r}".format(lv))
+        if self.charge == "split" and not self.is_empty():
+            e0 = self.neutral_level_eV
+            if e0 is None or not math.isfinite(float(e0)):
+                raise ValueError("FilmInterfaceTraps(charge='split') needs a finite neutral_level_eV "
+                                 "(charge-neutrality level, E - E_c in eV)")
+
+    def is_empty(self) -> bool:
+        """True when the spec holds no states (D_it = 0 and no level with N_it > 0)."""
+        return not (float(self.dit_eV_m2) > 0.0) and not any(float(n) > 0.0 for _e, n in self.levels)
+
+    def bands(self) -> List[Tuple[float, float, str]]:
+        """The uniform band split into single-kind pieces [(a, b, kind)] (E - E_c, eV)."""
+        if not (float(self.dit_eV_m2) > 0.0):
+            return []
+        a, b = float(self.e_lo_eV), float(self.e_hi_eV)
+        if self.charge != "split":
+            return [(a, b, self.charge)]
+        e0 = float(self.neutral_level_eV)
+        out = []
+        if a < min(b, e0):
+            out.append((a, min(b, e0), "donor"))
+        if max(a, e0) < b:
+            out.append((max(a, e0), b, "acceptor"))
+        return out
+
+    def level_kinds(self) -> List[Tuple[float, float, str]]:
+        """The discrete levels with their kind [(E - E_c, N_it, kind)] (N_it > 0 only); a level exactly at
+        the neutral level is donor-like (InterfaceTraps' rule)."""
+        out = []
+        for e, n in self.levels:
+            if not (float(n) > 0.0):
+                continue
+            if self.charge == "split":
+                kind = "acceptor" if float(e) > float(self.neutral_level_eV) else "donor"
+            else:
+                kind = self.charge
+            out.append((float(e), float(n), kind))
+        return out
+
+    def sheet_charge_C_m2(self, eta, V_t: float = V_T):
+        """The trapped sheet charge Q_it [C/m^2] at closure argument eta = (E_F - E_c)/kT (numpy, any
+        shape) -- the same closed form the DEVSIM model evaluates, for post-processing and oracles."""
+        return self.sheet_charge_and_derivative(eta, V_t=V_t)[0]
+
+    def sheet_charge_and_derivative(self, eta, V_t: float = V_T):
+        """(Q_it [C/m^2], dQ_it/deta [C/m^2]) at closure argument eta = (E_F - E_c)/kT (numpy, any shape): THE numpy
+        kernel of the closed form above and its exact derivative (one implementation; the DEVSIM installer writes the
+        same formulas as model strings). dQ/deta per band piece: -D V_t [s(eta - a/V_t) - s(eta - b/V_t)] (acceptor),
+        -D V_t [s(b/V_t - eta) - s(a/V_t - eta)] (donor); per level -N s (1 - s); times q. dQ/dpsi = dQ/deta / V_t."""
+        eta = np.asarray(eta, dtype=float)
+        sp = lambda x: np.logaddexp(0.0, x)                    # noqa: E731
+        sg = lambda x: 0.5 * (1.0 + np.tanh(0.5 * x))          # noqa: E731
+        q = np.zeros_like(eta)
+        dq = np.zeros_like(eta)
+        d = float(self.dit_eV_m2)
+        for a, b, kind in self.bands():
+            if kind == "acceptor":
+                q = q - d * V_t * (sp(eta - a / V_t) - sp(eta - b / V_t))
+                dq = dq - d * V_t * (sg(eta - a / V_t) - sg(eta - b / V_t))
+            else:
+                q = q + d * V_t * (sp(b / V_t - eta) - sp(a / V_t - eta))
+                dq = dq - d * V_t * (sg(b / V_t - eta) - sg(a / V_t - eta))
+        for e, n, kind in self.level_kinds():   # acceptor -N s(x), donor +N s(-x): both d/deta = -N s (1 - s)
+            x = eta - e / V_t
+            q = q + (-n * sg(eta - e / V_t) if kind == "acceptor" else n * sg(e / V_t - eta))
+            dq = dq - n * sg(x) * sg(-x)
+        return Q_E * q, Q_E * dq
+
+
+def _softplus_expr(x: str) -> str:
+    """ln(1 + e^x) as an overflow-free DEVSIM expression. Below x = -37 the log(1 + e^-|x|) term rounds to 0 (no
+    log1p in a DEVSIM expression) against the exact e^x: an absolute error below 2.2e-16, negligible beside the
+    other terms of a trap charge (tests/test_physics_traps_kernels.py measures it)."""
+    return "(0.5 * ({x} + abs({x})) + log(1 + exp(-abs({x}))))".format(x=x)
+
+
+def _logistic_expr(x: str) -> str:
+    """1/(1 + e^-x) as an overflow-free DEVSIM expression."""
+    return "(exp(0.5 * ({x} - abs({x}))) / (1 + exp(-abs({x}))))".format(x=x)
+
+
 # ------------------------------------------------------------------------------------------------
 # DEVSIM installers
 # ------------------------------------------------------------------------------------------------
@@ -1075,17 +1230,17 @@ def equilibrium_trap_levels(traps) -> Tuple[Tuple[float, float, str], ...]:
     return tuple(out)
 
 
+def _is_bipolar(device: str, region: str) -> bool:
+    try:
+        return "Holes" in ds.get_node_model_list(device=device, region=region) and \
+               "USRH" in ds.get_node_model_list(device=device, region=region)
+    except Exception:                                          # pragma: no cover - devsim internals
+        return False
+
+
 def _semiconductor_side(device: str, interface: str) -> Tuple[str, str]:
     regions = list(ds.get_region_list(device=device, interface=interface))
-
-    def bipolar(r):
-        try:
-            return "Holes" in ds.get_node_model_list(device=device, region=r) and \
-                   "USRH" in ds.get_node_model_list(device=device, region=r)
-        except Exception:                                      # pragma: no cover - devsim internals
-            return False
-
-    semi = [r for r in regions if bipolar(r)]
+    semi = [r for r in regions if _is_bipolar(device, r)]
     if len(semi) == 2:
         raise NotImplementedError(
             "install_interface_traps: interface {!r} joins two carrier regions {}; interface traps "
@@ -1183,12 +1338,25 @@ def install_interface_traps(device: str, interface: str, traps, *,
     trapped charge of the kinetic bins is QTerm_itk<j>; ItCharge<j> then includes it; ItOccupancy<j>_<b>
     = f_b. COST: (kinetic bins) x (region nodes) unknowns; above `max_kinetic_unknowns` (default
     KINETIC_UNKNOWN_BUDGET) the install is REFUSED before any DEVSIM model is created -- coarsen with
-    InterfaceTraps(kinetic_bin_eV=) or pass a larger budget knowingly. Seed with seed_kinetic_traps."""
+    InterfaceTraps(kinetic_bin_eV=) or pass a larger budget knowingly. Seed with seed_kinetic_traps.
+
+    NON-BIPOLAR interfaces (v0.16): when neither side is a bipolar region, InterfaceTraps that carry
+    only a fixed charge (no trap levels: dit_eV_m2 = 0 and no `levels`) install that charge as a plain
+    sheet charge (physics_equilibrium.install_sheet_charge) on the semiconductor side, or on the first
+    region of a dielectric/dielectric interface -- it used to raise. Trap LEVELS there still raise (the
+    SRH occupancy needs n and p); for an equilibrium film pass FilmInterfaceTraps, which this function
+    routes to install_film_interface_traps."""
     from dynameta.carriers import physics_bipolar_dd as _BP   # lazy: BP imports this module
 
-    specs = [traps] if isinstance(traps, InterfaceTraps) else list(traps)
+    specs = [traps] if isinstance(traps, (InterfaceTraps, FilmInterfaceTraps)) else list(traps)
+    if specs and all(isinstance(s, FilmInterfaceTraps) for s in specs):
+        return install_film_interface_traps(device, interface, specs)
     if not specs or not all(isinstance(s, InterfaceTraps) for s in specs):
-        raise TypeError("install_interface_traps: traps must be an InterfaceTraps or a sequence of them")
+        raise TypeError("install_interface_traps: traps must be an InterfaceTraps or a sequence of them (or "
+                        "FilmInterfaceTraps / a sequence of them; the two kinds cannot be mixed in one call)")
+    regions = list(ds.get_region_list(device=device, interface=interface))
+    if not any(_is_bipolar(device, r) for r in regions):
+        return _install_fixed_charge_only(device, interface, regions, specs)
     semi, other = _semiconductor_side(device, interface)
     if any(sp.dynamic for sp in specs):                        # refuse BEFORE any DEVSIM write
         vt0 = float(ds.get_parameter(device=device, region=semi, name="V_t"))
@@ -1360,3 +1528,112 @@ def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val, 
         ds.node_model(device=device, region=semi, name="ItCharge{}".format(j),
                       equation="ElectronCharge*({})".format(" + ".join(list(q_val) + kq)))
     return made
+
+
+# ------------------------------------------------------------------------------------------------
+# v0.16: charge-only interfaces and equilibrium-film interface traps
+# ------------------------------------------------------------------------------------------------
+def _install_fixed_charge_only(device: str, interface: str, regions, specs) -> dict:
+    """install_interface_traps on an interface with no bipolar side: the specs' fixed charge becomes a
+    plain sheet charge (physics_equilibrium.install_sheet_charge); trap levels are refused."""
+    from dynameta.carriers import physics_equilibrium as _PE   # lazy: keeps this module devsim-light
+    if any(s.dynamic or s.sheet_levels() for s in specs):
+        raise ValueError(
+            "install_interface_traps: neither region of interface {!r} ({}) is a bipolar drift-diffusion "
+            "region (physics_bipolar_dd.setup_bipolar_region): the SRH occupancy of InterfaceTraps levels "
+            "needs both n and p at the surface. For an equilibrium (Potential-only) film use "
+            "physics_traps.FilmInterfaceTraps (Fermi-Dirac occupancy at the film's Fermi level); a fixed "
+            "charge alone (InterfaceTraps(fixed_charge_C_m2=...) without levels) is installed as a sheet "
+            "charge on any interface.".format(interface, regions))
+    q = sum(float(s.fixed_charge_C_m2) for s in specs)
+    semis = [r for r in regions if "Electrons" in ds.get_node_model_list(device=device, region=r)]
+    region = semis[0] if len(semis) == 1 else regions[0]
+    others = [r for r in regions if r != region]
+    out = {"region": region, "insulator": others[0] if others else None, "index": None, "levels": [],
+           "area": interface_node_area(device, region, interface)}
+    if q != 0.0:
+        out["sheet_charge_model"] = _PE.install_sheet_charge(device, interface, region, q)
+    return out
+
+
+def install_film_interface_traps(device: str, interface: str, traps, *, region: Optional[str] = None) -> dict:
+    """Attach FilmInterfaceTraps (one, or a sequence) to `interface` on its EQUILIBRIUM semiconductor side
+    (setup_semiconductor_region; `region=` picks the side when both are equilibrium regions). The trapped
+    sheet charge enters that region's Poisson equation through the same node-term mechanism as the fixed
+    sheet charge (physics_equilibrium.add_potential_charge_term): term QTerm_fit<k> = FitArea<k> *
+    Q_it/q with FitArea<k> = A_node/NodeVolume, and its exact closed-form derivative with respect to
+    Potential as QTerm_fit<k>:Potential (FilmInterfaceTraps docstring), so Newton stays quadratic. The
+    occupancy follows the region's own closure argument eta (physics_equilibrium.equilibrium_eta_expr),
+    so a Fermi-level reference parameter and the builders' frame shift of Phi_c0 apply to the traps too.
+    Diagnostic: FitCharge<k> = Q_it [C/m^2] at each node (meaningful where FitArea<k> > 0).
+
+    Specs without states (D_it = 0 and no levels) install NOTHING, so such a device is bit-identical to
+    one without traps. Returns {'region', 'insulator', 'index' (k, or None), 'levels' (the bands and
+    levels as (a, b, kind) / (E, N, kind)), 'area', 'model' (when installed)}.
+
+    Call after the region physics and the interface Potential continuity, before solving (2-D:
+    LayeredDevsimBuilder(interface_traps={(region_a, region_b): FilmInterfaceTraps(...)}) routes here
+    through install_interface_traps)."""
+    from dynameta.carriers import physics_equilibrium as _PE
+    specs = [traps] if isinstance(traps, FilmInterfaceTraps) else list(traps)
+    if not specs or not all(isinstance(s, FilmInterfaceTraps) for s in specs):
+        raise TypeError("install_film_interface_traps: traps must be a FilmInterfaceTraps or a sequence of them")
+    if interface not in list(ds.get_interface_list(device=device)):
+        raise ValueError("install_film_interface_traps: device {!r} has no interface {!r}".format(device, interface))
+    regions = list(ds.get_region_list(device=device, interface=interface))
+
+    def _kind(r):
+        try:
+            return _PE._poisson_region_kind(device, r)
+        except ValueError:
+            return None
+
+    eq = [r for r in regions if _kind(r) == "equilibrium"]
+    if region is None:
+        if len(eq) != 1:
+            raise ValueError(
+                "install_film_interface_traps: interface {!r} ({}) needs exactly one EQUILIBRIUM semiconductor "
+                "side (found {}; kinds {}); pass region= when both are equilibrium regions. Drift-diffusion "
+                "and bipolar regions have no fixed Fermi level: use InterfaceTraps on a bipolar region.".format(
+                    interface, regions, eq, {r: _kind(r) for r in regions}))
+        region = eq[0]
+    elif region not in eq:
+        raise ValueError("install_film_interface_traps: region {!r} is not an equilibrium semiconductor region "
+                         "on interface {!r} ({}; kinds {})".format(region, interface, regions,
+                                                                    {r: _kind(r) for r in regions}))
+    others = [r for r in regions if r != region]
+    bands = [b for s in specs for b in ((a, bb, kd, float(s.dit_eV_m2)) for a, bb, kd in s.bands())]
+    levels = [lv for s in specs for lv in s.level_kinds()]
+    out = {"region": region, "insulator": others[0] if others else None, "index": None,
+           "levels": [(a, b, kd) for a, b, kd, _d in bands] + levels, "area": None}
+    if not bands and not levels:
+        return out
+    eta = _PE.equilibrium_eta_expr(device, region)
+    weight, area = _PE.interface_weight(device, region, interface)
+    k = sum(1 for m in ds.get_node_model_list(device=device, region=region) if m.startswith("FitArea"))
+    a_name = "FitArea{}".format(k)
+    ds.node_solution(device=device, region=region, name=a_name)
+    ds.set_node_values(device=device, region=region, name=a_name, values=weight)
+    val, der = [], []
+    for a, b, kind, d in bands:
+        if kind == "acceptor":                                  # -D int_a^b f dE
+            xa, xb = "({} - ({!r}) / V_t)".format(eta, a), "({} - ({!r}) / V_t)".format(eta, b)
+            val.append("-{d!r} * V_t * ({sa} - {sb})".format(d=d, sa=_softplus_expr(xa), sb=_softplus_expr(xb)))
+            der.append("-{d!r} * ({fa} - {fb})".format(d=d, fa=_logistic_expr(xa), fb=_logistic_expr(xb)))
+        else:                                                   # +D int_a^b (1 - f) dE
+            ya, yb = "(({!r}) / V_t - {})".format(a, eta), "(({!r}) / V_t - {})".format(b, eta)
+            val.append("{d!r} * V_t * ({sb} - {sa})".format(d=d, sa=_softplus_expr(ya), sb=_softplus_expr(yb)))
+            der.append("{d!r} * ({fa} - {fb})".format(d=d, fa=_logistic_expr(ya), fb=_logistic_expr(yb)))
+    for e, n, kind in levels:
+        # acceptor: -N f, f = s(eta - E/V_t); donor: +N (1 - f) = +N s(E/V_t - eta); both d/dpsi = -N f (1-f)/V_t
+        x = "({} - ({!r}) / V_t)".format(eta, e) if kind == "acceptor" else "(({!r}) / V_t - {})".format(e, eta)
+        val.append("{}{!r} * {}".format("-" if kind == "acceptor" else "", n, _logistic_expr(x)))
+        der.append("-{!r} * {} * {} / V_t".format(n, _logistic_expr(x), _logistic_expr("(-{})".format(x))))
+    s_val, s_der = " + ".join(val), " + ".join(der)
+    ds.node_model(device=device, region=region, name="FitCharge{}".format(k),
+                  equation="ElectronCharge * ({})".format(s_val))
+    out["model"] = _PE.add_potential_charge_term(
+        device, region, "fit{}".format(k), "{} * ({})".format(a_name, s_val),
+        d_density_d_potential="{} * ({})".format(a_name, s_der))
+    out["index"], out["area"] = k, area
+    return out

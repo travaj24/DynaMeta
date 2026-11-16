@@ -241,7 +241,7 @@ def test_z5_installed_rate_equals_numpy_formula_on_solved_arrays(zener_sweep):
         Dm = 0.5 * (D[1:] + D[:-1])
         with np.errstate(under="ignore"):
             G = -A_SI * E ** P_SI * np.exp(-B_SI / E) * Dm
-        assert r["I"] == pytest.approx(Q * float(np.sum(G * np.diff(x))), rel=1e-12)
+        assert r["I"] == pytest.approx(Q * float(np.sum(G * np.diff(x))), rel=1e-12, abs=0)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -395,7 +395,7 @@ def test_i1_element_field_is_isotropic_and_integrates_exactly(dim, prm):
         ref = prm.A_SI * 1.5e8 ** prm.P * math.exp(-prm.B_V_per_m / 1.5e8) * float(np.sum(D * nv))
         got = float(np.sum((em("BTBT_U0") + em("BTBT_U1")) * em("ElementNodeVolume")))
         assert got == pytest.approx(ref, rel=1e-12)                   # MEASURED 5e-15
-        assert btbt_generation_current(dev, "r") == pytest.approx(-Q * ref, rel=1e-12)
+        assert btbt_generation_current(dev, "r") == pytest.approx(-Q * ref, rel=1e-12, abs=0)
     finally:
         _wipe(dev)
 
@@ -612,7 +612,7 @@ def mos_cap():
 
 def test_f1_oxide_field_matches_gauss_law(mos_cap):
     for vg, e_gauss, r, _, _ in [p for p in mos_cap if p[0] != "low"]:
-        assert r["E_ox_V_m"].size == 1 and r["area"][0] == 1.0 and r["t_ox_m"] == pytest.approx(T_OX)
+        assert r["E_ox_V_m"].size == 1 and r["area"][0] == 1.0 and r["t_ox_m"] == pytest.approx(T_OX, rel=1e-6, abs=0)
         # MEASURED 2.4e-8 .. 5.4e-8 (the residual is the body-contact flux: 60 nm = 15 Debye lengths)
         assert r["E_ox_V_m"][0] == pytest.approx(e_gauss, rel=1e-6)
         assert r["V_ox_V"][0] == pytest.approx(e_gauss * T_OX, rel=1e-6)
@@ -630,7 +630,7 @@ def test_f2_fn_line_slope_and_closed_form(mos_cap):
     slope, icpt = np.polyfit(1.0 / E, np.log(J / E ** 2), 1)
     assert slope == pytest.approx(-B, rel=1e-6)                    # 1e-6: field error 5e-8 x b ~ 25
     assert np.exp(icpt) == pytest.approx(A, rel=1e-5)
-    assert np.allclose(J, A * E ** 2 * np.exp(-B / E), rtol=5e-6)
+    assert np.allclose(J, A * E ** 2 * np.exp(-B / E), rtol=5e-6, atol=0)
 
 
 def test_f3_fn_warns_below_barrier_and_model_dispatch(mos_cap):
@@ -641,9 +641,9 @@ def test_f3_fn_warns_below_barrier_and_model_dispatch(mos_cap):
     for vg, e_gauss, r, rd, rs in [p for p in mos_cap if p[0] != "low"][::8]:
         v = r["V_ox_V"][0]
         assert rd["I"] == pytest.approx(tsu_esaki_current(v, T_OX, phi_b_eV=3.1, E_F_eV=0.1,
-                                                          m_supply_over_m0=0.5), rel=1e-12)
-        assert rs["I"] == pytest.approx(schuegraf_hu_current(v, T_OX), rel=1e-12)
-        assert rs["I"] == pytest.approx(r["I"], rel=1e-12)       # V_ox > phi_b: S-H == FN
+                                                          m_supply_over_m0=0.5), rel=1e-12, abs=0)
+        assert rs["I"] == pytest.approx(schuegraf_hu_current(v, T_OX), rel=1e-12, abs=0)
+        assert rs["I"] == pytest.approx(r["I"], rel=1e-12, abs=0)       # V_ox > phi_b: S-H == FN
 
 
 def test_f4_sign_follows_the_gate_polarity():
@@ -817,7 +817,9 @@ def test_w3_stacked3d_btbt_and_oxide_tunneling_wiring(tmp_path):
         s.teardown()
     ex = cf.extras["oxide_tunneling"]["oxide"]
     assert ex["I_A"] == r["I"] and ex["I_A"] > 0.0
-    assert r["area"].sum() == pytest.approx(4e-9 ** 2, rel=1e-3)   # MEASURED 6e-4 (tet face shares)
+    # the tet face shares partition the contact face exactly: MEASURED 1.9e-16 relative (round-off of a sum
+    # over a few dozen face triangles); 1e-12 is ~5000 ulp, far below any geometric error (a missing share)
+    assert r["area"].sum() == pytest.approx(4e-9 ** 2, rel=1e-12, abs=0)
     assert np.ptp(r["V_ox_V"]) / np.mean(r["V_ox_V"]) < 0.03       # MEASURED 1.5 % (the 3-D FV solution)
     # an insulated gate: the stack is in EQUILIBRIUM (n p = n_i^2), so the D factor zeroes BTBT even where
     # the accumulation field (~3e8 V/m in the Si) gives a Kane prefactor of ~1e34 m^-3 s^-1. MEASURED

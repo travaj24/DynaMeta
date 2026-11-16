@@ -114,8 +114,8 @@ def default_abs_tol(device: "str | None" = None) -> float:
 
     WHY EVERY LIVE DEVICE (v0.15 fix, 2026-11-06): DEVSIM's ds.solve runs ONE Newton over all live
     devices and requires abs < absolute_error on EACH of them, so the tolerance must be attainable on
-    the worst one. Sizing only the device being solved left a converged, heavier device from an
-    earlier fixture (a module-scoped 1-D MOS at 9 V accumulation: floor 2.0e11) above a light device's
+    the worst one. Sizing only the device being solved left a converged, heavier device kept alive by a
+    previously run test (a module-scoped 1-D MOS at 9 V accumulation: floor 2.0e11) above a light device's
     1.1e11 -- 60 iterations of stall in a 2-D builder solve whose own physics had converged to
     relative 1e-15 (tests/test_dc_solve_abs_tol.py::test_default_sizes_every_live_device).
     u_d = 2^-53 for a double device and 2^-113 for an extended-precision one (its residual is
@@ -179,7 +179,18 @@ def solve_dc(device: str, *, method: str = "newton",
     converged update may never meet; whether the solve exits then depends on the last bits (BLAS build,
     CPU). The failure message lists every unmet test INCLUDING the circuit, tags such entries with the
     bound |x| <= ... (_unmet_tests), and, when they are all of that kind, explains it (ZERO_UNKNOWN_NOTE)
-    instead of running the conditioning diagnosis."""
+    instead of running the conditioning diagnosis.
+
+    TIGHT CONVERGENCE ON A POTENTIAL-ONLY DEVICE (every semiconductor region in equilibrium mode, so
+    Potential is the only unknown). At a 0 V seed every potential is ~0, and in the screened interior of
+    a degenerate film it stays ~0 at any bias, so rel_tol acts there as |dx| < rel_tol x 1e-10 V: MEASURED
+    on the gated 6 nm degenerate film of tests/_gated_film_fixture.py (LayeredDevsimBuilder, 0 V and 0.5 V),
+    rel_tol 1e-5 and 1e-6 converge on both meshes; 1e-7 converges on the default (screening-graded) mesh and
+    fails on the legacy one, 1e-8 fails on both, each failure at the 0 V seed with the zero-unknown note
+    (relative 2.6e-8 on the default mesh, 1.3e-7 to 3.6e-7 on the legacy one, at absolute updates of 3e-18 to
+    5e-17 V); abs_tol=1e-14 converges at 0 V and 0.5 V on both meshes. Set a tight target with
+    abs_tol IN VOLTS (e.g. 1e-14, stricter than rel_tol=1e-7 on a 0.5 V swing) and keep rel_tol at its
+    default; nothing maps one to the other automatically."""
     if method == "newton":
         if abs_tol is None:
             abs_tol = default_abs_tol()

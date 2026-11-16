@@ -369,7 +369,7 @@ def test_d1c_lifetime_oracle_with_kinetic_levels(E):
     _tau, tau_full = TT._tau_closed_form(E, tau_n0, tau_p0, n0, p0)
     Lp = math.sqrt(0.048 * V_T * tau_full)
     tau_meas = dp / G / (1.0 - 1.0 / math.cosh(0.5 * L / Lp))
-    assert tau_meas == pytest.approx(tau_full, rel=1e-4)
+    assert tau_meas == pytest.approx(tau_full, rel=1e-4, abs=0)
 
 
 @pytest.mark.parametrize("case", ["acceptor_in_n", "donor_in_p"])

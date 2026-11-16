@@ -534,6 +534,18 @@ def main():
         print("[lp2b] *** SKIP: lumenairy not installed -- PMM2D gates not run ***",
               flush=True)
         return True
+    # the pure engine's tensor / per-layer / curved-shape paths are feature-gated by the bridge
+    # (_common.FEATURE_FLOORS); on an older lumenairy this script would die in the first refusal, so it
+    # declares the capability absent instead (run_all exit code 42)
+    from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS, lumenairy_has
+    missing = [f for f in ("pmm2d_pure_tensor", "pmm2d_pure_per_layer", "pmm2d_pure_shapes")
+               if not lumenairy_has(f)]
+    if missing:
+        import lumenairy
+        print("[lp2b] *** SKIP (capability absent): lumenairy {} lacks {} ***".format(
+            lumenairy.__version__, ", ".join("{} (>= {})".format(f, ".".join(map(str, FEATURE_FLOORS[f][0])))
+                                            for f in missing)), flush=True)
+        raise SystemExit(42)
     from dynameta.optics.lumenairy_bridge import (make_lumenairy_pmm2d_solver,
                                                   make_lumenairy_rcwa_solver,
                                                   pure_union_grid_n)

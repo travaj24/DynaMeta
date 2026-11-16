@@ -57,8 +57,8 @@ def test_normal_incidence_s_p_degenerate():
     layers = [(complex(2.5) ** 2, 200e-9)]
     s = layered_smatrix_complex(omega, layers, pol="s", n_super=1.0, n_sub=1.0)
     p = layered_smatrix_complex(omega, layers, pol="p", n_super=1.0, n_sub=1.0)
-    assert s.R == pytest.approx(p.R, rel=1e-12)
-    assert s.T == pytest.approx(p.T, rel=1e-12)
+    assert s.R == pytest.approx(p.R, rel=1e-12, abs=0)
+    assert s.T == pytest.approx(p.T, rel=1e-12, abs=0)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1012,7 +1012,7 @@ def test_q_budget_reports_the_dispersive_omega0_shift():
         assert out["pole_rad_ok"] and np.isfinite(out["omega0_shift_rel"])
         # it is a genuine measurement of the two passes, not a placeholder
         assert out["omega0_shift_rel"] == pytest.approx(
-            (out["pole_rad"].real - out["pole_total"].real) / out["pole_total"].real, rel=1e-12)
+            (out["pole_rad"].real - out["pole_total"].real) / out["pole_total"].real, rel=1e-12, abs=0)
         shifts.append(abs(out["omega0_shift_rel"]))
     # DISCRIMINATION: the bias grows with gamma/omega_0, which is the whole point of reporting it
     assert shifts[1] > shifts[0]

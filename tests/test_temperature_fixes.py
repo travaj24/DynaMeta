@@ -289,7 +289,7 @@ def test_interface_trap_bins_follow_the_region_kT_at_77K():
     1.89e6 m^-2 against the 1.94e6 bound (the m = 1 alias term is nearly sharp)."""
     levels, vt = _install_traps_at(T77, "77")
     kt = KB_SI * T77 / Q_SI
-    assert vt == pytest.approx(kt, rel=1e-14)
+    assert vt == pytest.approx(kt, rel=1e-14, abs=0)
     e = np.sort(np.array([lv[0] for lv in levels]))
     widths = np.diff(e)
     assert np.all(widths <= kt * (1.0 + 1e-12)), widths.max() / kt

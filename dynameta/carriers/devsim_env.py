@@ -56,6 +56,12 @@ there is unchanged; DYNAMETA_DEVSIM_BLAS=pin applies the same resolution on any 
 The choice is exported through os.environ, so child processes that import devsim inherit it (and
 treat it as a user setting). Stdlib-only at import time; nothing happens until
 configure_math_libs() / import_devsim() is called.
+
+DEVSIM OUTPUT VERBOSITY (DEVSIM behaviour, not set by dynameta). dynameta never sets DEVSIM's
+`debug_level` parameter. If you set it yourself, devsim.set_parameter(name="debug_level", value=...),
+note that DEVSIM (2.11.2, MEASURED on a gated-film build + solve) treats "error" like "verbose": both
+print every Newton iteration's per-region report (911 lines there), while leaving it unset or "info"
+prints the shorter default report (300 lines). "error" therefore does not quieten the solver output.
 """
 
 from __future__ import annotations

@@ -38,7 +38,7 @@ def test_kane_matches_dispersion_reference():
     # exact Kane optical mass vs the numeric hbar k_F / (dE/dk) of the dispersion --
     # the pre-audit halved closure misses this by ~2x in the enhancement (fails hard)
     m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
-    assert np.allclose(m(N), _dispersion_optical_mass(N), rtol=1e-9)
+    assert np.allclose(m(N), _dispersion_optical_mass(N), rtol=1e-9, atol=0)
 
 
 def test_kane_legacy_equivalence_and_guard():
@@ -47,7 +47,7 @@ def test_kane_legacy_equivalence_and_guard():
     # legacy-only knob
     m_new = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
     m_old = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=1.0, legacy=True)
-    assert np.allclose(m_new(N), m_old(N), rtol=1e-14)
+    assert np.allclose(m_new(N), m_old(N), rtol=1e-14, atol=0)
     with pytest.raises(ValueError):
         KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5, exponent=1.0)
 

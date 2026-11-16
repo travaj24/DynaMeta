@@ -521,7 +521,7 @@ def test_heterojunction_with_bgn_built_in_voltage_matches_band_diagram(hetero_bg
     h = hetero_bgn
     assert h["ifaces"] == {"pgaas__nalgaas": "thermionic" if h["model"] == "auto" else "continuous"}
     dEg = float(h["dEg"])
-    assert dEg == pytest.approx(0.02 * math.sqrt(0.5), rel=1e-12)
+    assert dEg == pytest.approx(0.02 * math.sqrt(0.5), rel=1e-12, abs=0)
     eta_n = fd_eta(1e23 / nc_m3(ALGAAS["me"]))
     eta_p = fd_eta(1e23 / nc_m3(GAAS["mh"]))
     w_n = ALGAAS["chi"] + 0.3 * dEg - eta_n * V_T

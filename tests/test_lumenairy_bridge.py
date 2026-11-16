@@ -51,7 +51,7 @@ def test_uniform_stack_matches_tmm():
     assert r_r.R == pytest.approx(r_t.R, abs=1e-10)
     assert r_r.T == pytest.approx(r_t.T, abs=1e-10)
     assert r_r.phase_deg == pytest.approx(r_t.phase_deg, abs=1e-8)
-    assert r_r.R_flux == pytest.approx(r_r.R)            # RCWA R is already a flux quantity
+    assert r_r.R_flux == pytest.approx(r_r.R, abs=0)            # RCWA R is already a flux quantity
 
 
 @needs_lum
@@ -96,7 +96,7 @@ def test_round_trip_design_geometry():
     for a, b in zip(d0.stack.layers, d1.stack.layers):
         assert b.thickness_m == pytest.approx(a.thickness_m, abs=1e-18)
         assert complex(d1.materials.get(b.background_material).eps(1.31e-6)) == \
-            pytest.approx(complex(d0.materials.get(a.background_material).eps(1.31e-6)))
+            pytest.approx(complex(d0.materials.get(a.background_material).eps(1.31e-6)), abs=0)
 
 
 @needs_lum
@@ -126,8 +126,8 @@ def test_pmm_lamellar_segments_partition():
     lay = Layer("g", 120e-9, "air", inclusions=[lines])
     segs = layer_to_pmm_segments(lay, d, 1.31e-6, per, per)
     assert sum(w for w, _ in segs) == pytest.approx(1.0, abs=0.0)  # exact unit sum
-    assert any(e == pytest.approx(complex(4.0, 0.3)) for _, e in segs)
-    assert any(e == pytest.approx(1.0 + 0j) for _, e in segs)
+    assert any(e == pytest.approx(complex(4.0, 0.3), abs=0) for _, e in segs)
+    assert any(e == pytest.approx(1.0 + 0j, abs=0) for _, e in segs)
 
 
 @needs_lum
@@ -187,8 +187,8 @@ def test_pmm2d_pure_translation_and_guards():
     assert pure_union_grid_n(d) == 4
     cell = layer_to_pure_cell(d.stack.layers[0], d, 1.31e-6, per, per, 4)
     assert cell.shape == (4, 4)
-    assert np.allclose(cell[1:3, :], 6.0 + 0j)   # ridge spans full y (lamellar)
-    assert np.allclose(cell[0, :], 1.0 + 0j) and np.allclose(cell[3, :], 1.0 + 0j)
+    assert np.allclose(cell[1:3, :], 6.0 + 0j, atol=0)   # ridge spans full y (lamellar)
+    assert np.allclose(cell[0, :], 1.0 + 0j, atol=0) and np.allclose(cell[3, :], 1.0 + 0j, atol=0)
     make_lumenairy_pmm2d_solver(engine="pure", absorption=True)   # now supported (C3)
     with _pytest.raises(ValueError):
         make_lumenairy_pmm2d_solver(engine="fmm")
@@ -200,9 +200,9 @@ def test_callable_optical_dispersion_chain():
                                                   optical_model_to_lumenairy_eps)
     fn = lambda wl: complex(2.0 + 0.1 * (wl / 1e-6))
     model = CallableOptical(fn)
-    assert model.eps(1.5e-6) == pytest.approx(fn(1.5e-6))
+    assert model.eps(1.5e-6) == pytest.approx(fn(1.5e-6), abs=0)
     back = optical_model_to_lumenairy_eps(model)
-    assert back(1.5e-6) == pytest.approx(fn(1.5e-6))
+    assert back(1.5e-6) == pytest.approx(fn(1.5e-6), abs=0)
 
 
 @needs_lum
@@ -630,7 +630,7 @@ def test_drude_eps_jax_matches_material_model():
     model = DrudeOptical(eps_inf=3.9, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
     fn = drude_eps_jax(model)
     n, lam = 4.0e26, 1.31e-6
-    assert fn(n, lam) == pytest.approx(complex(model.eps(lam, n_m3=n)), rel=1e-14)
+    assert fn(n, lam) == pytest.approx(complex(model.eps(lam, n_m3=n)), rel=1e-14, abs=0)
     with pytest.raises(NotImplementedError):
         drude_eps_jax(DrudeOptical(eps_inf=3.9, m_opt_kg=lambda x: 0.30 * M_E,
                                    gamma_rad_s=1.2e14))
@@ -791,7 +791,22 @@ def test_pmm_absorption_parity_surface():
     assert set(r1.per_region_absorption) == {"a"}
     assert r1.A_independent == pytest.approx(r1.A, abs=1e-9)
     assert r1.per_region_absorption["a"] == pytest.approx(r1.A_independent, abs=1e-12)
-    assert r1.R == r0.R and r1.T == r0.T
+    assert r1.R == r0.R and r1.T == r0.T           # the bridge reports the plain solve's R / T
+    # ... and the retained solve the absorption block integrates is the SAME solution: its own
+    # far field equals the plain solve's. lumenairy 5.51 runs the retained solve through its dense
+    # cascade and the plain one through the uniform-layer fast path; MEASURED relative differences
+    # in R / T / Jones: <= 1.5e-15 on this layer and <= 1.1e-14 over four cells (this layer and the
+    # strip cell, normal and oblique, s and p) on 5.51.0; bit-identical on 5.50.2 and 5.22.0. Bar
+    # 1e-13 (round-off of two orderings of one cascade; a retained path solving anything else,
+    # even a 1e-12 relative change of one permittivity, misses it).
+    import numpy as np
+    from dynameta.optics.lumenairy_bridge import design_to_pmm_stack
+    st, _ = design_to_pmm_stack(d, lam)
+    st.set_source(lam, theta=0.0, phi=0.0)
+    _o, Rp, Tp, Jp = (np.asarray(v) for v in st.solve())
+    _o, Rr, Tr, Jr = (np.asarray(v) for v in st.solve(retain_internal=True))
+    for plain, kept in ((Rp.sum(1), Rr.sum(1)), (Tp.sum(1), Tr.sum(1)), (Jp, Jr)):
+        assert np.max(np.abs(kept - plain)) <= 1e-13 * np.max(np.abs(plain)), (plain, kept)
     # consumer-gap B minimal cut: OpticalResult.t (transmission Jones) is now filled (was None)
     assert r0.t is not None and abs(r0.t) > 0.0
 

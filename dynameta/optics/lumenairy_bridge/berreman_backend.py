@@ -77,8 +77,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
+from dynameta.core.lateral import is_uniform_cell
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
-                                   slice_eps_field)
+                                   slice_layer_eps_field)
 from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       guard_incidence_side as _guard_incidence_side,
                                                       p_basis_conversion as _p_basis_conversion,
@@ -109,12 +110,12 @@ def _uniform_tensor(cell, *, where: str):
     """A LAYERED (Sx, Sy, 3, 3) eps_tensor_cell that is constant across the cell -> its single
     (3, 3) tensor. Berreman is the PLANAR tier, so a tensor cell that actually varies in x/y is
     a patterned anisotropic layer and RAISES with a pointer to the RCWA backend (the dispatch
-    boundary). A (1, 1, 3, 3) cell (the uniform output of slice_eps_field) passes trivially."""
+    boundary). A (1, 1, 3, 3) cell (the uniform output of slice_layer_eps_field) passes trivially."""
     c = np.asarray(cell, dtype=complex)
     if c.ndim != 4 or c.shape[-2:] != (3, 3):
         raise ValueError("Berreman backend: {} eps_tensor_cell must be (Sx, Sy, 3, 3); got "
                          "shape {}.".format(where, c.shape))
-    if not np.allclose(c, c[:1, :1], rtol=1e-12, atol=0.0):
+    if not is_uniform_cell(c):
         raise NotImplementedError(
             "Berreman backend: {} carries a LATERALLY-STRUCTURED (patterned) anisotropic "
             "eps_tensor_cell; Berreman is the PLANAR (laterally-uniform) tier -- use the RCWA "
@@ -144,9 +145,10 @@ def design_to_berreman_layers(design, lambda_m: float, *, eps_by_region=None,
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
-            # slice_eps_field returns ascending-z (substrate-first) slabs; this list
-            # is superstrate-first, so reverse (audit C5-1)
-            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
+            # slice_layer_eps_field returns ascending-z (substrate-first) slabs; this list
+            # is superstrate-first, so reverse (audit C5-1). It raises unless the slabs sum
+            # to the layer thickness (axes in nm).
+            for slab in reversed(slice_layer_eps_field(ef, L, 1.0 / _S_NM, n_slices=n_slices)):
                 if slab.eps is not None:
                     layers.append((complex(slab.eps), float(slab.thickness_m)))
                 elif slab.eps_tensor_cell is not None:
@@ -310,6 +312,9 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
 
     _solve.solve_sweep = _solve_sweep
     _solve.cache_fingerprint = "berreman(absorption={},n_slices={})".format(absorption, n_slices)
+    # capability flag read by run_pipeline: this solver slices a carrier field on its native
+    # (non-uniform) z grid exactly, one slab per native interval
+    _solve.native_carrier_grid = True
     return _solve
 
 

@@ -349,8 +349,8 @@ def test_flat_wall_dark_space_matches_the_closed_form_for_both_carriers():
     ii = V.dg_wall_constant()
     assert ii == pytest.approx(1.187207, abs=2e-6)
     fw = V.flat_wall()
-    assert fw["electrons"][2] == pytest.approx(1.3746e-9, rel=1e-4)
-    assert fw["holes"][2] == pytest.approx(1.0013e-9, rel=1e-4)
+    assert fw["electrons"][2] == pytest.approx(1.3746e-9, rel=1e-4, abs=0)
+    assert fw["holes"][2] == pytest.approx(1.0013e-9, rel=1e-4, abs=0)
     for key, (dfc, zerr, _lq) in fw.items():
         assert abs(dfc / ii - 1.0) < 1e-4, key
         assert zerr < 1e-3, key

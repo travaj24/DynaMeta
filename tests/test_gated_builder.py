@@ -160,6 +160,13 @@ from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import ac_analysis as AC, eq_registry as R, devsim_3d as D3
 from dynameta.sweep import BiasPoint
 physics, GATE = sys.argv[1], "top_contact"
+# v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the shared
+# validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg, so every build
+# of it warns once.
+# This child runs under -W error and the advisory is not what it tests: ignore exactly that message.
+import warnings
+from dynameta.warning_types import AdvisoryWarning
+warnings.filterwarnings("ignore", message=r".*dos_mass_kg_of_n_m3 is density-dependent.*", category=AdvisoryWarning)
 
 def state(dev):
     out = {}
@@ -182,12 +189,19 @@ def wipe():
     except Exception:
         pass
 
+def refmod(physics):
+    # the LEGACY z mesh lines: this gate is about solve() after set_ssac_gate (state handling, every comparison
+    # on one mesh), not mesh accuracy; the v0.16 default grading made the drift-diffusion case 8x slower
+    import dataclasses
+    d = build_reference_modulator(physics)
+    return dataclasses.replace(d, mesh_2d=dataclasses.replace(d.mesh_2d, semiconductor_refinement="legacy"))
+
 res = {}
-f = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="f_m", device_name="f_d")
+f = LayeredDevsimBuilder(refmod(physics), mesh_name="f_m", device_name="f_d")
 f.solve(BiasPoint({GATE: 2.0}, "g2"))
 ref = state("f_d")
 wipe()
-b = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="a_m", device_name="a_d")
+b = LayeredDevsimBuilder(refmod(physics), mesh_name="a_m", device_name="a_d")
 b.solve(BiasPoint({GATE: 1.0}, "g1"))
 b.set_ssac_gate(GATE, source_name="V1")
 ds.circuit_alter(name="V1", value=1.0)
@@ -201,7 +215,7 @@ res["voltages"] = dict(cf.voltages)
 wipe()
 
 # a contact repointed circuit-driven OUTSIDE set_ssac_gate: solve() cannot know its source -> refuse
-r = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="r_m", device_name="r_d")
+r = LayeredDevsimBuilder(refmod(physics), mesh_name="r_m", device_name="r_d")
 r.solve(BiasPoint({GATE: 1.0}, "g1"))
 ds.delete_contact_equation(device="r_d", contact=GATE, name="PotentialEquation")
 R.forget("r_d", "PotentialEquation", loc=GATE)

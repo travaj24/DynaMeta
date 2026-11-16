@@ -116,7 +116,7 @@ def test_kuhn_tets_conform_tile_the_box_and_are_closed_well_centred():
     X = P[T]
     D = X[:, 1:] - X[:, :1]
     vol = np.linalg.det(D) / 6.0
-    assert np.all(np.abs(vol) > 0.0) and np.isclose(np.abs(vol).sum(), 3.0 * 2.5 * 4.0, rtol=1e-14)
+    assert np.all(np.abs(vol) > 0.0) and np.isclose(np.abs(vol).sum(), 3.0 * 2.5 * 4.0, rtol=1e-14, atol=0)
     faces = {}
     for t in T:
         for o in range(4):

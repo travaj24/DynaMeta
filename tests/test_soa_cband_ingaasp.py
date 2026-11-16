@@ -128,7 +128,7 @@ def test_preset_composition_is_lattice_matched_by_vegard_on_the_binary_constants
     z, x = Z_C, 0.47 * Z_C
     a_q = x * z * A_GAAS + x * (1 - z) * A_GAP + (1 - x) * z * A_INAS + (1 - x) * (1 - z) * A_INP
     mis = (a_q - A_INP) / A_INP
-    assert BT.ingaasp_lattice_mismatch(z) == pytest.approx(mis, rel=1e-12)
+    assert BT.ingaasp_lattice_mismatch(z) == pytest.approx(mis, rel=1e-12, abs=0)
     assert abs(mis) < BT.LATTICE_MATCH_RTOL
     assert mis == pytest.approx(-3.50e-4, abs=0.01e-4)
     x_exact = z * (A_INAS - A_INP) / (z * (A_INAS - A_GAAS) + (1 - z) * (A_INP - A_GAP))

@@ -11,25 +11,34 @@ name: CI
 #   test     ubuntu  3.11   (every leg lands on the NEWEST     fast suite                     unchanged
 #   test     ubuntu  3.12    numpy 2.x -- `numpy>=1.24` is an  fast suite + coverage          + cov overhead
 #   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite                     unchanged
-#   smoke    ubuntu  3.13 core+dev+plot+h5py+zarr+jax          93-script smoke validation     ~50 min
+#   smoke    ubuntu  3.13 core+dev+plot+h5py+zarr+jax          98-script smoke validation     ~50 min
 #                                                              tier (own job -- see it)       (parallel)
 #   floor    ubuntu  3.10 the OLDEST DECLARED pins             import sweep + fast suite      1 suite / ncores
 #                                                              (`-n auto`, the WHOLE suite,    (xdist)
 #                                                              no per-file exclusions; one
 #                                                              module self-skips on numpy 1.x)
 #   numba    windows 3.12 core+dev+[numba]                     16 numba tests + parity oracle ~8 min
+#                                                              + fdtd_3d_reduces (2026-11-14)
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
-#   solvers  ubuntu  3.12 core+dev+plot+[solvers]              31 FEM/DEVSIM modules + 3 FEM  ~10 min
+#   solvers  ubuntu  3.12 core+dev+plot+[solvers]              41 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
-#   solvers- ubuntu  3.12 same as `solvers` + mpmath           39 DEVSIM modules (v0.14 +     ~23-35 min
+#   solvers- ubuntu  3.12 same as `solvers` + mpmath           32 DEVSIM modules (v0.14 +     ~23-35 min
 #   devsim                                                     v0.15; own job, see it)        (parallel;
 #                                                                                              ESTIMATE)
-#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~21-26 min
-#            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
-#            DISPATCH ONLY                                     oracles                          on PRs)
+#   solvers- ubuntu  3.12 same as solvers-devsim               the other 21 DEVSIM modules    (split
+#   devsim-2                                                   (split 2026-11-14)             2026-11-14)
+#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set minus the DEVSIM     ~46-50 min
+#            SCHEDULE +       +h5py/zarr/jax                   files + the 2 heavy FEM         dev box
+#            DISPATCH ONLY                                     modules + the 4 heavy FEM       each (never
+#                                                              oracles                          on PRs)
+#   nightly- same as nightly                                   the DEVSIM @slow cases         (split
+#   devsim                                                                                     2026-11-14)
+#   nightly- same as nightly + numba                           the 2-D nonlocal BTBT @slow
+#   btbt2d                                                     cases
 #   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      42-89 min
-#   validat. SCHEDULE +                                        sharded 4 ways (run_all         per shard,
-#   (x4)     DISPATCH ONLY                                     --shard K/4), in parallel       MEASURED
+#   validat. SCHEDULE +                                        sharded 6 ways (run_all         per shard,
+#   (x6)     DISPATCH ONLY                                     --shard K/6), in parallel       MEASURED
+#                                                              (4 ways until 2026-11-14)       at N=4
 #                                                                                              (~25% runner
 #                                                                                               variance)
 #
@@ -338,6 +347,12 @@ jobs:
       - name: Run the numba parity oracle for real
         # ~60 s with numba present (measured). This is the oracle that exited 42 and read green.
         run: python -m validation.run_all --tier smoke qd_soa_numba_parity
+      - name: Run the 3-D FDTD reduction oracle (its order probe needs numba)
+        # validation.fdtd_3d_reduces gates its GATE A convergence order on the numba backend, so it exits 42 on the
+        # nightly-validation job (no numba there, by design). This is the one job that installs numba; without this
+        # step its gates would run nowhere. Non-smoke invocation: a 42 here would be informational, but numba is
+        # asserted importable above.
+        run: python -m validation.run_all fdtd_3d_reduces
 
   lint:
     # audit T-4: ruff was pinned in [dev] and invoked by no leg while 178 violations accumulated.
@@ -443,7 +458,13 @@ jobs:
             tests/test_pipeline_effects.py tests/test_polarization_vocabulary.py \
             tests/test_qcse.py tests/test_sfg_fem.py \
             tests/test_shg_fem.py tests/test_solver_guards.py \
-            tests/test_stacked3d_spec.py tests/test_thermal_twotemp.py
+            tests/test_stacked3d_spec.py tests/test_thermal_twotemp.py \
+            tests/test_fem_2d_tm.py tests/test_fem_2d_tm_hydro.py \
+            tests/test_pmm_lateral_partition.py \
+            tests/test_rcwa_auto_formulation.py tests/test_fem_2d_tm_shared_kz.py \
+            tests/test_quantum_film_cell.py tests/test_pmm_tensor_layer.py \
+            tests/test_cross_route_uniform_film.py tests/test_fem_2d_tm_review_fixes.py \
+            tests/test_lumenairy_feature_detection.py
       - name: Run the FEM/DEVSIM validation smoke subset
         # The solver-backed oracles the smoke tier cannot reach at all (run_all's SMOKE set is
         # pure-numpy by construction). These two tokens select THREE scripts -- electrostatics_fem
@@ -608,9 +629,37 @@ jobs:
     #   corner 16 s, the 1 nm slant 18 s, the 3-D Kuhn bar 17 s; no test above ~45 s), i.e. ~1.5-2 min on the
     #   runner (0.5-0.8x, INFERRED). Its 2 @slow reference re-measurements (99 s corner, ~16 min slant with the
     #   50k-node mesh; one child process per mesh) run nightly, step (a).
+    # + tests/test_carrier_native_grid.py and tests/test_mesh_screening_grading.py (v0.16: native carrier z grid,
+    #   screening-length mesh grading; docs/audit/2026-11-14-v0.16-carrier-grid-mesh.md): 19 fast tests, ~20 s
+    #   serial MEASURED on the Windows dev box (the longest, the default-grading gate against the in-test 1-D
+    #   solve, ~4 s per film thickness).
+    # + tests/test_equilibrium_charges.py (v0.16 carrier physics primitives; docs/audit/2026-11-14-v0.16-carrier-
+    #   physics-primitives.md) and the v0.16 wiring files tests/test_layered_edge_reference.py,
+    #   tests/test_layered_charges.py, tests/test_stacked3d_wiring.py, tests/test_pipeline_native_tmm.py
+    #   (docs/audit/2026-11-14-v0.16-carrier-wiring.md): 8 / 13 / 12 / 4 / 1 s of pytest time, ~55 s wall with
+    #   interpreter start-up, serial MEASURED on the Windows dev box (55 tests; two devsim_isolated children).
+    # + tests/test_kane_band_devsim.py (v0.16 Kane band in the electrostatics; docs/audit/2026-11-14-v0.16-kane-
+    #   band.md): 11 tests, ~12 s of pytest time serial MEASURED on the Windows dev box.
+    # + tests/test_equilibrium_density_gradient.py (v0.16 in-Newton density gradient on equilibrium regions;
+    #   docs/audit/2026-11-14-v0.16-equilibrium-density-gradient.md): 17 fast tests (+1 @slow), ~90 s of pytest time
+    #   serial MEASURED on the (loaded) Windows dev box; the longest, the structured-gate test, ~35 s.
+    # + tests/test_devsim_gate_leakage.py (v0.16 gate leakage / lateral Fermi field; docs/audit/2026-11-14-v0.16-gate-
+    #   leakage-lateral-drop.md): 14 fast tests (+1 @slow), ~100 s of pytest time serial MEASURED on the (loaded) Windows
+    #   dev box; every device scenario is a child process (custom term).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
-    name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
+    # SPLIT 2026-11-14 (v0.16 full run). The proposal above ("split this job in two by measured time ... SPLIT
+    # BEFORE THE NEXT DEVSIM MODULE IS ADDED") came due: v0.16 added nine DEVSIM modules and the finer default
+    # 2-D mesh, and the 53-file step took 42.7 / 31.4 min at -n 2 on the loaded Windows dev box (two runs of the
+    # same command) against this job's 40-min cap. The list is now two jobs, cut by the MEASURED per-file test
+    # time of that first run (pytest's own time summed over both xdist workers, 5085 s): this job 32 files /
+    # ~2446 s (the v0.14 modules, noise, oxide tunnelling, extended precision, traps), `solvers-devsim-2` 21 files
+    # / ~2639 s (FD statistics, nonlocal and local BTBT resolution, the v0.15.1 junction band and the v0.16
+    # carrier-path files). At -n 2 that is ~20-22 min wall per job on that box, ~10-18 min on the runner at the
+    # 0.5-0.8x ratio quoted above (INFERRED), ~2x under each 40-min cap. Both jobs install the same stack (numba
+    # for test_btbt_nonlocal_2d, mpmath for the closed-form oracles of wave7 / bipolar DG / SG flux). ADD A NEW
+    # DEVSIM MODULE TO THE SHORTER OF THE TWO, with its measured time.
+    name: solvers-devsim (DEVSIM modules, part 1 of 2, py3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -628,26 +677,52 @@ jobs:
           pip install -e ".[dev,plot,solvers,numba]" mpmath pytest-xdist
       - name: Assert the solver stack really imported
         run: python -c "import ngsolve, devsim, gmsh, mpmath, numba; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok'); print('numba', numba.__version__)"
-      - name: Run the DEVSIM test modules (v0.14 + v0.15)
+      - name: Run the DEVSIM test modules, part 1 of 2 (v0.14 modules, noise, tunnelling, precision)
         run: |
           pytest -q -n 2 -m "not slow" \
-            tests/test_audit_2026_07_17_wave7_carriers.py tests/test_audit_2026_07_25_conventions.py \
-            tests/test_bipolar_density_gradient.py tests/test_bipolar_recombination_bgn_ionization.py \
-            tests/test_devsim_3d_mesh.py tests/test_devsim_heterojunction.py \
-            tests/test_devsim_noise.py tests/test_devsim_noise_hooge.py \
-            tests/test_devsim_phase_composition.py tests/test_devsim_tunneling.py \
-            tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
-            tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
-            tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py tests/test_custom_terms.py \
-            tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py \
+            tests/test_audit_2026_07_17_wave7_carriers.py tests/test_audit_2026_07_25_conventions.py tests/test_bipolar_density_gradient.py \
+            tests/test_bipolar_recombination_bgn_ionization.py tests/test_devsim_3d_mesh.py tests/test_devsim_heterojunction.py \
+            tests/test_devsim_noise.py tests/test_devsim_noise_hooge.py tests/test_devsim_phase_composition.py \
+            tests/test_devsim_tunneling.py tests/test_extended_precision.py tests/test_trap_energy_reference.py \
+            tests/test_traps.py tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py \
+            tests/test_devsim_element_geometry.py tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py \
+            tests/test_custom_terms.py tests/test_noise_two_point.py tests/test_devsim_band_temperature.py \
             tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
-            tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
-            tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
-            tests/test_devsim_noise_method.py tests/test_quasi_equilibrium.py tests/test_devsim_btbt_resolution.py \
-            tests/test_trap_noise.py tests/test_fd_mode_complete.py tests/test_btbt_nonlocal_2d.py \
-            tests/test_devsim_junction_band.py tests/test_devsim_btbt_resolution_2d.py \
-            tests/test_valley_density_gradient.py
+            tests/test_devsim_oxide_tunneling_sc.py tests/test_devsim_isolated.py tests/test_trap_kinetics.py \
+            tests/test_noise_hooge_mapping.py tests/test_devsim_noise_method.py
+
+  solvers-devsim-2:
+    # Part 2 of the DEVSIM test modules: the split, its measured times and the add-here rule are in the
+    # `solvers-devsim` job's comment. Same install as part 1 (keep the two install steps identical).
+    name: solvers-devsim-2 (DEVSIM modules, part 2 of 2, py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # same system libs and install as `solvers` (+ mpmath, the independent high-precision oracle three
+      # of these gates use: wave7 carriers' Fermi-integral and bipolar DG's 2 closed-form checks)
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
+      - name: Install (core + dev + plot + solvers + mpmath)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers,numba]" mpmath pytest-xdist
+      - name: Assert the solver stack really imported
+        run: python -c "import ngsolve, devsim, gmsh, mpmath, numba; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok'); print('numba', numba.__version__)"
+      - name: Run the DEVSIM test modules, part 2 of 2 (FD statistics, BTBT, junction band, v0.16 carrier path)
+        run: |
+          pytest -q -n 2 -m "not slow" \
+            tests/test_fd_mode_complete.py tests/test_btbt_nonlocal_2d.py tests/test_btbt_nonlocal.py \
+            tests/test_devsim_gate_leakage.py tests/test_valley_density_gradient.py tests/test_devsim_btbt_resolution_2d.py \
+            tests/test_devsim_btbt_resolution.py tests/test_devsim_btbt_presets.py tests/test_equilibrium_density_gradient.py \
+            tests/test_devsim_junction_band.py tests/test_carrier_native_grid.py tests/test_mesh_screening_grading.py \
+            tests/test_equilibrium_charges.py tests/test_layered_edge_reference.py tests/test_layered_charges.py \
+            tests/test_stacked3d_wiring.py tests/test_pipeline_native_tmm.py tests/test_kane_band_devsim.py \
+            tests/test_quasi_equilibrium.py tests/test_si_bundles_devsim.py tests/test_trap_noise.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
@@ -698,6 +773,16 @@ jobs:
     # (12:53 -> 13:08 in the same log). 90 is a 6x cap over that, not a budget. v0.15 adds ~11 min of
     # DEVSIM @slow cases to (a) (dev-box figure; ~6-9 min on the runner if the solvers-devsim ratio
     # 0.5-0.8x holds -- INFERRED), so expect ~21-26 min: still ~3.5x under the cap.
+    # SPLIT 2026-11-14 (v0.16 full run): this job measured (a) 77.8 + (a2) 46.2 + (b1) 9.3 + (c1) 11.7 = ~145 min
+    # on the loaded Windows dev box (~73-116 min on the runner at 0.5-0.8x, INFERRED) against the 90-min cap.
+    # The biggest items were DEVSIM @slow cases (the 50k-node slant reference 913-1866 s, noise-method W7 865 s)
+    # and the (a2) corner measurements (1245 + 1134 s). Now three schedule-only jobs, each ~46-50 min on that box
+    # (~23-40 min on the runner), ~2x under its 90-min cap:
+    #   nightly         (a) @slow minus the 13 DEVSIM files (~29 min: test_soa 685 s, ringdown 248 s,
+    #                   fem_2d_tm 227 s, quantum_film_cell 165 s, ...) + (b1) 9.3 + (c1) 11.7 min
+    #   nightly-devsim  (a') the DEVSIM @slow cases of those 13 files (~49 min measured before the
+    #                   2026-11-14 mesh change; the noise-method W7 builds now pin their mesh, see its test)
+    #   nightly-btbt2d  (a2) the 2-D nonlocal BTBT @slow cases with numba (46.2 min)
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -746,19 +831,23 @@ jobs:
         # thin wrappers around validation modules (c2) also runs, but only the pytest route puts
         # them under pyproject's `filterwarnings = ["error", ...]` policy -- a RuntimeWarning on a
         # default path fails here and is invisible to run_all's exit-code gate.
-        run: pytest tests/ -q -m slow
-      - name: (a2) the 2-D nonlocal BTBT @slow cases (numba)
-        # The rotated-junction convergence gates (4 x ~30 s), their refutation, the DEVSIM rotation-term
-        # refutation (~50 s) and the corner-geometry measurement (890 s MEASURED on the loaded dev box:
-        # two 12769-node devices x two models, 18 Newton solves each): ~18 min in all, so this job's
-        # estimate above becomes ~35-45 min, still 2x under its cap. 2026-11-08: + the corner under the FD
-        # default (~13 min: 685 s child + the 1-D reference) and the two F2 refutations (177 s): ~34 min in
-        # all, this job ~50-60 min against its 90-min cap. They importorskip numba, which
-        # step (a)'s install leaves out on purpose (adding it there would switch other modules' @slow cases
-        # to their numba kernels). Installed here, after (a), for these two files only.
+        # 2026-11-14: the DEVSIM @slow cases (the 13 files ignored here) run in the `nightly-devsim` job; see
+        # this job's cap comment for why. A new @slow test in any other file runs here, by default.
         run: |
-          pip install "numba>=0.58"
-          pytest -q -m slow tests/test_btbt_nonlocal_2d_kernels.py tests/test_btbt_nonlocal_2d.py
+          pytest tests/ -q -m slow \
+            --ignore tests/test_devsim_btbt_resolution_2d.py \
+            --ignore tests/test_devsim_noise_method.py \
+            --ignore tests/test_valley_density_gradient.py \
+            --ignore tests/test_equilibrium_simplify_cache.py \
+            --ignore tests/test_devsim_gate_leakage.py \
+            --ignore tests/test_quasi_equilibrium.py \
+            --ignore tests/test_devsim_junction_band.py \
+            --ignore tests/test_extended_precision_design.py \
+            --ignore tests/test_equilibrium_density_gradient.py \
+            --ignore tests/test_trap_kinetics.py \
+            --ignore tests/test_devsim_band_temperature.py \
+            --ignore tests/test_devsim_tunneling.py \
+            --ignore tests/test_temperature_fixes.py
       - name: (b1) the heavy FEM/solver modules the `solvers` job excludes
         # Two of the three modules named in that job's comment as too slow for the PR tier. KEEP
         # THIS IN SYNC WITH IT: a module dropped from the solvers leg for being slow belongs here
@@ -791,6 +880,95 @@ jobs:
         run: |
           python -m validation.run_all \
             superstrate_index_fem graded_tmm_vs_fem per_region_absorption symmetry_reduced_fem
+
+
+  nightly-devsim:
+    # The DEVSIM @slow cases, split off the `nightly` job on 2026-11-14 (its cap comment has the numbers).
+    # Same install as `nightly` (keep the install steps identical), schedule/dispatch only.
+    name: nightly (DEVSIM @slow cases)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter as the `solvers` job, for the same reason: 3.12 is the version the
+          # ngsolve/devsim wheel set and this test selection were verified against locally.
+          python-version: "3.12"
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
+      - name: Install (core + dev + plot + solvers + io backends + jax)
+        # A SUPERSET of every PR leg's install: [solvers] for the FEM/DEVSIM work, h5py AND zarr
+        # so both IO backends are live at once (the `test` legs each get only one), and jax so the
+        # differentiable backends and the jax-FDTD validations run instead of exit-42-ing.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]" "h5py>=3.8" "zarr>=3" "jax>=0.11"
+      - name: Assert the whole optional stack really imported
+        # Same trip-wire logic as the other legs: a silently-partial install would turn most of
+        # this job into skips, and in the non-smoke tiers run_all treats a skip as informational.
+        run: |
+          python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
+          python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
+      - name: (a') the DEVSIM @slow cases
+        run: |
+          pytest -q -m slow \
+            tests/test_devsim_btbt_resolution_2d.py \
+            tests/test_devsim_noise_method.py \
+            tests/test_valley_density_gradient.py \
+            tests/test_equilibrium_simplify_cache.py \
+            tests/test_devsim_gate_leakage.py \
+            tests/test_quasi_equilibrium.py \
+            tests/test_devsim_junction_band.py \
+            tests/test_extended_precision_design.py \
+            tests/test_equilibrium_density_gradient.py \
+            tests/test_trap_kinetics.py \
+            tests/test_devsim_band_temperature.py \
+            tests/test_devsim_tunneling.py \
+            tests/test_temperature_fixes.py
+
+  nightly-btbt2d:
+    # The 2-D nonlocal BTBT @slow cases (numba), split off the `nightly` job on 2026-11-14 (its cap comment).
+    name: nightly (2-D nonlocal BTBT @slow cases, numba)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter as the `solvers` job, for the same reason: 3.12 is the version the
+          # ngsolve/devsim wheel set and this test selection were verified against locally.
+          python-version: "3.12"
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
+      - name: Install (core + dev + plot + solvers + io backends + jax)
+        # A SUPERSET of every PR leg's install: [solvers] for the FEM/DEVSIM work, h5py AND zarr
+        # so both IO backends are live at once (the `test` legs each get only one), and jax so the
+        # differentiable backends and the jax-FDTD validations run instead of exit-42-ing.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]" "h5py>=3.8" "zarr>=3" "jax>=0.11"
+      - name: Assert the whole optional stack really imported
+        # Same trip-wire logic as the other legs: a silently-partial install would turn most of
+        # this job into skips, and in the non-smoke tiers run_all treats a skip as informational.
+        run: |
+          python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
+          python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
+      - name: (a2) the 2-D nonlocal BTBT @slow cases (numba)
+        # (own job since 2026-11-14; numba is installed first here, this job runs nothing else)
+        # The rotated-junction convergence gates (4 x ~30 s), their refutation, the DEVSIM rotation-term
+        # refutation (~50 s) and the corner-geometry measurement (890 s MEASURED on the loaded dev box:
+        # two 12769-node devices x two models, 18 Newton solves each): ~18 min in all, so this job's
+        # estimate above becomes ~35-45 min, still 2x under its cap. 2026-11-08: + the corner under the FD
+        # default (~13 min: 685 s child + the 1-D reference) and the two F2 refutations (177 s): ~34 min in
+        # all, this job ~50-60 min against its 90-min cap. They importorskip numba, which
+        # step (a)'s install leaves out on purpose (adding it there would switch other modules' @slow cases
+        # to their numba kernels). Installed here, after (a), for these two files only.
+        run: |
+          pip install "numba>=0.58"
+          pytest -q -m slow tests/test_btbt_nonlocal_2d_kernels.py tests/test_btbt_nonlocal_2d.py
 
   nightly-validation:
     # (c2), SHARDED. run_all defines exactly two tiers, `smoke` and `full` (there is no separate
@@ -828,14 +1006,20 @@ jobs:
     # fdtd_numba_cuda (no GPU here) and qd_soa_numba_parity (numba deliberately NOT installed;
     # the dedicated `numba` job runs that oracle for real on Windows) -- plus the three (c1)
     # oracles whose available-RAM guards fire on a 16 GB runner.
-    name: nightly validation tier (shard ${{ matrix.shard }}/4)
+    # SIX SHARDS since 2026-11-14 (v0.16 full run): the four shards measured 129 / 202 / 88 / 119 min on the
+    # loaded Windows dev box (four shards plus other jobs at once: upper bounds), the v0.16 scripts added ~95 min
+    # to the tier and landed on two shards, and one script timed out at run_all's per-script cap. That script
+    # and quantum_film_strip were split (each piece <= 638 s on that box, docs/audit/2026-11-14-v0.16-full-run-
+    # fixes.md), and N went 4 -> 6 as the note above prescribes ("Raise N before raising the cap"). With N=6 the
+    # new scripts land 550 / 1050 / 984 / 387 / 411 / 1181 s per shard (measured script times, round-robin).
+    name: nightly validation tier (shard ${{ matrix.shard }}/6)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     strategy:
-      fail-fast: false          # one red shard must not hide the other three
+      fail-fast: false          # one red shard must not hide the other five
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -854,7 +1038,7 @@ jobs:
         run: |
           python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
           python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
-      - name: (c2) full validation tier, shard ${{ matrix.shard }} of 4
+      - name: (c2) full validation tier, shard ${{ matrix.shard }} of 6
         # tee the whole run to a file so the artifact step below has something to upload: the
         # tier prints to stdout and writes no log, so today the ONLY way to see which script
         # failed and what it printed is `gh api .../jobs/<id>/logs` and a grep -- which is what
@@ -863,7 +1047,7 @@ jobs:
         # from lumenairy's own validate.yml, whose validation job does exactly this.)
         shell: bash
         run: |
-          python -m validation.run_all --tier full --shard ${{ matrix.shard }}/4 2>&1 | tee validation_shard_${{ matrix.shard }}.txt
+          python -m validation.run_all --tier full --shard ${{ matrix.shard }}/6 2>&1 | tee validation_shard_${{ matrix.shard }}.txt
           exit ${PIPESTATUS[0]}
       - name: Upload this shard's validation log on failure
         # Only on failure: a green shard's log is 200 PASS lines nobody reads. On a red one this

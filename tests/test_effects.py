@@ -2,6 +2,8 @@
 that generalizes the scalar n->eps map to fields {n,E,T,...} -> scalar OR tensor eps. Pure numpy.
 Run: python -m pytest tests/test_effects.py -q
 """
+import functools
+
 import numpy as np
 import pytest
 
@@ -11,6 +13,11 @@ from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, DeltaEffe
 from dynameta.materials.optical_model import ConstantOptical, DrudeOptical
 from dynameta.constants import M_E, HBAR
 from dynameta.carriers.schrodinger_poisson import SubbandResult
+
+# Tensor identity / structure checks (entries O(1-12), the expected zeros exactly 0): they hold to round-off
+# (MEASURED <= 8.9e-16), so 1e-12 absolute (~1e3 ulp of the entries) with no relative term -- numpy's default
+# atol 1e-8 would accept a 1e-8 leak into an off-diagonal entry that must vanish.
+_EXACT = 1e-12
 
 
 def test_optical_model_effect_matches_scalar_model():
@@ -32,10 +39,10 @@ def test_optical_model_effect_forwards_density():
 
 
 def test_as_tensor_promotes_scalar_to_isotropic():
-    assert np.allclose(as_tensor(2.0 + 0j), 2.0 * np.eye(3))
+    assert np.allclose(as_tensor(2.0 + 0j), 2.0 * np.eye(3), rtol=0.0, atol=_EXACT)
     g = np.array([2.0, 3.0], dtype=complex)              # grid -> (...,3,3)
     tg = as_tensor(g)
-    assert tg.shape == (2, 3, 3) and np.allclose(tg[1], 3.0 * np.eye(3))
+    assert tg.shape == (2, 3, 3) and np.allclose(tg[1], 3.0 * np.eye(3), rtol=0.0, atol=_EXACT)
     m = (np.arange(9).reshape(3, 3) + 1).astype(complex)  # already a tensor -> unchanged
     assert np.allclose(as_tensor(m), m)
 
@@ -46,7 +53,7 @@ def test_composed_effect_sums_background_plus_deltas_as_tensors():
         def eps(self, fields, lambda_m): return self.v
     comp = ComposedEffect(background=_Const(4.0 + 0j), deltas=[_Const(0.1 + 0j), _Const(0.05 + 0j)])
     out = comp.eps({}, 1300e-9)
-    assert out.shape == (3, 3) and np.allclose(out, 4.15 * np.eye(3))
+    assert out.shape == (3, 3) and np.allclose(out, 4.15 * np.eye(3), rtol=0.0, atol=_EXACT)
 
 
 def test_delta_effect_prevents_background_double_count():
@@ -61,9 +68,10 @@ def test_delta_effect_prevents_background_double_count():
     assert np.allclose(np.diag(naive), [4.0 + no ** 2, 4.0 + no ** 2, 4.0 + ne ** 2])  # bg twice
     # RIGHT: wrap in DeltaEffect with a zero-field baseline -> only the field-induced shift adds
     comp = ComposedEffect(background=base, deltas=[DeltaEffect(pk, {"E": np.zeros(3)})])
-    assert np.allclose(comp.eps({"E": np.zeros(3)}, 1300e-9), 4.0 * np.eye(3))   # E=0 -> just bg
+    assert np.allclose(comp.eps({"E": np.zeros(3)}, 1300e-9), 4.0 * np.eye(3), rtol=0.0, atol=_EXACT)   # E=0 -> just bg
     shift = as_tensor(pk.eps({"E": [0, 0, Ez]}, 1300e-9)) - as_tensor(eps_bg)
-    assert np.allclose(comp.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), 4.0 * np.eye(3) + shift)
+    assert np.allclose(comp.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), 4.0 * np.eye(3) + shift,
+                       rtol=0.0, atol=_EXACT)
 
 
 def test_r24_delta_effect_baseline_overrides_only_its_own_fields():
@@ -103,7 +111,7 @@ def _linbo3():
 def test_pockels_reduces_to_background_and_shifts_index():
     no, ne, r13, r33, eps_bg, r = _linbo3()
     pk = PockelsEffect(eps_bg=eps_bg, r_voigt=r)
-    assert np.allclose(pk.eps({"E": np.zeros(3)}, 1300e-9), eps_bg)          # E=0 -> background
+    assert np.allclose(pk.eps({"E": np.zeros(3)}, 1300e-9), eps_bg, rtol=0.0, atol=_EXACT)          # E=0 -> background
     Ez = 1.0e7
     eps = pk.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9)
     assert abs(eps[0, 1]) < 1e-12 and abs(eps[0, 2]) < 1e-12                 # stays diagonal
@@ -111,17 +119,18 @@ def test_pockels_reduces_to_background_and_shifts_index():
     assert nx == pytest.approx(no - 0.5 * no ** 3 * r13 * Ez, rel=1e-3)      # Pockels: n_o via r13
     assert nz == pytest.approx(ne - 0.5 * ne ** 3 * r33 * Ez, rel=1e-3)      # Pockels: n_e via r33
     pk0 = PockelsEffect(eps_bg=eps_bg, r_voigt=np.zeros((6, 3)))             # r=0 -> background
-    assert np.allclose(pk0.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), eps_bg)
+    assert np.allclose(pk0.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), eps_bg, rtol=0.0, atol=_EXACT)
 
 
 def test_kerr_reduces_and_is_quadratic_in_field():
     eps_bg = (2.0 ** 2) * np.eye(3, dtype=complex)
     kr = KerrEffect(eps_bg=eps_bg, s_kerr=1e-18)
-    assert np.allclose(kr.eps({"E": np.zeros(3)}, 1300e-9), eps_bg)
+    assert np.allclose(kr.eps({"E": np.zeros(3)}, 1300e-9), eps_bg, rtol=0.0, atol=_EXACT)
     dB1 = 1.0 / kr.eps({"E": [0, 0, 1e8]}, 1300e-9)[0, 0] - 1.0 / eps_bg[0, 0]
     dB2 = 1.0 / kr.eps({"E": [0, 0, 2e8]}, 1300e-9)[0, 0] - 1.0 / eps_bg[0, 0]
     assert (dB2 / dB1).real == pytest.approx(4.0, rel=1e-6)                  # |E|^2 -> 2x field, 4x shift
-    assert np.allclose(KerrEffect(eps_bg, 0.0).eps({"E": [0, 0, 1e8]}, 1300e-9), eps_bg)
+    assert np.allclose(KerrEffect(eps_bg, 0.0).eps({"E": [0, 0, 1e8]}, 1300e-9), eps_bg,
+                       rtol=0.0, atol=_EXACT)
 
 
 def test_franz_keldysh_opens_field_absorption():
@@ -152,13 +161,15 @@ def test_magneto_optic_gyrotropic_tensor():
     assert np.allclose(np.diag(T), eps_r)
     assert T[0, 1] == pytest.approx(1j * g) and T[1, 0] == pytest.approx(-1j * g)
     assert T[0, 2] == 0 and T[2, 0] == 0 and T[1, 2] == 0
-    assert np.allclose(T, T.conj().T)                                        # Hermitian -> lossless
+    assert np.allclose(T, T.conj().T, rtol=0.0, atol=_EXACT)                  # Hermitian -> lossless
     # circular + axial eigenvalues {eps_r - g, eps_r, eps_r + g}
     assert np.allclose(np.sort(np.linalg.eigvals(T).real), [eps_r - g, eps_r, eps_r + g])
     # magnetization scales/flips g; 0 reduces to isotropic eps_r*I
     assert np.asarray(mo.eps({"magnetization": -1.0}, 1550e-9))[0, 1] == pytest.approx(-1j * g)
-    assert np.allclose(np.asarray(mo.eps({"magnetization": 0.0}, 1550e-9)), eps_r * np.eye(3))
-    assert np.allclose(np.asarray(MagnetoOpticModel(eps_r, 0.0).eps({}, 1550e-9)), eps_r * np.eye(3))
+    assert np.allclose(np.asarray(mo.eps({"magnetization": 0.0}, 1550e-9)), eps_r * np.eye(3),
+                       rtol=0.0, atol=_EXACT)
+    assert np.allclose(np.asarray(MagnetoOpticModel(eps_r, 0.0).eps({}, 1550e-9)), eps_r * np.eye(3),
+                       rtol=0.0, atol=_EXACT)
 
 
 def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
@@ -168,7 +179,7 @@ def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
                                     dn_dT_diag=(dno, dno, dne), T_ref=300.0)
     T0 = np.asarray(m.eps({"T": 300.0}, 1550e-9))                    # at T_ref -> diag(eps_ref)
     assert T0.shape == (3, 3) and np.allclose(np.diag(T0), [no ** 2, no ** 2, ne ** 2])
-    assert np.allclose(T0 - np.diag(np.diag(T0)), 0)                 # strictly diagonal
+    assert np.allclose(T0 - np.diag(np.diag(T0)), 0, rtol=0.0, atol=_EXACT)                 # strictly diagonal
     dT = 50.0
     Tt = np.asarray(m.eps({"T": 300.0 + dT}, 1550e-9))
     assert np.sqrt(Tt[0, 0].real) == pytest.approx(no + dno * dT, rel=1e-9)   # ordinary axis
@@ -177,7 +188,7 @@ def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
     iso = AnisotropicThermoOpticModel((no ** 2,) * 3, (dno,) * 3)
     sca = ThermoOpticModel(eps_ref=complex(no ** 2, 0.0), dn_dT=dno)
     assert np.allclose(np.asarray(iso.eps({"T": 360.0}, 1550e-9)),
-                       complex(sca.eps({"T": 360.0}, 1550e-9)) * np.eye(3))
+                       complex(sca.eps({"T": 360.0}, 1550e-9)) * np.eye(3), rtol=0.0, atol=_EXACT)
     with pytest.raises(ValueError):
         m.eps({}, 1550e-9)                                          # T required
 
@@ -202,17 +213,34 @@ def test_intersubband_requires_subband_field():
         m.eps({}, 1300e-9)
 
 
-def test_intersubband_single_band_reduces_to_drude():
+def test_intersubband_single_band_reduces_to_eps_inf_along_z():
+    """v0.16 (no Drude term along z): one sub-band has no intersubband transition, so the z response is the background
+    alone (eps_zz == eps_inf: a confined electron cannot be accelerated along z) while the in-plane
+    response is the Drude of its sheet density. v0.15.1 returned eps_zz == eps_xx (the Drude, the
+    double count): eps_zz = 3.3568+0.0678i, |eps_zz - eps_inf| = 0.896 on this fixture. A one-state set is incomplete by
+    construction, hence fsum_check='off'."""
     res = _one_band_subband()
-    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off")
     eps_t = m.eps({"subband": res}, 1300e-9)
     n3d = float(res.sheet_density_m2.sum()) / (res.z_m[-1] - res.z_m[0])
     d = complex(DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAM_INTRA).eps(1300e-9, n_m3=n3d))
     assert eps_t.shape == (3, 3)
-    # AUDIT T-6: rtol=0.0 -- |eps| ~ 12 here, so numpy's default rtol=1e-5 turned the intended
-    # 1e-13 machine gate into a ~1e-4 absolute one.
+    assert abs(eps_t[0, 0] - d) < 1e-13 and eps_t[1, 1] == eps_t[0, 0]
+    assert abs(eps_t[2, 2] - EPS_INF) < 1e-13                         # no z Drude term
+    assert abs(eps_t[0, 1]) == 0.0 and m.last_fsum_ratio == 0.0
+
+
+def test_intersubband_legacy_single_band_reduces_to_drude():
+    """The deprecated z_response='drude_plus_subbands' keeps the v0.15.1 form (eps_zz = Drude + sum
+    ISB, here the Drude alone) and says it is deprecated (removal in 0.17)."""
+    from dynameta.warning_types import AdvisoryWarning
+    res = _one_band_subband()
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, z_response="drude_plus_subbands")
+    with pytest.warns(AdvisoryWarning, match="deprecated"):
+        eps_t = m.eps({"subband": res}, 1200e-9)
+    n3d = float(res.sheet_density_m2.sum()) / (res.z_m[-1] - res.z_m[0])
+    d = complex(DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAM_INTRA).eps(1200e-9, n_m3=n3d))
     assert np.allclose(eps_t, as_tensor(np.asarray(d)), rtol=0.0, atol=1e-13)  # isotropic == Drude*I
-    assert abs(eps_t[0, 1]) == 0.0 and abs(eps_t[2, 2] - eps_t[0, 0]) < 1e-13
 
 
 def test_intersubband_two_bands_anisotropic_and_passive():
@@ -225,10 +253,11 @@ def test_intersubband_two_bands_anisotropic_and_passive():
     psi = np.stack([p1, p2], axis=1)
     E = np.array([0.0, 0.95 * 1.602e-19])                            # ~0.95 eV spacing
     res = SubbandResult(energies_J=E, psi=psi, z_m=z, sheet_density_m2=np.array([5e17, 1e17]))
-    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off")   # 2-state: incomplete
     lam12 = 2 * np.pi * 299792458.0 / ((E[1] - E[0]) / HBAR)
     eps_t = m.eps({"subband": res}, lam12)
     assert abs(eps_t[2, 2] - eps_t[0, 0]) > 1e-3                      # z carries the intersubband line
+    assert abs(eps_t[2, 2] - EPS_INF) > 1e-3
     assert eps_t[2, 2].imag > 0.0                                    # passive (exp(-iwt))
     assert eps_t[0, 0] == eps_t[1, 1]                                # in-plane isotropic Drude
 
@@ -300,12 +329,15 @@ def test_intersubband_full_ground_empty_excited_is_the_strongest_line():
     """audit R-1: the canonical absorber -- ground FULL, first excited EMPTY -- has the largest
     population difference and must produce the STRONGEST line. The shipped filter drew BOTH i and j
     from the occupancy-filtered set and deleted exactly this configuration (bare Drude, no warning).
-    Anchored on the closed-form Lorentzian ON resonance: Im(chi_zz) = S_01/(eps0 w_12 gamma)."""
+    Anchored on the closed-form Lorentzian ON resonance: Im(chi_zz) = S_01/(eps0 w_12 gamma).
+    v0.16: chi_zz is eps_zz - eps_inf (no Drude term along z); the 2-state well is incomplete,
+    hence fsum_check='off'. The dipole is the Riemann sum about the slab centre; on this grid the states vanish at both
+    end nodes, so it equals the trapezoid value the gate used before."""
     from dynameta.constants import HBAR, C_LIGHT, Q_E, EPS0
     from dynameta.core.numerics import trapz
     ns = 5.0e17
     res = _two_band_subband([ns, 0.0])                       # EMPTY excited sub-band
-    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off")
     E, z, psi = res.energies_J, res.z_m, res.psi
     w12 = (E[1] - E[0]) / HBAR
     lam12 = 2.0 * np.pi * C_LIGHT / w12
@@ -313,32 +345,34 @@ def test_intersubband_full_ground_empty_excited_is_the_strongest_line():
     Leff = float(z[-1] - z[0])
     z01 = trapz(psi[:, 0] * z * psi[:, 1], z)
     S01 = (ns / Leff) * Q_E * Q_E * z01 * z01 * (2.0 * w12) / HBAR
-    assert float((t[2, 2] - t[0, 0]).imag) == pytest.approx(S01 / (EPS0 * w12 * GAM_INTER), rel=3e-2)
+    assert float((t[2, 2] - EPS_INF).imag) == pytest.approx(S01 / (EPS0 * w12 * GAM_INTER), rel=3e-2)
     # ... and it must be STRONGER than the same well with the upper band partly filled
-    weaker = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER).eps(
+    weaker = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off").eps(
         {"subband": _two_band_subband([ns, 0.4 * ns])}, lam12)
-    assert (t[2, 2] - t[0, 0]).imag > (weaker[2, 2] - weaker[0, 0]).imag > 0.0
+    assert (t[2, 2] - EPS_INF).imag > (weaker[2, 2] - EPS_INF).imag > 0.0
 
 
 def test_intersubband_inverted_population_reaches_the_gain_warning():
     """audit R-1 (inverted case): n_s = [0, n] is the strongest possible inversion. The shipped
     filter removed the pair before the N_ij < 0 warning at the line-strength step could fire, so the
-    module's only unphysical-occupancy diagnostic was unreachable in the configuration it exists for."""
+    module's only unphysical-occupancy diagnostic was unreachable in the configuration it exists for.
+    v0.16: the clamped line leaves eps_zz == eps_inf (no z Drude term)."""
     from dynameta.constants import HBAR, C_LIGHT
     res = _two_band_subband([0.0, 5.0e17])
     lam12 = 2.0 * np.pi * C_LIGHT / ((res.energies_J[1] - res.energies_J[0]) / HBAR)
-    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off")
     with pytest.warns(UserWarning, match="inverted population"):
         t = m.eps({"subband": res}, lam12)
-    assert abs(t[2, 2] - t[0, 0]) < 1e-12                    # clamped to 0: no gain, exp(-iwt)
+    assert abs(t[2, 2] - EPS_INF) < 1e-12                    # clamped to 0: no gain, exp(-iwt)
 
 
 def test_intersubband_equal_populations_give_no_line():
     from dynameta.constants import HBAR, C_LIGHT
     res = _two_band_subband([3.0e17, 3.0e17])                # N_ij = 0 -> nothing to radiate
     lam12 = 2.0 * np.pi * C_LIGHT / ((res.energies_J[1] - res.energies_J[0]) / HBAR)
-    t = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER).eps({"subband": res}, lam12)
-    assert abs(t[2, 2] - t[0, 0]) < 1e-13
+    t = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off").eps(
+        {"subband": res}, lam12)
+    assert abs(t[2, 2] - EPS_INF) < 1e-13
 
 
 # ---- audit R-3: Maclaurin KK endpoint half-weights (BOTH parities, BOTH grid lengths) ---------
@@ -599,7 +633,7 @@ def test_vector_mo_x_axis_structure_and_guards():
     T = np.asarray(vm.eps({"m_vector": np.array([1.0, 0.0, 0.0])}, 1550e-9))
     assert T[1, 2] == pytest.approx(1j * 0.05) and T[2, 1] == pytest.approx(-1j * 0.05)
     assert T[0, 1] == 0.0 and np.allclose(np.diag(T), 2.25)  # x-gyration couples y<->z only
-    assert np.allclose(T, T.conj().T)                        # Hermitian (lossless)
+    assert np.allclose(T, T.conj().T, rtol=0.0, atol=_EXACT)  # Hermitian (lossless)
     with pytest.raises(ValueError):
         vm.eps({}, 1550e-9)                                  # m_vector required
     with pytest.raises(ValueError):
@@ -622,7 +656,7 @@ def test_llg_precession_and_seam_into_vector_mo():
     # the R13 seam: any m_t row drives the vector MO tensor directly
     T = np.asarray(VectorMagnetoOpticModel(eps_r=2.25, g_s=0.05).eps(
         {"m_vector": r.m_t[25]}, 1550e-9))
-    assert T.shape == (3, 3) and np.allclose(T, T.conj().T)
+    assert T.shape == (3, 3) and np.allclose(T, T.conj().T, rtol=0.0, atol=_EXACT)
 
 
 def test_llg_guards_and_damped_alignment():
@@ -636,3 +670,260 @@ def test_llg_guards_and_damped_alignment():
     r = llg.simulate(t, m0=[1.0, 0.0, 0.2])
     assert r.m_t[-1, 2] > 0.999                            # damping aligns m with H
     assert np.all(np.diff(r.energy_J_m3) <= 1e-12)         # Lyapunov
+
+
+# ---- v0.16: intersubband z response without the double count (no Drude term along z) and the dipole
+# quadrature (Riemann sum about the slab centre) --
+
+_ISB_M = 0.30 * M_E
+_ISB_LAM = 1200e-9
+_ISB_EPS_INF, _ISB_GAM, _ISB_NBG = 4.0, 1.2e14, 3e26           # the generic gated film
+
+
+@functools.lru_cache(maxsize=None)
+def _isb_slab(t_m, dz_m=0.025e-9, n_states=None):
+    """Flat-band slab (n_bg 3e26 m^-3 at the model's own E_F, m 0.30 m_e, 300 K), all sub-bands kept
+    (slab mode). n_states None -> min(z.size - 3, 600)."""
+    from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, sp_bulk_fermi_level_J
+    z = np.linspace(0.0, t_m, int(round(t_m / dz_m)) + 1)
+    sp = SchrodingerPoisson1D(z, _ISB_M)
+    ef = sp_bulk_fermi_level_J(_ISB_NBG, _ISB_M, 300.0)
+    ns = min(z.size - 3, 600) if n_states is None else int(n_states)
+    return sp.density(np.zeros_like(z), ef, n_states=ns, bound_tol=1e9)
+
+
+def _isb_model(**kw):
+    return IntersubbandEffect(eps_inf=_ISB_EPS_INF, m_opt_kg=_ISB_M, gamma_intra_rad_s=_ISB_GAM,
+                              gamma_inter_rad_s=_ISB_GAM, **kw)
+
+
+def _isb_v0151_reference(res, lambda_m, eps_inf, m_opt, g_intra, g_inter, floor=0.0):
+    """FROZEN copy of the v0.15.1 IntersubbandEffect.eps body (electroabsorption.py:613-659 of v0.15.1),
+    the oracle of the legacy-mode bit-identity gate (warnings stripped: the gate passes no inverted
+    pair)."""
+    from dynameta.constants import C_LIGHT, EPS0, HBAR, Q_E
+    from dynameta.core.numerics import trapz
+    z = np.asarray(res.z_m, dtype=np.float64)
+    psi = np.asarray(res.psi, dtype=np.float64)
+    E = np.asarray(res.energies_J, dtype=np.float64)
+    ns = np.asarray(res.sheet_density_m2, dtype=np.float64)
+    Leff = float(z[-1] - z[0])
+    omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+    n3d = float(np.sum(ns)) / Leff
+    wp2 = n3d * Q_E * Q_E / (EPS0 * float(m_opt))
+    eps_intra = complex(eps_inf) - wp2 / (omega * omega + 1j * omega * float(g_intra))
+    eps_zz = eps_intra
+    gam = float(g_inter)
+    for i in range(E.size):
+        for j in range(i + 1, E.size):
+            dns = float(ns[i] - ns[j])
+            if abs(dns) <= floor:
+                continue
+            w_ij = (E[j] - E[i]) / HBAR
+            z_ij = trapz(psi[:, i] * z * psi[:, j], z)
+            N_ij = dns / Leff
+            if N_ij < 0.0:
+                N_ij = 0.0
+            S_ij = N_ij * Q_E * Q_E * (z_ij * z_ij) * (2.0 * w_ij) / HBAR
+            eps_zz += S_ij / (EPS0 * (w_ij * w_ij - omega * omega - 1j * omega * gam))
+    out = np.zeros((3, 3), dtype=complex)
+    out[0, 0] = eps_intra
+    out[1, 1] = eps_intra
+    out[2, 2] = eps_zz
+    return out
+
+
+def test_intersubband_fsum_of_a_complete_slab_is_one_and_equals_the_discrete_identity():
+    """f-sum gate (no Drude term along z; Riemann dipole). 6 nm flat-band slab (0.025 nm grid): the f-sum
+    ratio sum_{i<j} (n_i - n_j) f_ij / sum n_i must be within 1e-3 of 1 (MEASURED 0.99967 with 238 states;
+    v0.15.1 had no diagnostic and its trapezoid dipole on the absolute z gives 1.1520 -- 93.1 after a 100 nm
+    shift, measured on the v0.15.1 export at this tree's E_F).
+    Independent oracle for the COMPLETE discrete set (all 239 states): for the finite-difference
+    Hamiltonian the double commutator gives sum_j f_ij = kappa_i = h sum_k psi_i,k psi_i,k+1 exactly,
+    so the ratio must equal sum n_i kappa_i / sum n_i to rounding (re-derived here from neighbour
+    products only; no eigen-sum). The 1 - ratio = 3.3e-4 is that O((k h)^2) kinetic weight.
+    """
+    res = _isb_slab(6e-9)
+    m = _isb_model()
+    m.eps({"subband": res}, _ISB_LAM)
+    assert abs(m.last_fsum_ratio - 1.0) < 1e-3, m.last_fsum_ratio
+    full = _isb_slab(6e-9, n_states=239)                       # every interior state: complete
+    mf = _isb_model()
+    mf.eps({"subband": full}, _ISB_LAM)
+    h = float(full.z_m[1] - full.z_m[0])
+    kappa = h * np.sum(full.psi[:-1, :] * full.psi[1:, :], axis=0)
+    ns = full.sheet_density_m2
+    oracle = float(np.sum(ns * kappa) / np.sum(ns))
+    assert abs(mf.last_fsum_ratio - oracle) < 1e-12, (mf.last_fsum_ratio, oracle)
+    assert 0.999 < oracle < 1.0
+
+
+def test_intersubband_eps_zz_is_invariant_to_the_z_origin():
+    """Dipole-quadrature gate: a 100 nm shift of the z origin must not move eps_zz (budget 1e-12; MEASURED
+    1.8e-13, the rounding of z - z_c at 100 nm). v0.15.1 moved it by 1.3e-3 (trapezoid on the absolute z,
+    whose end-node weights break the Riemann orthonormality; measured on the v0.15.1 export).
+    """
+    from dynameta.carriers.schrodinger_poisson import SubbandResult
+    res = _isb_slab(6e-9)
+    shifted = SubbandResult(energies_J=res.energies_J, psi=res.psi, z_m=res.z_m + 100e-9,
+                            sheet_density_m2=res.sheet_density_m2)
+    a = _isb_model().eps({"subband": res}, _ISB_LAM)
+    b = _isb_model().eps({"subband": shifted}, _ISB_LAM)
+    assert abs(a[2, 2] - b[2, 2]) < 1e-12
+    assert abs(a[0, 0] - b[0, 0]) < 1e-13                   # Leff = z[-1] - z[0] rounds at 100 nm
+    old = abs(_isb_v0151_reference(res, _ISB_LAM, _ISB_EPS_INF, _ISB_M, _ISB_GAM, _ISB_GAM)[2, 2]
+              - _isb_v0151_reference(shifted, _ISB_LAM, _ISB_EPS_INF, _ISB_M, _ISB_GAM, _ISB_GAM)[2, 2])
+    assert old > 1e-3                                          # the defect the gate exists for
+
+
+def test_intersubband_default_thickness_is_wall_to_wall_and_converges_at_second_order():
+    """Leff without thickness_m. A SubbandResult of a Dirichlet slab lives on the INTERIOR nodes (the wall nodes,
+    psi = 0, excluded), so the film is z[-1] - z[0] + 2h thick and that is the default Leff; a grid that includes
+    its wall nodes (psi = 0 at both ends) gives z[-1] - z[0]. Checks, 6 nm flat-band slab, complete basis, 1200 nm:
+      * default == thickness_m = 6 nm (the slab's own thickness) to 1e-13 (MEASURED 0, same arithmetic up to the
+        rounding of z[-1] - z[0] + 2h);
+      * the same states written on the grid WITH its wall nodes (zero rows added) give the same eps to 1e-13
+        (MEASURED 0): the default reads the grid convention, not the array length;
+      * eps_zz - eps_inf converges at second order in the spacing: successive differences at 101 / 201 / 401 /
+        801 nodes shrink by 3.93 / 3.98 (bar [3.6, 4.4]: O(h^2) with an O(h^4) remainder). The pre-0.16 default
+        z[-1] - z[0] (off by 2h / L, 1.0 % at 201 nodes) shrinks by 1.64 / 1.83 only (first order), and fails it."""
+    from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, SubbandResult, sp_bulk_fermi_level_J
+    ef = sp_bulk_fermi_level_J(_ISB_NBG, _ISB_M, 300.0)
+    chi = []
+    for nz in (101, 201, 401, 801):
+        z = np.linspace(0.0, 6e-9, nz)
+        res = SchrodingerPoisson1D(z, _ISB_M).density(np.zeros_like(z), ef, n_states=None, bound_tol=np.inf)
+        e = _isb_model().eps({"subband": res}, _ISB_LAM)
+        assert np.max(np.abs(e - _isb_model(thickness_m=6e-9).eps({"subband": res}, _ISB_LAM))) < 1e-13
+        if nz == 201:
+            walled = SubbandResult(energies_J=res.energies_J, z_m=z,
+                                   psi=np.vstack([np.zeros((1, res.psi.shape[1])), res.psi,
+                                                  np.zeros((1, res.psi.shape[1]))]),
+                                   sheet_density_m2=res.sheet_density_m2)
+            assert np.max(np.abs(_isb_model().eps({"subband": walled}, _ISB_LAM) - e)) < 1e-13
+        chi.append(e[2, 2] - _ISB_EPS_INF)
+    d = np.abs(np.diff(chi))
+    ratios = d[:-1] / d[1:]
+    assert np.all((3.6 <= ratios) & (ratios <= 4.4)), ratios
+
+
+def test_intersubband_wide_slab_limit_eps_zz_tends_to_eps_xx_as_one_over_L():
+    """Wide-slab gate: as the slab widens the transitions crowd into a continuum and eps_zz -> eps_xx (same
+    mass for both here). abs(eps_zz - eps_xx) at 1200 nm for 10/20/40 nm must fall strictly, with the
+    20 -> 40 nm ratio in [1.6, 2.4] (1/L: 2) and below 0.017 at 40 nm (1.3x the measured value).
+    MEASURED 0.0509 / 0.0257 / 0.0133, ratio 1.94 (Leff the wall-to-wall slab thickness). v0.15.1 (Drude + sum ISB, measured on the v0.15.1
+    export): 1.18 / 1.23 / 1.26 -- growing, the whole Drude term counted twice."""
+    d = []
+    for t in (10e-9, 20e-9, 40e-9):
+        e = _isb_model().eps({"subband": _isb_slab(t)}, _ISB_LAM)
+        d.append(abs(e[2, 2] - e[0, 0]))
+    assert d[0] > d[1] > d[2], d
+    assert 1.6 <= d[1] / d[2] <= 2.4, d
+    assert d[2] < 0.017, d
+
+
+def test_intersubband_legacy_mode_is_bit_identical_to_v0151():
+    """Restore path: z_response='drude_plus_subbands' restores v0.15.1 bit for bit
+    (np.array_equal against the frozen copy of the v0.15.1 body above) on the SP slab, a synthetic
+    three-state well with an occupancy floor, and the plain two-band well; and it warns (deprecated)."""
+    from dynameta.carriers.schrodinger_poisson import SubbandResult
+    from dynameta.warning_types import AdvisoryWarning
+    cases = [(_isb_slab(6e-9), _ISB_EPS_INF, _ISB_M, _ISB_GAM, _ISB_GAM, 0.0),
+             (_two_band_subband([5e17, 1e17]), EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, 0.0)]
+    three = _two_band_subband([5e17, 1e17])
+    z = three.z_m
+    p3 = np.sin(3 * np.pi * z / (z[-1] - z[0]))
+    p3 = p3 / np.sqrt(np.sum(p3 ** 2) * (z[1] - z[0]))
+    three = SubbandResult(energies_J=np.array([0.0, 0.95, 2.1]) * 1.602176634e-19,
+                          psi=np.column_stack([three.psi, p3]), z_m=z,
+                          sheet_density_m2=np.array([5e17, 1e17, 1e17]))
+    cases.append((three, EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, 1e10))
+    for res, ei, mo, gi, ge, floor in cases:
+        for lam in (1200e-9, 1550e-9):
+            mod = IntersubbandEffect(ei, mo, gi, ge, occ_floor_m2=floor, z_response="drude_plus_subbands")
+            with pytest.warns(AdvisoryWarning, match="deprecated"):
+                got = mod.eps({"subband": res}, lam)
+            assert np.array_equal(got, _isb_v0151_reference(res, lam, ei, mo, gi, ge, floor))
+
+
+def test_intersubband_free_population_is_an_isotropic_drude_and_legacy_refuses_it():
+    """free_density_m3 (a population NOT in the sub-band set) adds the same Drude term to eps_xx and
+    eps_zz (closed form re-derived here); the legacy form refuses it."""
+    from dynameta.constants import C_LIGHT, EPS0, Q_E
+    res = _two_band_subband([5e17, 0.0])
+    base = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off").eps(
+        {"subband": res}, 1200e-9)
+    nf = 2e26
+    got = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, fsum_check="off",
+                             free_density_m3=nf).eps({"subband": res}, 1200e-9)
+    w = 2.0 * np.pi * C_LIGHT / 1200e-9
+    chi = -(nf * Q_E ** 2 / (EPS0 * M_OPT)) / (w * w + 1j * w * GAM_INTRA)
+    for k in range(3):
+        assert abs((got[k, k] - base[k, k]) - chi) < 1e-12 * abs(chi)
+    with pytest.raises(ValueError, match="free_density_m3"):
+        IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER, free_density_m3=nf,
+                           z_response="drude_plus_subbands").eps({"subband": res}, 1200e-9)
+
+
+def test_intersubband_fsum_diagnostic_flags_a_truncated_set_and_the_mass_choice():
+    """The f-sum check (AdvisoryWarning outside [0.9, 1.05]) fires for a truncated state set (the
+    6 nm slab cut to its 3 lowest states: MEASURED ratio 0.372; keeping 6 states already gives 0.981 --
+    the check catches gross truncation, not fine detail) and is silenced by fsum_check='off'; subband_mass_kg
+    scales the ratio linearly (f_ij is proportional to it). A non-uniform grid raises (the Riemann
+    quadrature needs one spacing).
+    Behaviour change (an incomplete set is an error, not a loosened bar): a ratio below 0.5 now RAISES
+    instead of warning, so the 3-state cut (0.372) is refused; the warning band [0.5, 0.9) is exercised with
+    the complete set and a 0.8x subband_mass_kg (ratio 0.80)."""
+    from dynameta.carriers.schrodinger_poisson import SubbandResult
+    from dynameta.warning_types import AdvisoryWarning
+    full = _isb_slab(6e-9)
+    trunc = SubbandResult(energies_J=full.energies_J[:3], psi=full.psi[:, :3], z_m=full.z_m,
+                          sheet_density_m2=full.sheet_density_m2[:3])
+    m = _isb_model()
+    with pytest.raises(ValueError, match="f-sum"):
+        m.eps({"subband": trunc}, _ISB_LAM)
+    assert m.last_fsum_ratio == pytest.approx(0.3719, abs=1e-3)
+    with pytest.warns(AdvisoryWarning, match="f-sum"):
+        mw = _isb_model(subband_mass_kg=0.8 * _ISB_M)
+        mw.eps({"subband": full}, _ISB_LAM)
+    assert 0.5 < mw.last_fsum_ratio < 0.9
+    quiet = _isb_model(fsum_check="off")
+    quiet.eps({"subband": trunc}, _ISB_LAM)                    # no warning (filterwarnings=error)
+    a, b = _isb_model(), _isb_model(subband_mass_kg=1.02 * _ISB_M)
+    a.eps({"subband": full}, _ISB_LAM)
+    b.eps({"subband": full}, _ISB_LAM)
+    assert b.last_fsum_ratio == pytest.approx(1.02 * a.last_fsum_ratio, rel=1e-12, abs=0)   # f_ij linear in m_sp
+    z = full.z_m.copy()
+    z[5] += 0.3 * (z[1] - z[0])
+    bad = SubbandResult(energies_J=full.energies_J, psi=full.psi, z_m=z,
+                        sheet_density_m2=full.sheet_density_m2)
+    with pytest.raises(ValueError, match="uniform"):
+        _isb_model().eps({"subband": bad}, _ISB_LAM)
+    with pytest.raises(ValueError, match="z_response"):
+        _isb_model(z_response="drude").eps({"subband": full}, _ISB_LAM)
+
+
+def test_intersubband_default_refuses_an_incomplete_subband_set():
+    """An incomplete sub-band set is refused. SchrodingerPoisson1D.density's default output keeps only the states
+    needed for the density -- for a 6 nm flat-band film the occupied sub-band alone -- so the f-sum ratio is 0 and
+    the default IntersubbandEffect returned eps_zz = eps_inf = 4.0+0j EXACTLY with only an AdvisoryWarning.
+    Now a ratio below 0.5 raises; the complete set (the class docstring's example) passes silently with ratio
+    0.9997 and an eps_zz far from eps_inf (MEASURED |eps_zz - eps_inf| = 1.16); fsum_check='off' keeps the
+    deliberate model-study opt-out."""
+    import warnings
+    from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, sp_bulk_fermi_level_J
+    m = _ISB_M
+    z = np.linspace(0.0, 6e-9, 241)
+    sp = SchrodingerPoisson1D(z, m, T_K=300.0)
+    ef = sp_bulk_fermi_level_J(_ISB_NBG, m, 300.0)
+    short = sp.density(np.zeros_like(z), ef)
+    with pytest.raises(ValueError, match="f-sum ratio"):
+        IntersubbandEffect(_ISB_EPS_INF, m, _ISB_GAM, _ISB_GAM).eps({"subband": short}, _ISB_LAM)
+    off = IntersubbandEffect(_ISB_EPS_INF, m, _ISB_GAM, _ISB_GAM, fsum_check="off")
+    assert off.eps({"subband": short}, _ISB_LAM)[2, 2] == _ISB_EPS_INF + 0j and off.last_fsum_ratio < 0.5
+    full = sp.density(np.zeros_like(z), ef, n_states=None, bound_tol=np.inf)       # the docstring example
+    mdl = IntersubbandEffect(_ISB_EPS_INF, m, _ISB_GAM, _ISB_GAM)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        e = mdl.eps({"subband": full}, _ISB_LAM)
+    assert 0.99 < mdl.last_fsum_ratio < 1.0 and abs(e[2, 2] - _ISB_EPS_INF) > 0.5

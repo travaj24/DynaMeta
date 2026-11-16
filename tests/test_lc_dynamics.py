@@ -260,7 +260,7 @@ def test_backflow_psd_violation_warns_and_floors():
     bad = LCDynamics(gamma1=0.077, include_backflow=True, alpha2_Pa_s=-0.08, alpha3_Pa_s=-0.003,
                      eta_shear_Pa_s=0.01, **_CELL)                     # gamma1*eta = 7.7e-4 << m^2
     assert float(bad.gamma1_eff_of_theta(0.0, apply_floor=False)) < 0.0
-    assert float(bad.gamma1_eff_of_theta(0.0)) == pytest.approx(0.05 * 0.077, rel=1e-12)
+    assert float(bad.gamma1_eff_of_theta(0.0)) == pytest.approx(0.05 * 0.077, rel=1e-12, abs=0)
     with pytest.warns(RuntimeWarning, match="positive-definiteness"):
         bad.simulate_pulse(V0=3.0, Ton=1e-3, T_end=3e-3, n_t=60)
     # the Leslie-consistent 5CB set is PSD everywhere -> no floor

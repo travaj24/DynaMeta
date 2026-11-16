@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import logging
 import os
 import struct
 
 import numpy as np
 
-from dynameta.core.interfaces import OpticalResult
+from dynameta.core.interfaces import (OPTICAL_SOLVER_CAPABILITIES, OpticalResult, declare_wrapped_solver,
+                                      solver_capability)
 from dynameta.io.store import load_arrays, preload_backend, save_arrays
 from dynameta.warning_types import UnreliableResultWarning
 
@@ -54,7 +56,14 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 #           and a scalar+tensor field vs the scalar alone all shared one key -- i.e. a cache HIT
 #           for a physically different solve. A schema-6 store is discarded rather than
 #           re-served under keys that were derived differently.
-_SCHEMA = 7
+#   7 -> 8 (v0.16.0, 2026-11-15): VALUE change, keys/layout unchanged -- the RCWA bridge's default
+#           formulation ('auto': Li's rule on metallic / high-contrast lamellar cells) and raster
+#           (area-weighted, node-registered), the native carrier z grid on the layered-optics path,
+#           the Schrodinger-Poisson Fermi level and gate map, and the intersubband eps_zz all move
+#           results a v0.15.1 store holds under the same key. (The RCWA solver fingerprint also
+#           changed, so its keys differ anyway; the bump covers every other route.)
+_SCHEMA = 8
+_LOG = logging.getLogger(__name__)
 _PK_VALS = "packed_vals"                                    # (N, len(_VEC)) float64, one entry per row
 _PK_KEYS = "packed_keys"                                    # (N, 41) uint8: "k"+sha1-hex ASCII key rows
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
@@ -247,6 +256,12 @@ class OpticalSolverCache:
     def __init__(self, inner_solver, path: str, *, tag: str = "", fmt: str = "auto",
                  autosave: bool = True, autosave_every: int = 64, verbose: bool = False):
         self.inner = inner_solver
+        # v0.16: the cache is a WRAPPER -- the inner solver's capability flags
+        # (core.interfaces.OPTICAL_SOLVER_CAPABILITIES, e.g. native_carrier_grid) must survive it, or
+        # the cached run gets different carriers (it got the 32-point grid: |dr| = 1.27e-3 on the
+        # gated film). The __wrapped__ link serves core.interfaces.solver_capability(); __getattr__
+        # below serves direct attribute reads (solver.native_carrier_grid, solver.last_formulation).
+        declare_wrapped_solver(self, inner_solver)
         self.path = path
         self.tag = str(tag)
         # audit C5-6: key the inner solver's IDENTITY so two different backends sharing a
@@ -323,6 +338,11 @@ class OpticalSolverCache:
                 # flush cannot resurrect them under the fresh schema stamp.
                 if int((meta or {}).get("schema", -1)) != _SCHEMA:
                     self._mem = {}
+                    # INFO, not a warning: a stale store is expected after an upgrade and the
+                    # entries are recomputed on demand (a warning would fail -W error callers)
+                    _LOG.info("optical result cache %s: written under schema %s, this release reads schema "
+                              "%d; its entries are discarded and recomputed on demand", path,
+                              (meta or {}).get("schema", "unknown"), _SCHEMA)
                 else:
                     kmat = np.asarray(arrays[_PK_KEYS], dtype=np.uint8)
                     vmat = np.asarray(arrays[_PK_VALS], dtype=float)
@@ -354,12 +374,33 @@ class OpticalSolverCache:
         if self.autosave and self._unsaved >= self.autosave_every:
             self.flush()
 
-    def solve_sweep(self, design, geometry, assemble_at, lambdas, n_super, n_sub):
+    def __getattr__(self, name):
+        """Forward PUBLIC attributes the cache does not have to the inner solver (its capability flags
+        and diagnostics, e.g. native_carrier_grid, last_formulation). Private and dunder names are
+        never forwarded (they are the cache's own state; a half-built cache must not recurse)."""
+        if name.startswith("_") or name == "inner":
+            raise AttributeError(name)
+        try:
+            inner = object.__getattribute__(self, "inner")
+        except AttributeError:
+            raise AttributeError(name) from None
+        if name in OPTICAL_SOLVER_CAPABILITIES:              # resolved down the whole wrapper chain
+            return solver_capability(inner, name)
+        return getattr(inner, name)
+
+    @property
+    def solve_sweep(self):
         """Sweep-aware pass-through (audit S5-12: without this, wrapping a sweep-aware solver
         silently downgraded run_pipeline to per-wavelength solving). Cached wavelengths are
-        served from the store; the MISSING subset goes to the inner solve_sweep in one call."""
+        served from the store; the MISSING subset goes to the inner solve_sweep in one call.
+        Present only when the inner solver is sweep-aware: were it always present, run_pipeline
+        would take the sweep path for a cached per-wavelength solver such as the layered TMM and
+        fail with AttributeError on any multi-wavelength sweep."""
         if not hasattr(self.inner, "solve_sweep"):
             raise AttributeError("inner solver has no solve_sweep")
+        return self._solve_sweep
+
+    def _solve_sweep(self, design, geometry, assemble_at, lambdas, n_super, n_sub):
         lambdas = list(lambdas)
         results = [None] * len(lambdas)
         keys = []

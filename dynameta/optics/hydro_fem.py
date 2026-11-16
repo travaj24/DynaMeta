@@ -171,6 +171,11 @@ gap)`` that (i) is vacuum for large gaps (no tunneling) and (ii) turns metallic 
 the gap closes, so the enhancement is NON-MONOTONIC in gap size and PEAKS near ~1 nm -- the Esteban
 signature.  See :class:`QCMGapMaterial`.  Usable in BOTH this solver and any standard local FEM.
 
+SCOPE vs GRADED DENSITY: the psi = div J potential above is continuous across the metal, which is
+right only for a UNIFORM density; a z-graded conductor layer inside a 1-D-periodic structured cell
+is solved by optics.fem_2d_tm with an optics.fem_2d_tm_hydro.HydroConductor2D layer, whose
+continuous potential is the electrochemical psi of optics.nonlocal_tmm.
+
 Conventions: SI units, ``exp(-i*omega*t)`` (passive absorber ``Im(eps) > 0``), pure numpy/scipy
 cores, NGSolve imported LAZILY (only the FEM solvers need it), ASCII-only.
 

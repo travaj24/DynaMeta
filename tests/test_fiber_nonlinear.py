@@ -61,13 +61,13 @@ def test_sbs_linewidth_factor_doubles_threshold():
                            C=21.0, K=1.0, dnu_b_hz=30e6, dnu_source_hz=0.0)
     broad = sbs_threshold_W(80e-12, g_b=2e-11, length_m=LEN_50KM, alpha_per_m=ALPHA_02_DB_KM,
                             C=21.0, K=1.0, dnu_b_hz=30e6, dnu_source_hz=30e6)
-    assert np.isclose(broad / base, 2.0, rtol=1e-12)     # (1 + dnu_source/dnu_B) = 2
+    assert np.isclose(broad / base, 2.0, rtol=1e-12, atol=0)     # (1 + dnu_source/dnu_B) = 2
 
 
 def test_sbs_threshold_proportional_to_aeff():
     p1 = sbs_threshold_W(80e-12, g_b=2e-11, length_m=LEN_50KM, alpha_per_m=ALPHA_02_DB_KM, K=1.0)
     p2 = sbs_threshold_W(160e-12, g_b=2e-11, length_m=LEN_50KM, alpha_per_m=ALPHA_02_DB_KM, K=1.0)
-    assert np.isclose(p2 / p1, 2.0, rtol=1e-12)
+    assert np.isclose(p2 / p1, 2.0, rtol=1e-12, atol=0)
 
 
 def test_sbs_threshold_inverse_effective_length():
@@ -76,7 +76,7 @@ def test_sbs_threshold_inverse_effective_length():
     pb = sbs_threshold_W(80e-12, g_b=2e-11, length_m=lb, alpha_per_m=ALPHA_02_DB_KM, K=1.0)
     ratio_expected = (effective_length_m(lb, ALPHA_02_DB_KM)
                       / effective_length_m(la, ALPHA_02_DB_KM))
-    assert np.isclose(pa / pb, ratio_expected, rtol=1e-12)    # P_th ~ 1/L_eff exactly
+    assert np.isclose(pa / pb, ratio_expected, rtol=1e-12, atol=0)    # P_th ~ 1/L_eff exactly
 
 
 # ============================ GATE 2: SBS active amplifier =================================
@@ -119,7 +119,7 @@ def test_srs_passive_threshold_gate():
 def test_srs_backward_threshold_higher_than_forward():
     pf = srs_threshold_W(80e-12, g_r=0.6e-13, length_m=LEN_50KM, direction="forward")
     pb = srs_threshold_W(80e-12, g_r=0.6e-13, length_m=LEN_50KM, direction="backward")
-    assert np.isclose(pb / pf, 20.0 / 16.0, rtol=1e-12)
+    assert np.isclose(pb / pf, 20.0 / 16.0, rtol=1e-12, atol=0)
 
 
 def test_srs_stokes_redshift_and_gain_exponent():
@@ -133,7 +133,7 @@ def test_srs_stokes_redshift_and_gain_exponent():
     P *= 735.0 / trapz(P, z)
     out = srs_gain_exponent(_synth_result(z, P, 1.064e-6), fiber, 1.064e-6)
     # default g_R scales as 1e-13*(1e-6/lambda)
-    assert np.isclose(out["g_R"], raman_gain_coefficient(1.064e-6), rtol=1e-12)
+    assert np.isclose(out["g_R"], raman_gain_coefficient(1.064e-6), rtol=1e-12, atol=0)
     assert out["G_R"] > 0.0 and out["stokes_lambda_m"] > 1.064e-6
 
 
@@ -149,7 +149,7 @@ def test_tmi_scaling_exact_lambda_over_dcore_squared():
     # at IDENTICAL eta_heat / Gamma_ov the 85-um core is the pure (lambda/d_core)^2 scaling:
     # 1000 * (20/85)^2 = 55.36 W (NOT the ~250-300 W rod datum; see module docstring caveat).
     p85 = tmi_threshold_W(85e-6, 1.06e-6, 0.09, gamma_ov=0.5)
-    assert np.isclose(p85, 1000.0 * (20.0 / 85.0) ** 2, rtol=1e-9)
+    assert np.isclose(p85, 1000.0 * (20.0 / 85.0) ** 2, rtol=1e-9, atol=0)
     assert np.isclose(p85, 55.36, rtol=2e-3)
 
 
@@ -183,7 +183,7 @@ def test_drb_passive_uniform_closed_form():
     S, aR = 1.0e-3, 3.2e-5
     R = double_rayleigh_mpi(_synth_result(z, P), _dummy_fiber(), 1.55e-6, S=S, alpha_R=aR)
     closed = (aR * S) ** 2 * L ** 2 / 2.0
-    assert np.isclose(R, closed, rtol=1e-2)     # matches (alpha_R S)^2 L^2/2 to 1%
+    assert np.isclose(R, closed, rtol=1e-2, atol=0)     # matches (alpha_R S)^2 L^2/2 to 1%
 
 
 def test_drb_exponential_gain_closed_form():
@@ -195,7 +195,7 @@ def test_drb_exponential_gain_closed_form():
     # independent analytic oracle: for P=P0 e^{gz}, (P(z2)/P(z1))^2 = e^{2g(z2-z1)},
     # double integral over z1<z2 = (e^{2gL} - 1 - 2gL) / (4 g^2)
     oracle = (aR * S) ** 2 * (np.exp(2 * g * L) - 1.0 - 2 * g * L) / (4.0 * g * g)
-    assert np.isclose(R, oracle, rtol=5e-3)     # numerical integral matches oracle to 0.5%
+    assert np.isclose(R, oracle, rtol=5e-3, atol=0)     # numerical integral matches oracle to 0.5%
     assert 10.0 * np.log10(R) < -40.0           # well below the -40 dB acceptance floor
 
 
@@ -217,7 +217,7 @@ def test_rayleigh_alpha_and_capture_fraction():
     a1550 = float(rayleigh_alpha_per_m(1.55e-6))
     a1060 = float(rayleigh_alpha_per_m(1.06e-6))
     assert 2.5e-5 <= a1550 <= 5.0e-5
-    assert np.isclose(a1060 / a1550, (1.55 / 1.06) ** 4, rtol=1e-9)     # 1/lambda^4 scaling
+    assert np.isclose(a1060 / a1550, (1.55 / 1.06) ** 4, rtol=1e-9, atol=0)     # 1/lambda^4 scaling
     # capture fraction ~1e-3..1.6e-3 for a ~5 um SMF mode radius at 1550
     S = float(capture_fraction(1.55e-6, 5.2e-6))
     assert 1.0e-3 <= S <= 1.7e-3
@@ -227,13 +227,13 @@ def test_mpi_postprocessors():
     R = 1.0e-4                                   # -40 dB
     # beat variance: k_pol R (2 B_e / dnu_DRB)
     s2 = mpi_beat_variance_ratio(R, B_e=10.0e9, dnu_drb=1.0e11, k_pol=1.0)
-    assert np.isclose(s2, R * 2.0 * 10.0e9 / 1.0e11, rtol=1e-12)
+    assert np.isclose(s2, R * 2.0 * 10.0e9 / 1.0e11, rtol=1e-12, atol=0)
     # RIN Lorentzian: peak at f=0 is 4R/(pi dnu_s), half at f=dnu_s
     dnu_s = 1.0e6
     rin0 = mpi_rin_per_hz(R, 0.0, dnu_s)
     rin1 = mpi_rin_per_hz(R, dnu_s, dnu_s)
-    assert np.isclose(rin0, 4.0 * R / (np.pi * dnu_s), rtol=1e-12)
-    assert np.isclose(rin1 / rin0, 0.5, rtol=1e-12)
+    assert np.isclose(rin0, 4.0 * R / (np.pi * dnu_s), rtol=1e-12, atol=0)
+    assert np.isclose(rin1 / rin0, 0.5, rtol=1e-12, atol=0)
     # penalty small for a -40 dB, in-band-limited case; grows and diverges as Q^2 s2 -> 1
     assert mpi_power_penalty_dB(1.0e-5, Q=6.0) < 0.5
     assert mpi_power_penalty_dB(1.0 / 36.0 + 1e-9, Q=6.0) == float("inf")
@@ -285,7 +285,7 @@ def test_tmi_c0_default_is_a_length_in_metres():
     # doubling kappa (W/m/K) halves C0: the metre is carried by kappa's 1/m, nothing else
     P_th, d, lam, eta, gov, dndt = 1000.0, 20e-6, 1.06e-6, 0.09, 0.5, 1.2e-5
     c0 = lambda kap: P_th * eta * dndt * gov / ((lam / d) ** 2 * kap)
-    assert c0(2.76) == pytest.approx(TMI_C0_DEFAULT / 2.0, rel=1e-12)
+    assert c0(2.76) == pytest.approx(TMI_C0_DEFAULT / 2.0, rel=1e-12, abs=0)
 
 
 def test_raman_response_warns_when_dt_cannot_resolve_the_kernel():

@@ -126,12 +126,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
-from dynameta.core.layered import collapse_regions_to_layers, slice_eps_field
+from dynameta.core.lateral import is_laterally_uniform
+from dynameta.core.layered import collapse_regions_to_layers, slice_layer_eps_field
 from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       guard_conical_ppol as _guard_conical_ppol,
                                                       guard_incidence_side as _guard_incidence_side,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
+                                                      refuse_gain_half_space as _refuse_gain_half_space,
                                                       require_lumenairy as _require_lumenairy,
                                                       require_lumenairy_feature as _require_feature)
 from dynameta.optics.rasterize import cell_axes, layer_eps_cell, layer_eps_tensor_cell
@@ -735,7 +737,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
 
     Layer dispatch (design layers are bottom -> top; both 2-D PMM stacks are
     superstrate-side first -> reversed(), audit C5-1 -- and so is every
-    slice_eps_field consumer: the slicer returns ASCENDING-z substrate-first
+    slice_layer_eps_field consumer: the slicer returns ASCENDING-z substrate-first
     slabs, gated by the asymmetric-profile GATE C):
     laterally-uniform gridded EpsField (scalar OR tensor) -> reversed uniform slabs
     (a tensor slab is eps=(3, 3) on pure / a (1, 1, 3, 3) eps_tensor_cell on
@@ -765,6 +767,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
     taper_slices, taper_rule = _check_taper_args(taper_slices, taper_rule)
     lum = _require_lumenairy()
     n_super, n_sub = end_media_indices(design, lambda_m)
+    _refuse_gain_half_space("design_to_pmm2d_stack", n_super, n_sub)
     px = float(design.unit_cell.period_x_m)
     py = float(design.unit_cell.period_y_m)
     # mesh-region-keyed dicts (the run_pipeline/FEM bridge output) collapse to
@@ -815,7 +818,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
             v = ef.values_zyx
-            lat_uniform = bool(np.allclose(v, v[:, :1, :1], rtol=1e-12, atol=0.0))
+            lat_uniform = is_laterally_uniform(v)
             if not lat_uniform and engine == "pure":
                 raise ValueError(
                     "PMM2D bridge (pure): layer {!r} carries a laterally-"
@@ -823,9 +826,11 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                     "needs exact analytic walls, not a raster -- use "
                     "engine='hybrid' or the RCWA bridge".format(
                         L.name, "TENSOR " if getattr(ef, "is_tensor", False) else ""))
-            # slice_eps_field returns ascending-z (substrate-first) slabs; this
-            # stack is superstrate-first, so reverse (audit C5-1)
-            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
+            # slice_layer_eps_field returns ascending-z (substrate-first) slabs; this
+            # stack is superstrate-first, so reverse (unreversed slabs flip the profile). It raises unless the
+            # slabs sum to the layer thickness (axes in nm).
+            for slab in reversed(slice_layer_eps_field(ef, L, 1.0 / _S_NM,
+                                                       n_slices=n_slices)):
                 if slab.eps is not None:
                     stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 elif slab.eps_cell is not None:  # hybrid only (pure raised above)
@@ -833,7 +838,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                                     eps_cell=np.asarray(slab.eps_cell, dtype=complex))
                 else:
                     # TENSOR slab (2026-11-02): (1, 1, 3, 3) when laterally uniform
-                    # (slice_eps_field's own collapse), else an (Nx, Ny, 3, 3) raster
+                    # (the slicer's own collapse), else an (Nx, Ny, 3, 3) raster
                     cell = np.asarray(slab.eps_tensor_cell, dtype=complex)
                     if engine == "pure":
                         if cell.shape[:2] != (1, 1):
@@ -1046,4 +1051,20 @@ def make_lumenairy_pmm2d_solver(*, engine: str = "pure", n_modes: int = 8,
         return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
 
     _solve.solve_sweep = _solve_sweep
+    # the answer-changing settings, so two PMM2D solvers
+    # with different settings never share result-cache keys (there was no fingerprint: the cache
+    # warned and keyed every PMM2D solver alike)
+    _solve.cache_fingerprint = (
+        "pmm2d(engine={},n_modes={},degree={},n_orders={},formulation={},n_slices={},cell_samples={},"
+        "pure_max_cells={},absorption={},pure_grid={},pure_circle_core={},taper_slices={},"
+        "taper_rule={})".format(engine, n_modes, degree, n_orders, formulation, n_slices, cell_samples,
+                                pure_max_cells, absorption, pure_grid, pure_circle_core, taper_slices,
+                                taper_rule))
+    # the 2-D modal route slices a carrier field on its native (non-uniform) z grid exactly like the
+    # other layered routes, so it declares the capability and run_pipeline hands it the native carrier
+    # grid (one PMM2D layer per native interval): on the generic gated film of
+    # tests/test_cross_route_uniform_film.py it agrees with TMM / Berreman to 2.3e-14. A uniform
+    # 32-point grid is cheaper and resolves a graded film less well;
+    # carrier_solve_kwargs={'grid_n_z': 32} selects it.
+    _solve.native_carrier_grid = True
     return _solve

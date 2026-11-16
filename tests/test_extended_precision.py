@@ -254,7 +254,10 @@ def test_layered_builder_switch():
     d = build_reference_modulator("drift_diffusion")
     assert LayeredDevsimBuilder(d, mesh_name="lb_m", device_name="lb_d").extended_precision is False
     b = LayeredDevsimBuilder(d, mesh_name="lb_m", device_name="lb_d", extended_precision=True)
-    with E.quiet():
+    # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
+    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg,
+    # so building it warns once
+    with E.quiet(), pytest.warns(AdvisoryWarning, match="density-dependent"):
         b.build_device()
     try:
         assert XP.is_enabled("lb_d")
@@ -272,7 +275,12 @@ def test_stacked3d_spec_switch(monkeypatch, tmp_path):
     from validation._reference_device import build_reference_modulator
     from dynameta.carriers import devsim_3d as D3
     d = build_reference_modulator("equilibrium")
-    assert D3.Stacked3DSpec.from_design(d).extended_precision is False
+    # v0.16 DOS-mass-at-n_bg guard (docs/audit/2026-11-14-v0.16-carrier-wiring.md): the film DOS mass of the
+    # shared validation device (validation/_reference_device.ito_dos_mass) varies by 78 % over [0.1, 10] n_bg,
+    # so building it warns once
+    # (once per material instance: the first from_design only)
+    with pytest.warns(AdvisoryWarning, match="density-dependent"):
+        assert D3.Stacked3DSpec.from_design(d).extended_precision is False
     spec = D3.Stacked3DSpec.from_design(d, extended_precision=True)
     assert spec.extended_precision is True
 

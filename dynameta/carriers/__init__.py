@@ -19,7 +19,19 @@ builder. Use named imports on a devsim-free install.
 """
 
 __all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis", "noise_analysis", "transient",
-           "lc_director", "lc_director_2d", "lc_dynamics", "carrier_heating", "llg"]
+           "lc_director", "lc_director_2d", "lc_dynamics", "carrier_heating", "llg",
+           "DualGateSchrodingerPoisson", "GateStack", "sp_dual_gate",
+           # v0.16: the new carrier option specs, importable from dynameta.carriers
+           "OxideBarrier", "DualGateSolution", "DualGateConvergenceError", "GateLeakage", "LeakageTable",
+           "EquilibriumDensityGradient", "FilmInterfaceTraps"]
+
+# pure-numpy classes re-exported lazily (name -> defining submodule); no devsim behind them (importing each
+# defining submodule leaves devsim unloaded: tests/test_audit_2026_07_25_carriers_hygiene.py)
+_LAZY_CLASSES = {"DualGateSchrodingerPoisson": "sp_dual_gate", "GateStack": "sp_dual_gate",
+                 "OxideBarrier": "sp_dual_gate", "DualGateSolution": "sp_dual_gate",
+                 "DualGateConvergenceError": "sp_dual_gate",
+                 "GateLeakage": "gate_leakage", "LeakageTable": "gate_leakage",
+                 "EquilibriumDensityGradient": "density_gradient", "FilmInterfaceTraps": "physics_traps"}
 
 
 _SUBMODULES = None                       # names of this package's submodules (filled on first use)
@@ -44,6 +56,8 @@ def __getattr__(name):
     import importlib
     if name == "LayeredDevsimBuilder":
         return importlib.import_module("dynameta.carriers.devsim_layered").LayeredDevsimBuilder
+    if name in _LAZY_CLASSES:
+        return getattr(importlib.import_module("{}.{}".format(__name__, _LAZY_CLASSES[name])), name)
     if not name.startswith("__") and name in _submodules():
         return importlib.import_module("{}.{}".format(__name__, name))
     raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

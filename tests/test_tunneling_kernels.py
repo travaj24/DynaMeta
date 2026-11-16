@@ -87,7 +87,7 @@ def test_k2_fn_reduction_second_order_series(F):
     jfn, B = _fn_ref(F)
     # the code's FN is Lenzlinger-Snow; it uses the CODATA-ROUNDED hbar literal (6e-10 rel vs h/2pi),
     # which the exponent amplifies by b ~ 16-60 -> agreement to ~4e-8, not machine precision
-    assert fowler_nordheim_current(F) == pytest.approx(jfn, rel=1e-7)
+    assert fowler_nordheim_current(F) == pytest.approx(jfn, rel=1e-7, abs=0)
     b = B / F
     series = 1 - 1 / b + 19 / (9 * b ** 2) - 20 / (3 * b ** 3)
     assert abs(j / jfn - series) <= 40.0 / b ** 4
@@ -104,7 +104,7 @@ def test_k3_crossover_schuegraf_hu_fn_and_tsu_esaki():
     V_lo = np.array([1.0, 1.5, 2.0, 2.8])
     u = V_lo / PHI
     assert np.allclose(schuegraf_hu_current(V_lo, t),
-                       direct_tunneling_current(V_lo, t) / (1 - np.sqrt(1 - u)) ** 2, rtol=1e-13)
+                       direct_tunneling_current(V_lo, t) / (1 - np.sqrt(1 - u)) ** 2, rtol=1e-13, atol=0)
     # Tsu-Esaki (0 K, metal supply) approaches the K2 series as the barrier turns triangular
     _, B = _fn_ref(1.0)
     dev, b4 = [], []
@@ -437,13 +437,13 @@ def test_k11_pair_noise_is_the_landauer_buttiker_partition(xs, dlt):
     xg = xs - dlt
     r = tsu_esaki_two_sided(_grid(xs, xg), [xs], [xg], [list(d)], _layers(lay))
     ref = _noise_ref(xs, xg, d, lay)
-    assert r.S[0] == pytest.approx(ref, rel=1e-8)
+    assert r.S[0] == pytest.approx(ref, rel=1e-8, abs=0)
     if dlt == 0.0:
         assert r.J[0] == 0.0 and 2 * Q * abs(r.J[0]) == 0.0
-        assert r.S[0] == pytest.approx(4 * KT300 * (Q / KT300) * r.dJ_dxs[0], rel=1e-12)
+        assert r.S[0] == pytest.approx(4 * KT300 * (Q / KT300) * r.dJ_dxs[0], rel=1e-12, abs=0)
         one_sided = 2 * Q * (r.J_fwd[0] + r.J_bwd[0])
         print("K11 one-sided / exact at x_s = {}: {:.6f}".format(xs, one_sided / r.S[0]))
         if xs > 0:
             assert one_sided / r.S[0] - 1 > 0.05
     if dlt > 40:
-        assert r.S[0] == pytest.approx(2 * Q * r.J[0], rel=1e-15)
+        assert r.S[0] == pytest.approx(2 * Q * r.J[0], rel=1e-15, abs=0)

@@ -422,7 +422,7 @@ def test_gate_e_continuous_and_thermionic_converge_as_the_barrier_vanishes(isoty
     for tag, top in ISO_CASES:
         te, ct = isotype[(tag, "thermionic", 1.0)], isotype[(tag, "continuous", 1.0)]
         _r_bulk, r_te, _phi = _iso_oracle(te["prof"], top)
-        assert (1.0 / te["g"] - 1.0 / ct["g"]) == pytest.approx(r_te, rel=1e-2), tag   # MEASURED <= 2.4e-3
+        assert (1.0 / te["g"] - 1.0 / ct["g"]) == pytest.approx(r_te, rel=1e-2, abs=0), tag   # MEASURED <= 2.4e-3
         ratios.append(te["g"] / ct["g"])
     assert all(a < b for a, b in zip(ratios, ratios[1:])), ratios      # monotone toward 1 as dE_c -> 0
     for tag in ("algaas", "x000"):

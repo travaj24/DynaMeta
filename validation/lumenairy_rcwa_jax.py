@@ -117,10 +117,16 @@ def main():
     # raster), not the twin's cell, so GATE A would compare two models instead of two code paths.
     # The 2026-11-02 raster-lattice change (default S = max(128, 8 N)) does not touch this: an
     # explicit cell_samples keeps the old max(cell_samples, 4 N + 1, 128) = 128 at N_ORD = 5, and
-    # the default would be 128 too (N <= 16).
+    # the default would be 128 too (N <= 16). v0.16: the bridge's default raster became the
+    # AREA-weighted node-lattice raster and its default rule formulation='auto'; the twin paints
+    # the cell-centred POINT raster, and its own default is 'auto' where Li's rule traces
+    # (lumenairy 5.51) and 'laurent' elsewhere, so both sides are pinned to the point raster and
+    # Laurent -- like with like. (The twin default's AD-vs-FD consistency is gated in
+    # tests/test_lumenairy_feature_detection.py.)
     def bridge_R(thick, eps_ridge):
         r = make_lumenairy_rcwa_solver(n_orders=N_ORD, cell_samples=SX,
-                                       inclusion_model="raster")(
+                                       inclusion_model="raster", raster_sampling="point",
+                                       formulation="laurent")(
             _design(float(thick), float(eps_ridge)), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
         return r.R, r.T
 
@@ -128,7 +134,7 @@ def main():
         cell = jnp.where(mask, eps_ridge + 0.0j, 1.0 + 0.0j)
         return rcwa_stack_RT([(cell, thick)], LAM, n_substrate=1.5 + 0j,
                              n_superstrate=1.0 + 0j, period_x=PER,
-                             n_orders=N_ORD, row=0)
+                             n_orders=N_ORD, row=0, formulation="laurent")
 
     # ---- GATE A: twin forward == the non-JAX bridge solve (independent lumenairy path) ----
     Rb, Tb = bridge_R(T0, EPS_RIDGE)

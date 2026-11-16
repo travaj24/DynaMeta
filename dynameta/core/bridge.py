@@ -29,6 +29,61 @@ from dynameta.constants import SOLVER_TIME_CONVENTION  # noqa: E402  (single sou
 from dynameta.warning_types import AdvisoryWarning
 
 
+def _film_thicknesses(field, alignment) -> Dict[str, float]:
+    """{mesh_region: thickness [m] of the whole film it belongs to}, for regions that are PART of a film split
+    into several contiguous carrier regions of the same material (boundary scattering needs the whole film's
+    thickness, not each part's own extent, which would be t/2 for a film split in two). Regions that are a
+    whole film are absent (their own stack-axis extent is the film)."""
+    spans = []
+    for ra in alignment.region_alignments:
+        reg = field.regions.get(ra.source_region)
+        if reg is None:
+            continue
+        spans.append((ra.mesh_region, reg.material, float(ra.bbox_m[4]), float(ra.bbox_m[5])))
+    out: Dict[str, float] = {}
+    for mat in {m for _r, m, _a, _b in spans}:
+        mine = sorted((a, b, r) for r, m, a, b in spans if m == mat)
+        groups, cur = [], [mine[0]]
+        for item in mine[1:]:
+            tol = 1e-9 * max(cur[-1][1] - cur[-1][0], item[1] - item[0])
+            if item[0] <= max(c[1] for c in cur) + tol:
+                cur.append(item)
+            else:
+                groups.append(cur)
+                cur = [item]
+        groups.append(cur)
+        for g in groups:
+            if len({r for _a, _b, r in g}) > 1:
+                d = max(b for _a, b, _r in g) - min(a for a, _b, _r in g)
+                for _a, _b, r in g:
+                    out[r] = d
+    return out
+
+
+def _position_fields(n_to_eps, material_name: str, z_axis_m, extra_fields,
+                     film_thickness_m=None) -> Dict[str, object]:
+    """v0.16: {STACK_AXIS_FIELD: z axis [m] of the density grid's LAST axis} when the region's material
+    asks for it (an optical model with needs_position, e.g. DrudeOptical with BoundaryScattering), else {}
+    -- so every other material receives exactly the bundle it did before. The material is looked up
+    through the map's `materials` registry (MaterialEpsMap / EffectEpsMap); a bring-your-own map without
+    one gets nothing, and a model that needs the axis then raises its own clear error."""
+    from dynameta.materials.optical_model import FILM_THICKNESS_FIELD, STACK_AXIS_FIELD
+    reg = getattr(n_to_eps, "materials", None)
+    if reg is None or material_name not in reg:
+        return {}
+    if not getattr(reg.get(material_name).optical, "needs_position", False):
+        return {}
+    for key in (STACK_AXIS_FIELD, FILM_THICKNESS_FIELD):
+        if extra_fields and key in extra_fields:
+            raise ValueError("assemble_eps: extra_fields key {!r} is reserved for the position data the "
+                             "assembler supplies to material '{}'; rename the field.".format(
+                                 key, material_name))
+    out = {STACK_AXIS_FIELD: np.asarray(z_axis_m, dtype=np.float64)}
+    if film_thickness_m is not None:
+        out[FILM_THICKNESS_FIELD] = float(film_thickness_m)
+    return out
+
+
 def assemble_eps(field: CarrierField,
                    alignment: GeometryAlignment,
                    n_to_eps: NToEpsMap,
@@ -71,6 +126,7 @@ def assemble_eps(field: CarrierField,
 
     to_u = alignment.unit_scale.to_units     # audit X-14: the UnitScale conversion API, not `/ mpp`
     out: Dict[str, EpsField] = {}
+    film_d = _film_thicknesses(field, alignment)
 
     for ra in alignment.region_alignments:
         if ra.source_region not in field.regions:
@@ -119,7 +175,10 @@ def assemble_eps(field: CarrierField,
                         "Resample the companion field onto the carrier grid first.".format(
                             _k, _arr.shape, np.shape(n_grid)))
                 extras_3d[_k] = _v
-            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_grid, **extras_3d},
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_grid, **extras_3d,
+                                                      **_position_fields(n_to_eps, reg.material,
+                                                                         z3_m, extra_fields,
+                                                                         film_d.get(ra.mesh_region))},
                                        lambda_m)                                # (Nx,Ny,Nz)
         else:
             # 2D (x, v=through-stack) carrier solve -> the FieldLift synthesizes
@@ -177,7 +236,10 @@ def assemble_eps(field: CarrierField,
                             _k, _arr.shape, np.shape(n_grid)))
                 else:
                     extras_lifted[_k] = _v
-            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_3d, **extras_lifted},
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_3d, **extras_lifted,
+                                                      **_position_fields(n_to_eps, reg.material,
+                                                                         z3_m, extra_fields,
+                                                                         film_d.get(ra.mesh_region))},
                                        lambda_m)                               # (Nx,Ny,Nz)
 
         # A field-effect EffectModel driven by a UNIFORM extra field (e.g. a uniform gate E for

@@ -27,7 +27,8 @@ whose 1-D device builders and closed forms this script reuses so the two cannot 
           1.29 x oxide) and the discrete capacitances with them; refinement did not help (mesh_min
           0.25 / 0.5 / 1 nm: 0.79 / 0.79 / 0.77). docs/audit/2026-11-03-devsim-3d-mesh.md.
 
-Run:  python -m validation.traps_oracles [--3d] [--main <path to a main checkout>]
+Run:  python -m validation.traps_oracles [--3d] [--main <path to a pre-traps checkout>]
+      (gates E'/F run only with an explicit --main; without it they SKIP with that reason)
 """
 import argparse
 import hashlib
@@ -59,7 +60,10 @@ def _load():
         spec.loader.exec_module(T)
         PT = T.PT
     return T
-DEFAULT_MAIN = os.path.join(os.path.dirname(os.path.dirname(HERE)), "DynaMeta")
+# E'/F need a checkout of the PRE-traps code, named explicitly with --main. It used to default to a guessed
+# sibling folder (<parent of the repo's parent>/DynaMeta), which on a workstation can hold ANY version -- a
+# newer working copy there turned E' red for an environment reason. No default now: without --main the two
+# cross-version gates SKIP with that reason (on CI there is no such checkout either way).
 
 
 # ------------------------------------------------------------------------------------------------
@@ -464,11 +468,16 @@ def gate_g(it=None, mesh_min_nm=0.5):
 
 
 # ------------------------------------------------------------------------------------------------
-def main():
+def _parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--3d", dest="three_d", action="store_true")
-    ap.add_argument("--main", default=DEFAULT_MAIN)
-    a = ap.parse_args()
+    ap.add_argument("--main", default=None,
+                    help="path to a checkout of the pre-traps code (gates E'/F); not guessed, they skip without it")
+    return ap
+
+
+def main():
+    a = _parser().parse_args()
     H = Harness("trp", "D1c TRAPS: bulk SRH(E_t), multi-level, trap charge, interface traps (D_it)")
     H.require(importlib.util.find_spec("devsim") is not None, "devsim not installed")
     H.require(importlib.util.find_spec("scipy") is not None, "scipy not installed")
@@ -502,7 +511,7 @@ def main():
                             "must exceed its gate)".format(la, lb, ldv, lsmax, abs(lefb), lws))
 
     H.run("E old physics fails A/B/C1/C2/C3/D", _legacy)
-    if os.path.isdir(os.path.join(a.main, "dynameta")):
+    if a.main is not None and os.path.isdir(os.path.join(a.main, "dynameta")):
         out = _old_tree_rejects(a.main)
         print("[trp]   old tree probe: " + " | ".join(out.split("\n")), flush=True)
         H.gate("E' old module cannot express traps", "IMPORT_FAIL" in out and "ET_KW False" in out,
@@ -531,7 +540,9 @@ def main():
             else:
                 print("[trp]   REPORT default-statistics run failed: rc {} {}".format(rcd, ed), flush=True)
     else:
-        H.skip("E'/F cross-version", "no main checkout at {} (--main)".format(a.main))
+        H.skip("E'/F cross-version",
+               "no --main given (a pre-traps checkout is never guessed)" if a.main is None
+               else "no dynameta package under --main {}".format(a.main))
     if a.three_d:
         print("[trp] --- G: 3-D Stacked3DSpec(interface_traps) vs the 1-D cap", flush=True)
         s3, s1, dg = gate_g()

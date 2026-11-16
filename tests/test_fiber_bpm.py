@@ -155,9 +155,9 @@ def test_duct_parameter_is_thermal_lens_focal_power_per_m():
     assert 2.0 * 1.2e-5 * float(dT[0] - dT[1]) / (A_CORE ** 2 * N_CLAD) == pytest.approx(
         d_prime, rel=1e-12)
     assert quadratic_duct_period_m(d_prime) == pytest.approx(2.0 * np.pi / np.sqrt(d_prime),
-                                                             rel=1e-15)
+                                                             rel=1e-15, abs=0)
     assert quadratic_duct_radius_m(d_prime, LAM_S, N_CLAD) == pytest.approx(
-        np.sqrt(2.0 / (2.0 * np.pi / LAM_S * N_CLAD * np.sqrt(d_prime))), rel=1e-15)
+        np.sqrt(2.0 / (2.0 * np.pi / LAM_S * N_CLAD * np.sqrt(d_prime))), rel=1e-15, abs=0)
 
 
 # ============================ the normalization contract ==================================
@@ -168,7 +168,7 @@ def test_field_normalization_contract_is_integral_E2_dA_equals_power():
     b = GainBPM(_smith_yb(), _fiber(), [Pump(100.0, LAM_P, "fwd", cladding=True)],
                 [Signal(3.0, LAM_S)], n_grid=64, extent_m=150e-6)
     assert b.power_W(b.launch_field()) == pytest.approx(3.0, rel=1e-12)
-    assert b.power_W(b.launch_field(power_W=0.25)) == pytest.approx(0.25, rel=1e-12)
+    assert b.power_W(b.launch_field(power_W=0.25)) == pytest.approx(0.25, rel=1e-12, abs=0)
     assert b.power_W(b.launch_field(w_m=12e-6)) == pytest.approx(3.0, rel=1e-12)
     # the intensity really is W/m^2: a top-hat-free check via the peak of a known Gaussian
     E = b.launch_field(power_W=1.0, w_m=15e-6)
@@ -204,7 +204,7 @@ def test_result_mode_powers_helper_reads_the_output_field():
     assert isinstance(r, BPMResult)
     assert float(r.mode_powers_W([m01])[0]) == pytest.approx(1.0, rel=1e-2)
     assert abs(r.mode_amp_sqrtW[0, -1]) ** 2 == pytest.approx(float(r.mode_powers_W([m01])[0]),
-                                                              rel=1e-12)
+                                                              rel=1e-12, abs=0)
 
 
 # ============================ energy accounting ===========================================
@@ -238,7 +238,7 @@ def test_background_loss_is_applied_exactly_once_on_the_gain_support():
     b = GainBPM(None, fib, [], [Signal(1.0, LAM_S)], n_grid=64, extent_m=150e-6,
                 gain_model=lambda I: 0.0 * I, absorber=False, index_taper_cells=2.0)
     r = b.solve(n_steps=100, n_samples=5)
-    assert r.P_signal_W[-1] / r.P_signal_W[0] == pytest.approx(np.exp(-loss * L), rel=1e-12)
+    assert r.P_signal_W[-1] / r.P_signal_W[0] == pytest.approx(np.exp(-loss * L), rel=1e-12, abs=0)
     assert float(np.max(np.abs(r.energy_residual_W)) / r.P_signal_W[0]) < 1e-12
     # and with the rate-equation medium on, the ledger (whose exchange term is a closed form in g
     # and the entering field) must still close, and the loss must cost the lossless twin its dB
@@ -329,7 +329,7 @@ def test_undersampled_core_is_refused_not_answered():
 def test_default_window_covers_the_pump_cladding_and_the_taper_is_reported():
     b = GainBPM(_smith_yb(), _fiber(), [Pump(100.0, LAM_P, "fwd", cladding=True)],
                 [Signal(1.0, LAM_S)], n_grid=256, index_taper_cells=2.0)
-    assert b.extent_m == pytest.approx(2.0 * 100e-6, rel=1e-12)
+    assert b.extent_m == pytest.approx(2.0 * 100e-6, rel=1e-12, abs=0)
     with _absorbing():
         r = b.solve(n_steps=2, n_samples=2)
     assert r.meta["index_taper_cells"] == 2.0
@@ -341,7 +341,7 @@ def test_default_window_covers_the_pump_cladding_and_the_taper_is_reported():
                  [Signal(1.0, LAM_S)], n_grid=256)
     assert b0.index_taper_cells == 0.0
     assert float(np.ptp(np.unique(b0.n_xy))) == pytest.approx(
-        np.sqrt(N_CLAD ** 2 + NA ** 2) - N_CLAD, rel=1e-12)
+        np.sqrt(N_CLAD ** 2 + NA ** 2) - N_CLAD, rel=1e-12, abs=0)
 
 
 def test_automatic_step_count_is_refused_when_it_would_be_absurd():
@@ -369,13 +369,13 @@ def test_transverse_refinement_tightens_the_suggested_longitudinal_step():
     b1 = GainBPM(*args, n_grid=128, extent_m=150e-6)
     b2 = GainBPM(*args, n_grid=256, extent_m=150e-6)
     assert b1.transverse_nyquist_step_m() == pytest.approx(
-        2.0 * b1.k * b1.dx ** 2 / np.pi, rel=1e-12)
+        2.0 * b1.k * b1.dx ** 2 / np.pi, rel=1e-12, abs=0)
     assert b2.transverse_nyquist_step_m() == pytest.approx(
-        b1.transverse_nyquist_step_m() / 4.0, rel=1e-12)
+        b1.transverse_nyquist_step_m() / 4.0, rel=1e-12, abs=0)
     assert b2.suggested_step_m() < b1.suggested_step_m()
     rep = b1.sampling_report()
     assert rep["transverse_nyquist_dz_m"] == pytest.approx(b1.transverse_nyquist_step_m(),
-                                                           rel=1e-15)
+                                                           rel=1e-15, abs=0)
     assert rep["suggested_dz_m"] <= rep["transverse_nyquist_dz_m"]
 
 
