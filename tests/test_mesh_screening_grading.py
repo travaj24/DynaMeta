@@ -254,7 +254,7 @@ def test_screening_grading_converges_at_second_order():
 # C: "legacy" = the v0.15.1 mesh lines, exactly
 # ---------------------------------------------------------------------------------------------------
 
-# add_2d_mesh_line calls (dir, pos, ns, ps) of the v0.15.1 builder (origin/main ebdfe5c, captured by loading
+# add_2d_mesh_line calls (dir, pos, ns, ps) of the v0.15.1 builder (origin/main 2e1af87, captured by loading
 # that commit's devsim_layered.py) on the fixture with a 6 nm and a 20 nm film
 _V0151_Y = {
     6e-9: [(0.0, 5e-11, 5e-11), (8e-10, 5e-10, 5e-10), (7.920000000000001e-08, 5e-10, 5e-10), (4e-08, 5e-10, 5e-10),

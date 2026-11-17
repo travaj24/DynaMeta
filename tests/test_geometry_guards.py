@@ -1,7 +1,7 @@
 """Stack.features / Inclusion.taper capability guards + the sidewall-taper data model (2026-11-02,
 workstream B2 of the lumenairy-5.50 bridge PR).
 
-THE DEFECT (measured on 7bfea2e, 300 nm cell, 120 + 80 nm lossless layers, one 100 x 100 nm Cu via
+THE DEFECT (measured on 387d722, 300 nm cell, 120 + 80 nm lossless layers, one 100 x 100 nm Cu via
 spanning z 0..200 nm, 1.31 um, normal incidence): the TMM solver / design_layer_stack /
 layered_stack_from_design, the RCWA, 1-D PMM, 2-D PMM, Berreman and EMT-screen bridges,
 design_to_fdtd_layers and the 2-D FDTD solver ALL ran and returned R/T bit-identical (repr) to the
@@ -14,7 +14,7 @@ its hybrid engine keeps refusing (the 'pmm2d_hybrid' row below).
 
 BYTE-IDENTITY: a plain (untapered, feature-free) design is unchanged -- the cache key, the TMM and
 RCWA-bridge R/T/phase and the FEM builder's mesh were measured equal (repr) before/after the change;
-the values pinned below are the 7bfea2e ones.
+the values pinned below are the 387d722 ones.
 
 Run: python -m pytest -p no:benchmark -q tests/test_geometry_guards.py
 """
@@ -226,7 +226,7 @@ def test_s4_27_device_symmetry_and_fem_hint_see_stack_features():
 # ================================================================================== cache key
 def test_cache_key_untapered_is_byte_identical_and_taper_is_keyed():
     from dynameta.cache import _key
-    # measured at 7bfea2e (before Inclusion.taper existed): untapered keys must not move, or every
+    # measured at 387d722 (before Inclusion.taper existed): untapered keys must not move, or every
     # existing on-disk OpticalSolverCache would silently go cold
     assert _key(_pillar(), {}, LAM, 1.0, 1.5, "t") == "keb8125610c11767a53185004333b3b755b13f3ed"
     assert _key(_uniform(), {}, LAM, 1.0, 1.5, "t") == "kdcc22f022f85832787ce5e7e7addbe1a6c6427fc"
@@ -421,7 +421,7 @@ def test_devsim_builders_refuse(builder):
 def test_plain_design_results_unchanged_tmm():
     from dynameta.optics.tmm_reference import make_layered_tmm_solver
     r = make_layered_tmm_solver()(_uniform(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-    # 7bfea2e: repr-identical before/after on the dev box; pinned to 1e-13 for cross-platform BLAS
+    # 387d722: repr-identical before/after on the dev box; pinned to 1e-13 for cross-platform BLAS
     assert (r.R, r.T, r.phase_deg) == pytest.approx(
         (0.21836293389267467, 0.7553376188167926, -163.10821764266944), abs=1e-13)
 
@@ -429,11 +429,11 @@ def test_plain_design_results_unchanged_tmm():
 @needs_lum
 def test_plain_design_results_unchanged_rcwa_bridge():
     from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
-    # inclusion_model='raster' EXPLICITLY: this pins the 7bfea2e point-raster numbers (its purpose
+    # inclusion_model='raster' EXPLICITLY: this pins the 387d722 point-raster numbers (its purpose
     # is byte-identity of the plain-design raster path). Since v0.13.0 the default is 'auto', which
     # solves this rectangle pillar analytically (R 0.19094726805155943 -- 8.3e-5 from the S = 128
     # raster, the raster's edge-quantization error; 2026-11-02). n_orders 5 <= 16, so the
-    # 2026-11-02 raster lattice max(128, 8 N) is the same S = 128 as at 7bfea2e. v0.16: the
+    # 2026-11-02 raster lattice max(128, 8 N) is the same S = 128 as at 387d722. v0.16: the
     # point raster is raster_sampling='point' (explicit here); the new default area-weighted
     # node-lattice raster gives R 0.19092953372781601 / T 0.7791819309495345 on this pillar
     # (1.8e-5 from the analytic layer, against 8.3e-5 for the point raster). The pillar is a
@@ -454,4 +454,4 @@ def test_plain_design_fem_mesh_unchanged():
     g = LayeredOpticalBuilder(_pillar()).build()
     if ngsolve.__version__ != "6.2.2608":
         pytest.skip("element counts pinned on ngsolve 6.2.2608 (got {})".format(ngsolve.__version__))
-    assert (g.mesh.ne, g.mesh.nv) == (1073, 279)                     # 7bfea2e, measured
+    assert (g.mesh.ne, g.mesh.nv) == (1073, 279)                     # 387d722, measured

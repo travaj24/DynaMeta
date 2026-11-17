@@ -23,7 +23,7 @@ Pluggable Stage-1 DC solve methods.
              validation/gated_dd.py (1D), gated_dd_2d.py (2D full-edge ohmic
              ground), gated_dd_builder.py (the reference metasurface). (The
              physics_drift_diffusion KNOWN LIMITATION marker this caveat once
-             cited was removed 2d0b213, 2026-06-02.) "newton" stays the default.
+             cited was removed abb7255, 2026-06-02.) "newton" stays the default.
              UNIPOLAR ONLY: a device carrying HoleContinuityEquation is REFUSED with a
              ValueError naming method="newton" (audit C-15).
 

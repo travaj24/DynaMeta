@@ -4,7 +4,7 @@ The PMM bridge refused a laterally structured tunable layer; PMMStack's converge
 unreachable (the bridge passed the `n_orders=` alias); the bridge sliced gridded fields without the
 slab-thickness guard.
 
-ON v0.15.1 (commit ebdfe5c, lumenairy 5.50.x) every bridge-level gate below that uses a new keyword
+ON v0.15.1 (commit 2e1af87, lumenairy 5.50.x) every bridge-level gate below that uses a new keyword
 fails with TypeError (unexpected keyword), every laterally structured field raised "carries a
 laterally-structured gridded EpsField", the metre-axis field returned r = -0.849411+0.035236i with
 no error (degree 24; the nm-axis field gives -0.234953-0.460540i), and the kernel module
@@ -226,7 +226,7 @@ def test_z_interval_harmonic_and_laminate_z():
 # bit-identity with v0.15.1 for every input the old bridge accepted (same-tree A/B)
 # =============================================================================================
 def _legacy_stack(design, ebr, *, degree=16, n_orders=21, n_slices=None):
-    """design_to_pmm_stack as shipped in v0.15.1 (ebdfe5c), rebuilt here."""
+    """design_to_pmm_stack as shipped in v0.15.1 (2e1af87), rebuilt here."""
     import lumenairy as lum
     from dynameta.core.layered import collapse_regions_to_layers, slice_eps_field
     from dynameta.optics.lumenairy_bridge.pmm_backend import layer_to_pmm_segments
