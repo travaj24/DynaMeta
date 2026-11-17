@@ -156,7 +156,9 @@ def test_uniform_leakage_gives_the_parabolic_profile_one_contact(parabola):
     assert r["gates"]["top"]["I"] == pytest.approx(J0 * P_PARA, rel=1e-12, abs=0)          # A/m (per unit depth)
     assert r["contacts"]["gnd"] == pytest.approx(-J0 * P_PARA, rel=1e-12, abs=0)
     assert abs(r["balance_rel"]) < 1e-12
-    assert r["P_terminals"] == pytest.approx(r["P_joule"] + r["P_tunnel"], rel=1e-9, abs=0)
+    # Every terminal sits at 0 V, so P_terminals is exactly 0.0 and P_joule + P_tunnel cancel to round-off: the
+    # balance is stated against the magnitude of the two terms, not against their (zero) sum.
+    assert abs(r["P_terminals"] - (r["P_joule"] + r["P_tunnel"])) <= 1e-9 * (abs(r["P_joule"]) + abs(r["P_tunnel"]))
 
 
 def test_uniform_leakage_gives_the_parabolic_profile_two_contacts(parabola):
